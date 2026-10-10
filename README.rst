@@ -13,7 +13,9 @@ the WARP/IEC 61851 control path.
 The extension is experimental and has not yet been validated on real WARP4
 and Tesla hardware. It must not be treated as an official Tinkerforge release.
 See ``TESLA_BLE_HANDOFF.md`` for architecture, build instructions, pairing,
-licensing and the hardware validation checklist.
+licensing and the hardware validation checklist. Read
+``HARDWARE_COMPATIBILITY_AND_RECOVERY.md`` before considering an installation;
+it documents supported hardware boundaries, firmware risks and recovery.
 
 This repository contains the firmware source code for all Tinkerforge
 products that are based on the ESP32 Brick or ESP32 Ethernet Brick.
