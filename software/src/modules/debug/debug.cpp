@@ -1,0 +1,1588 @@
+/* esp32-firmware
+ * Copyright (C) 2020-2021 Erik Fleckstein <erik@tinkerforge.com>
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, write to the
+ * Free Software Foundation, Inc., 59 Temple Place - Suite 330,
+ * Boston, MA 02111-1307, USA.
+ */
+
+#include "debug.h"
+
+#include <esp_debug_helpers.h>
+#include <esp_system.h>
+#include <esp_task.h>
+#include <esp_flash.h>
+#include <esp_flash_internal.h>
+#include <esp_psram.h>
+#include <esp32/himem.h>
+#include <LittleFS.h>
+#include <lwipopts.h>
+#include <soc/rtc.h>
+#include <soc/spi_reg.h>
+#include <spi_flash_chip_driver.h>
+#include <freertos/task.h>
+
+#ifdef DEBUG_FS_ENABLE
+#include <mbedtls/ssl.h>
+#endif
+
+// lwip_socket_dbg_get_socket() in sockets_priv.h is not declared extern "C".
+extern "C" {
+#include <lwip/priv/sockets_priv.h>
+}
+
+#include "event_log_prefix.h"
+#include "config/slot_allocator.h"
+#include "generated/module_dependencies.h"
+#include "tools/backtrace.h"
+#include "tools/string_builder.h"
+#include "tools/memory.h"
+#include "tools/fs.h"
+#include "tools/printf.h"
+#include "tools/himem_mapper.h"
+
+#ifdef DEBUG_FS_ENABLE
+#include "generated/embedded_bootloader.embedded.h"
+#include "generated/embedded_partition_table.embedded.h"
+#include "tools/hexdump.h"
+#endif
+
+#include "gcc_warnings.h"
+
+#ifdef DEBUG_FS_ENABLE
+
+/*
+- start capturing traffic
+- trigger TLS connection
+- download trace_log
+- get block between
+  __begin_sslkeylogfile__
+  and
+  __end_sslkeylogfile__
+  and put it into a file
+- select this file in Wireshark:
+  Edit -> Preferences -> Protocols -> TLS
+  select as (Pre)-Master-Secret log filename
+- redissect capture: View -> Redissect Packets
+*/
+
+constexpr const char * const prf_type[] {
+    "TLS_PRF_NONE",
+    "TLS_PRF_SHA384",
+    "TLS_PRF_SHA256",
+    "HKDF_EXPAND_SHA384",
+    "HKDF_EXPAND_SHA256"
+};
+
+unsigned char last_server_random[32]{};
+
+extern "C" void mbedtls_ssl_export_keys_default_cb(void *p_expkey,
+                                mbedtls_ssl_key_export_type type,
+                                const unsigned char *secret,
+                                size_t secret_len,
+                                const unsigned char client_random[32],
+                                const unsigned char server_random[32],
+                                mbedtls_tls_prf_types tls_prf_type);
+
+extern "C" void mbedtls_ssl_export_keys_default_cb(void *p_expkey,
+                                mbedtls_ssl_key_export_type type,
+                                const unsigned char *secret,
+                                size_t secret_len,
+                                const unsigned char client_random[32],
+                                const unsigned char server_random[32],
+                                mbedtls_tls_prf_types tls_prf_type)
+{
+    auto secret_hex = heap_alloc_array<char>(secret_len * 2 + 1);
+    hexdump(secret, secret_len, secret_hex.get(), secret_len * 2 + 1, HexdumpCase::Lower);
+
+    auto client_random_hex = heap_alloc_array<char>(32 * 2 + 1);
+    hexdump(client_random, 32, client_random_hex.get(), 32 * 2 + 1, HexdumpCase::Lower);
+
+    auto server_random_hex = heap_alloc_array<char>(32 * 2 + 1);
+    hexdump(server_random, 32, server_random_hex.get(), 32 * 2 + 1, HexdumpCase::Lower);
+
+    if (memcmp(last_server_random, server_random, 32) != 0) {
+        char timestamp_buf[EVENT_LOG_TIMESTAMP_LENGTH + 1 /* \0 */];
+        logger.format_timestamp(timestamp_buf);
+
+        logger.tracefln_plain(
+            debug.ssl_key_trace_buffer_index,
+            "\n# %s p_expkey %p prf_type %s server_random %s ",
+            timestamp_buf, p_expkey, prf_type[tls_prf_type], server_random_hex.get());
+
+        memcpy(last_server_random, server_random, 32);
+    }
+
+    switch (type) {
+        case MBEDTLS_SSL_KEY_EXPORT_TLS12_MASTER_SECRET:
+            logger.tracefln_plain(
+                debug.ssl_key_trace_buffer_index,
+                "CLIENT_RANDOM %s %s",
+                client_random_hex.get(), secret_hex.get());
+            break;
+
+#if defined(MBEDTLS_SSL_PROTO_TLS1_3)
+        case MBEDTLS_SSL_KEY_EXPORT_TLS1_3_CLIENT_EARLY_SECRET:
+            logger.tracefln_plain(
+                debug.ssl_key_trace_buffer_index,
+                "CLIENT_EARLY_TRAFFIC_SECRET %s %s",
+                client_random_hex.get(), secret_hex.get());
+            break;
+
+        case MBEDTLS_SSL_KEY_EXPORT_TLS1_3_EARLY_EXPORTER_SECRET:
+            logger.tracefln_plain(
+                debug.ssl_key_trace_buffer_index,
+                "EARLY_EXPORTER_SECRET %s %s",
+                client_random_hex.get(), secret_hex.get());
+            break;
+
+        case MBEDTLS_SSL_KEY_EXPORT_TLS1_3_CLIENT_HANDSHAKE_TRAFFIC_SECRET:
+            logger.tracefln_plain(
+                debug.ssl_key_trace_buffer_index,
+                "CLIENT_HANDSHAKE_TRAFFIC_SECRET %s %s",
+                client_random_hex.get(), secret_hex.get());
+            break;
+
+        case MBEDTLS_SSL_KEY_EXPORT_TLS1_3_SERVER_HANDSHAKE_TRAFFIC_SECRET:
+            logger.tracefln_plain(
+                debug.ssl_key_trace_buffer_index,
+                "SERVER_HANDSHAKE_TRAFFIC_SECRET %s %s",
+                client_random_hex.get(), secret_hex.get());
+            break;
+
+        case MBEDTLS_SSL_KEY_EXPORT_TLS1_3_CLIENT_APPLICATION_TRAFFIC_SECRET:
+            logger.tracefln_plain(
+                debug.ssl_key_trace_buffer_index,
+                "CLIENT_TRAFFIC_SECRET_0 %s %s",
+                client_random_hex.get(), secret_hex.get());
+            break;
+
+        case MBEDTLS_SSL_KEY_EXPORT_TLS1_3_SERVER_APPLICATION_TRAFFIC_SECRET:
+            logger.tracefln_plain(
+                debug.ssl_key_trace_buffer_index,
+                "SERVER_TRAFFIC_SECRET_0 %s %s",
+                client_random_hex.get(), secret_hex.get());
+            break;
+#endif
+
+        default:
+            return;
+    }
+}
+#endif
+
+[[gnu::noinline]]
+static float benchmark_spi_flash();
+static float benchmark_area(uint32_t *start_address, size_t max_length);
+static void get_spi_settings(uint32_t spi_num, uint32_t apb_clk, uint32_t *spi_clk, uint32_t *dummy_cyclelen, const char **spi_mode);
+
+[[gnu::noinline]]
+static void malloc_failed_log_detailed(size_t size, uint32_t caps, const char *function_name, const char *task_name)
+{
+    multi_heap_info_t ram_info;
+    heap_caps_get_info(&ram_info, caps);
+
+    char backtrace_buf[384];
+    size_t backtrace_len = strn_backtrace(backtrace_buf, sizeof(backtrace_buf), 1);
+
+    logger.printfln("malloc_failed_hook sz=%u frBl=%u frTot=%u caps=0x%lx fn=%s t=%s", size, ram_info.largest_free_block, ram_info.total_free_bytes, caps, function_name, task_name);
+    logger.print_plain(backtrace_buf, backtrace_len);
+    logger.print_plain("\n", 1);
+}
+
+// Called on affected task's stack, which might be small.
+static void malloc_failed_hook(size_t size, uint32_t caps, const char *function_name)
+{
+    const char *task_name = pcTaskGetName(xTaskGetCurrentTaskHandle());
+
+    if (strcmp(task_name, "loopTask") == 0 || strcmp(task_name, "httpd") == 0 || strcmp(task_name, "wifi") == 0) {
+        malloc_failed_log_detailed(size, caps, function_name, task_name);
+    } else {
+        logger.print_timestamp();
+        logger.print_plain("malloc_failed_hook from other task\n", 35);
+        logger.print_plain(task_name, strlen(task_name));
+        logger.print_plain("\n", 1);
+
+        esp_backtrace_print(INT32_MAX);
+    }
+}
+
+static constexpr int CONFIG_TYPES = 12;
+
+static void (*const slot_debug_info_fns[CONFIG_TYPES])(SlotDebugInfo *slot_info) = {
+    &get_slot_debug_info<Config::ConfUint>,
+    &get_slot_debug_info<Config::ConfInt>,
+    &get_slot_debug_info<Config::ConfUint32>,
+    &get_slot_debug_info<Config::ConfInt32>,
+    &get_slot_debug_info<Config::ConfUint53>,
+    &get_slot_debug_info<Config::ConfInt52>,
+    &get_slot_debug_info<Config::ConfFloat>,
+    &get_slot_debug_info<Config::ConfString>,
+    &get_slot_debug_info<Config::ConfArray>,
+    &get_slot_debug_info<Config::ConfTuple>,
+    &get_slot_debug_info<Config::ConfObject>,
+    &get_slot_debug_info<Config::ConfUnion>,
+};
+
+void Debug::pre_setup()
+{
+    heap_caps_register_failed_alloc_callback(malloc_failed_hook);
+
+    size_t dram_heap_size     = heap_caps_get_total_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    size_t iram_heap_size     = heap_caps_get_total_size(MALLOC_CAP_IRAM);
+    size_t psram_heap_size    = heap_caps_get_total_size(MALLOC_CAP_SPIRAM);
+    size_t himem_heap_size    = 0;
+    size_t psram_size         = 0;
+
+#if defined(BOARD_HAS_PSRAM)
+    himem_heap_size = esp_himem_get_phys_size();
+    psram_size = esp_psram_get_size() - himem_heap_size;
+#endif
+
+    rtc_cpu_freq_config_t cpu_freq_conf;
+    rtc_clk_cpu_freq_get_config(&cpu_freq_conf);
+
+    const float dram_speed   = static_cast<float>(cpu_freq_conf.freq_mhz * 1000000 * 4) / 1048576.0f; // DRAM speed cannot be measured accurately, but we know that it can deliver 4 bytes per CPU clock cycle.
+    const float iram_speed   = benchmark_area(reinterpret_cast<uint32_t *>(0x40080000),    128*1024); // entire usable IRAM block
+    const float rodata_speed = benchmark_area(reinterpret_cast<uint32_t *>(&_rodata_start), 32*1024); // 32KiB at the beginning of the readonly-data
+    const float text_speed   = benchmark_area(reinterpret_cast<uint32_t *>(&_text_start),   32*1024); // 32KiB at the beginning of the code
+    const float flash_speed  = benchmark_spi_flash();
+
+    float psram_speed = 0;
+#if defined(BOARD_HAS_PSRAM)
+    psram_speed = benchmark_area(reinterpret_cast<uint32_t *>(0x3FB00000), 32*1024); // 32KiB inside the fourth MiB
+#endif
+
+    state_static = Config::Object({
+        {"heap_dram",  Config::Uint32(dram_heap_size)},
+        {"heap_iram",  Config::Uint32(iram_heap_size)},
+        {"heap_psram", Config::Uint32(psram_heap_size)},
+        {"heap_himem", Config::Uint32(himem_heap_size)},
+        {"psram_size", Config::Uint32(psram_size)},
+        {"ipsock_max", Config::Uint8(CONFIG_LWIP_MAX_SOCKETS)},
+        {"cpu_clk",    Config::Uint32(cpu_freq_conf.freq_mhz * 1000000)},
+        {"apb_clk",    Config::Uint32(rtc_clk_apb_freq_get())},
+        {"spi_buses",  Config::Tuple(4, Config::Object({
+            {"clk",          Config::Uint32(0)},
+            {"dummy_cycles", Config::Uint8(0)},
+            {"spi_mode",     Config::Str("", 0, 14)}
+        }))},
+        {"dram_benchmark",   Config::Float(dram_speed)},
+        {"iram_benchmark",   Config::Float(iram_speed)},
+        {"psram_benchmark",  Config::Float(psram_speed)},
+        {"rodata_benchmark", Config::Float(rodata_speed)},
+        {"text_benchmark",   Config::Float(text_speed)},
+        {"flash_benchmark",  Config::Float(flash_speed)},
+        {"flash_id",         Config::Uint32(esp_flash_default_chip->chip_id)},
+    });
+
+    state_fast = Config::Object({
+        {"uptime",     Config::Uptime()},
+        {"free_dram",  Config::Uint32(0)},
+        {"free_iram",  Config::Uint32(0)},
+        {"free_psram", Config::Uint32(0)},
+        {"free_himem", Config::Uint32(0)},
+        {"himem_mapper_cache_hits", Config::Uint53(0)},
+        {"himem_mapper_cache_misses", Config::Uint53(0)},
+        {"heap_check_time_avg", Config::Uint32(0)},
+        {"heap_check_time_max", Config::Uint32(0)},
+        {"cpu_usage",  Config::Uint8(0)},
+    });
+
+    state_slow = Config::Object({
+        {"largest_free_dram_block",  Config::Uint32(0)},
+        {"largest_free_iram_block",  Config::Uint32(0)},
+        {"largest_free_psram_block", Config::Uint32(0)},
+        {"heap_integrity_ok", Config::Bool(true)},
+        {"loop_max_us", Config::Uint32(0)},
+        {"loop_max_fn_file", Config::Str("", 0, 0)},
+        {"loop_max_fn_line", Config::Uint32(0)},
+        {"min_free_dram", Config::Uint32(0)},
+        {"min_free_iram", Config::Uint32(0)},
+        {"min_free_psram", Config::Uint32(0)},
+        {"conf_uint_buf_size", Config::Uint32(0)},
+        {"conf_int_buf_size", Config::Uint32(0)},
+        {"conf_uint32_buf_size", Config::Uint32(0)},
+        {"conf_int32_buf_size", Config::Uint32(0)},
+        {"conf_uint53_buf_size", Config::Uint32(0)},
+        {"conf_int52_buf_size", Config::Uint32(0)},
+        {"conf_float_buf_size", Config::Uint32(0)},
+        {"conf_string_buf_size", Config::Uint32(0)},
+        {"conf_array_buf_size", Config::Uint32(0)},
+        {"conf_tuple_buf_size", Config::Uint32(0)},
+        {"conf_object_buf_size", Config::Uint32(0)},
+        {"conf_union_buf_size", Config::Uint32(0)},
+        {"ipsock_cur", Config::Uint8(0)},
+        {"ipsock_hwm", Config::Uint8(0)},
+        {"api_states",    Config::Uint16(0)},
+        {"api_commands",  Config::Uint16(0)},
+        {"api_responses", Config::Uint16(0)},
+    });
+
+    state_slots = Config::Tuple(CONFIG_TYPES, Config::Tuple(5, Config::Uint16(0)));
+
+    state_hwm_prototype = Config::Object({
+        {"task_name",  Config::Str("", 0, CONFIG_FREERTOS_MAX_TASK_NAME_LEN)},
+        {"hwm",        Config::Uint16(0)},
+        {"stack_size", Config::Uint16(0)},
+        {"prio",       Config::Uint8(0)},
+        {"core",       Config::Int8(0)},
+    });
+
+    state_hwm = Config::Array({},
+        &state_hwm_prototype,
+        0, 64
+    );
+
+    task_scheduler_accounting.init(384);
+    //event_accounting.init(64);
+
+    task_handles.reserve(20);
+    register_task(xTaskGetCurrentTaskHandle(),      getArduinoLoopTaskStackSize());
+    register_task(xTaskGetIdleTaskHandleForCore(0), sizeof(StackType_t) * configMINIMAL_STACK_SIZE);
+    register_task(xTaskGetIdleTaskHandleForCore(1), sizeof(StackType_t) * configMINIMAL_STACK_SIZE);
+    register_task(xTimerGetTimerDaemonTaskHandle(), sizeof(StackType_t) * configTIMER_TASK_STACK_DEPTH);
+    register_task("esp_timer",                      ESP_TASK_TIMER_STACK);
+
+// Copied from esp_ipc.c
+#if defined(CONFIG_COMPILER_OPTIMIZATION_NONE) && CONFIG_COMPILER_OPTIMIZATION_NONE
+#define IPC_STACK_SIZE (CONFIG_ESP_IPC_TASK_STACK_SIZE + 0x100)
+#else
+#define IPC_STACK_SIZE (CONFIG_ESP_IPC_TASK_STACK_SIZE)
+#endif //CONFIG_COMPILER_OPTIMIZATION_NONE
+
+    register_task("ipc0", IPC_STACK_SIZE);
+    register_task("ipc1", IPC_STACK_SIZE);
+
+#ifdef DEBUG_FS_ENABLE
+    this->ssl_key_trace_buffer_index = logger.alloc_trace_buffer("sslkeylogfile");
+#endif
+}
+
+void Debug::setup()
+{
+    task_scheduler.scheduleUncancelable([this]() {
+        multi_heap_info_t dram_info;
+        multi_heap_info_t iram_info;
+        multi_heap_info_t psram_info;
+        heap_caps_get_info(&dram_info,  MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        heap_caps_get_info(&iram_info,  MALLOC_CAP_IRAM);
+        heap_caps_get_info(&psram_info, MALLOC_CAP_SPIRAM);
+
+        state_fast.get("uptime")->updateUptime(now_us());
+        state_fast.get("free_dram")->updateUint(dram_info.total_free_bytes);
+        state_fast.get("free_iram")->updateUint(iram_info.total_free_bytes);
+        state_fast.get("free_psram")->updateUint(psram_info.total_free_bytes);
+#if defined(BOARD_HAS_PSRAM)
+        state_fast.get("free_himem")->updateUint(esp_himem_get_free_size());
+        state_fast.get("himem_mapper_cache_hits")->updateUint53(HimemMapper::cache_hits);
+        state_fast.get("himem_mapper_cache_misses")->updateUint53(HimemMapper::cache_misses);
+#endif
+
+        state_slow.get("largest_free_dram_block")->updateUint(dram_info.largest_free_block);
+        state_slow.get("largest_free_iram_block")->updateUint(iram_info.largest_free_block);
+        state_slow.get("largest_free_psram_block")->updateUint(psram_info.largest_free_block);
+        state_slow.get("min_free_dram")->updateUint(dram_info.minimum_free_bytes);
+        state_slow.get("min_free_iram")->updateUint(iram_info.minimum_free_bytes);
+        state_slow.get("min_free_psram")->updateUint(psram_info.minimum_free_bytes);
+
+        state_slow.get("conf_uint_buf_size"  )->updateUint(get_allocated_slot_memory<Config::ConfUint>());
+        state_slow.get("conf_int_buf_size"   )->updateUint(get_allocated_slot_memory<Config::ConfInt>());
+        state_slow.get("conf_uint32_buf_size")->updateUint(get_allocated_slot_memory<Config::ConfUint32>());
+        state_slow.get("conf_int32_buf_size" )->updateUint(get_allocated_slot_memory<Config::ConfInt32>());
+        state_slow.get("conf_uint53_buf_size")->updateUint(get_allocated_slot_memory<Config::ConfUint53>());
+        state_slow.get("conf_int52_buf_size" )->updateUint(get_allocated_slot_memory<Config::ConfInt52>());
+        state_slow.get("conf_float_buf_size" )->updateUint(get_allocated_slot_memory<Config::ConfFloat>());
+        state_slow.get("conf_string_buf_size")->updateUint(get_allocated_slot_memory<Config::ConfString>());
+        state_slow.get("conf_array_buf_size" )->updateUint(get_allocated_slot_memory<Config::ConfArray>());
+        state_slow.get("conf_tuple_buf_size" )->updateUint(get_allocated_slot_memory<Config::ConfTuple>());
+        state_slow.get("conf_object_buf_size")->updateUint(get_allocated_slot_memory<Config::ConfObject>());
+        state_slow.get("conf_union_buf_size" )->updateUint(get_allocated_slot_memory<Config::ConfUnion>());
+
+        for (size_t i = 0; i < CONFIG_TYPES; i++) {
+            SlotDebugInfo slot_info;
+            slot_debug_info_fns[i](&slot_info);
+            auto arr = state_slots.get(i);
+            arr->get(0)->updateUint(slot_info.used_slots);
+            arr->get(1)->updateUint(slot_info.slots_hwm);
+            arr->get(2)->updateUint(slot_info.allocated_slots);
+            arr->get(3)->updateUint(slot_info.first_free_slot);
+            arr->get(4)->updateUint(slot_info.last_used_slot);
+        }
+
+        if (dram_info.largest_free_block < 2000) {
+            logger.printfln("Heap full. Largest block is %u bytes.", dram_info.largest_free_block);
+        }
+
+        size_t task_count = this->task_handles.size();
+        for (size_t i = 0; i < task_count; i++) {
+            uint32_t hwm = uxTaskGetStackHighWaterMark(this->task_handles[i]);
+            Config *conf_task_hwm = static_cast<Config *>(this->state_hwm.get(i));
+            if (conf_task_hwm->get("hwm")->updateUint(hwm) && hwm < 256) {
+                const char *task_name = conf_task_hwm->get("task_name")->asUnsafeCStr();
+                if (hwm < 40 || strcmp(task_name, "watchdog_task") != 0) {
+                    logger.printfln("HWM of task '%s' changed: %lu", task_name, hwm);
+                }
+            }
+        }
+
+        uint32_t runtime_avg;
+        if (this->integrity_check_runs == 0) {
+            runtime_avg = 0;
+        } else {
+            runtime_avg = this->integrity_check_runtime_sum / this->integrity_check_runs;
+        }
+        state_fast.get("heap_check_time_avg")->updateUint(runtime_avg);
+        state_fast.get("heap_check_time_max")->updateUint(this->integrity_check_runtime_max);
+
+        micros_t now = now_us();
+        uint32_t time_since_last_update_us = (now - this->last_state_update).as<uint32_t>();
+        uint32_t integrity_check_cpu_usage = 100 * this->integrity_check_runtime_sum / time_since_last_update_us;
+        state_fast.get("cpu_usage")->updateUint(100 - integrity_check_cpu_usage);
+        this->last_state_update = now;
+
+        this->integrity_check_runs = 0;
+        this->integrity_check_runtime_sum = 0;
+        this->integrity_check_runtime_max = 0;
+    }, 1_s, 1_s);
+
+    task_scheduler.scheduleUncancelable([this]() {
+        uint8_t lwip_socks_in_use = 0;
+        // NUM_SOCKETS is expected to be CONFIG_LWIP_MAX_SOCKETS, but NUM_SOCKETS is what lwIP uses internally.
+        for (int i = 0; i < NUM_SOCKETS; i++) {
+            // Unprotected access on lwIP sockets. Dereferencing the socket pointer is safe because
+            // all socket structs live in a static array. The conn pointer might change at any time,
+            // but unprotected read access should be fine because this only gets a momentary snapshot
+            // of sockets in use anyway.
+            lwip_sock *sock = lwip_socket_dbg_get_socket(LWIP_SOCKET_OFFSET + i);
+            if (sock && sock->conn) {
+                lwip_socks_in_use++;
+            }
+        }
+        if (lwip_socks_in_use > lwip_sockets_hwm) {
+            lwip_sockets_hwm = lwip_socks_in_use;
+            state_slow.get("ipsock_hwm")->updateUint(lwip_sockets_hwm);
+        }
+        state_slow.get("ipsock_cur")->updateUint(lwip_socks_in_use);
+    }, 0_ms, 100_ms);
+
+    last_state_update = now_us();
+
+    initialized = true;
+}
+
+#ifdef DEBUG_FS_ENABLE
+static constexpr char fs_browser_header[] = "<script>"
+"if (!window.location.toString().endsWith('/')) {"
+    "window.location = window.location + '/';"
+"}"
+"async function uploadFile() {"
+    "let file = document.getElementById('upload').files[0];"
+    "await fetch(window.location + (window.location.toString().endsWith('/') ? '' : '/') + file.name, {"
+        "method: 'PUT',"
+        "credentials: 'same-origin',"
+        "body: file"
+    "});"
+    "window.location.reload();"
+"}"
+"async function createFile() {"
+    "let filename = document.getElementById('newFileName').value;"
+    "let content = document.getElementById('newFileContent').value;"
+    "await fetch(window.location + (window.location.toString().endsWith('/') ? '' : '/') + filename, {"
+        "method: 'PUT',"
+        "credentials: 'same-origin',"
+        "body: content"
+    "});"
+    "window.location.reload();"
+"}"
+"async function createDirectory() {"
+    "let dirname = document.getElementById('dirname').value;"
+    "await fetch(window.location + (window.location.toString().endsWith('/') ? '' : '/') + dirname + (dirname.endsWith('/') ? '' : '/'), {"
+        "method: 'PUT',"
+        "credentials: 'same-origin'"
+    "});"
+    "window.location.reload();"
+"}"
+"async function deleteFile(name) {"
+    "if (!window.confirm('Delete file ' + name + ' ?'))"
+        "return;"
+    "await fetch(window.location + name, {method: 'DELETE'});"
+    "window.location.reload();"
+"}"
+"</script>\n";
+
+static constexpr char fs_browser_footer[] =
+"<br>"
+"<hr>"
+"<br>"
+"<div>"
+    "<label for=upload>Create directory</label>&nbsp;&nbsp;&nbsp;"
+    "<input type=text id=dirname placeholder='Directory name'>&nbsp;&nbsp;&nbsp;"
+    "<button type=button onClick=createDirectory()>Create</button>"
+"</div>"
+"<br>"
+"<hr>"
+"<br>"
+"<div>"
+    "<label for=upload>Upload file</label>&nbsp;&nbsp;&nbsp;"
+    "<input type=file id=upload>"
+    "<button type=button onClick=uploadFile()>Upload</button>"
+"</div>"
+"<br>"
+"<hr>"
+"<br>"
+"<div>"
+    "<label for=create>Create new file</label>&nbsp;&nbsp;&nbsp;"
+    "<input type=text id=newFileName placeholder='File name'>"
+    "<br>"
+    "<textarea id=newFileContent placeholder='File content' cols=80 rows=25></textarea>"
+    "<br>"
+    "<button type=button onClick=createFile()>Create file</button>"
+"</div>\n";
+
+static constexpr char fs_browser_up_button[] = "<button type=button onclick=\"\" style=\"visibility: hidden;\">Delete</button>&nbsp;&nbsp;&nbsp;<a href='..'>..</a><br>\n";
+
+static WebServerRequestReturnProtect browse_get(WebServerRequest &request, CoolString path) {
+    const size_t path_length = path.length();
+    bool trailing_slash = path[path_length - 1] == '/';
+
+    // Omit trailing slash if this is not root.
+    if (path_length > 1 && trailing_slash) {
+        path.setLength(static_cast<int>(path_length - 1));
+    }
+
+    if (!LittleFS.exists(path)) {
+        return request.send_plain(404, "File " + path + " not found");
+    }
+
+    char buf[2048];
+
+    {
+        File f = LittleFS.open(path);
+        if (!f.isDirectory()) {
+            request.beginChunkedResponse_plain(200);
+            while (f.available()) {
+                const size_t read = f.read(reinterpret_cast<uint8_t *>(buf), ARRAY_SIZE(buf));
+                SEND_CHUNK_OR_FAIL_LEN(request, buf, read);
+            }
+            return request.endChunkedResponse();
+        }
+    }
+
+    // If this is a directory, but the requested path does not end with a /,
+    // redirect to the path with a /. This seems to work around a bug in newer firefox versions.
+    // (broken in 150, not broken in 140.10.0esr)
+    if (!trailing_slash) {
+        path = "/debug/fs" + path + "/";
+        request.addResponseHeader("Location", path.c_str());
+        return request.send_plain(307, "");
+    }
+
+    request.beginChunkedResponse_html(200);
+    SEND_CHUNK_OR_FAIL(request, fs_browser_header);
+
+    {
+        String header = "<h1>" + path + "</h1>\n";
+        SEND_CHUNK_OR_FAIL(request, header);
+    }
+
+    if (path.length() > 1) {
+        SEND_CHUNK_OR_FAIL(request, fs_browser_up_button);
+    }
+
+    StringWriter sw{buf, std::size(buf)};
+    esp_err_t send_err = ESP_OK;
+
+    for_filename_in(path.c_str(), [&send_err, &sw, &request](const char *fname, size_t fname_len, bool is_directory) {
+        sw.puts("<button type=button onclick=\"deleteFile('/");
+        sw.puts(fname, fname_len);
+        sw.puts("')\">Delete</button>&nbsp;&nbsp;&nbsp;<a href=\"");
+        sw.puts(fname, fname_len);
+        if (is_directory) sw.putc('/');
+        sw.puts("\">");
+        sw.puts(fname, fname_len);
+        if (is_directory) sw.putc('/');
+        sw.puts("</a><br>\n");
+
+        send_err = request.sendChunk(sw);
+        if (send_err != ESP_OK) {
+            return false;
+        }
+        sw.clear();
+        return true;
+    });
+    if (send_err != ESP_OK)
+        return WebServerRequestReturnProtect{.error = send_err};
+
+    SEND_CHUNK_OR_FAIL(request, fs_browser_footer);
+
+    return request.endChunkedResponse();
+
+}
+
+static WebServerRequestReturnProtect browse_delete(WebServerRequest &request, CoolString path) {
+    const size_t path_length = path.length();
+    if (path_length > 1 && path[path_length - 1] == '/') {
+        path.setLength(static_cast<int>(path_length - 1));
+    }
+
+    if (!LittleFS.exists(path))
+        return request.send_plain(404, "File " + path + " not found");
+
+    File f = LittleFS.open(path);
+    if (!f.isDirectory()) {
+        f.close();
+        LittleFS.remove(path);
+        return request.send_plain(200, "File " + path + " deleted");
+    } else {
+        f.close();
+        remove_directory(path.c_str());
+        return request.send_plain(200, "Directory " + path + " and all contents deleted");
+    }
+}
+
+static WebServerRequestReturnProtect browse_put(WebServerRequest &request, CoolString path) {
+    const size_t path_length = path.length();
+    bool create_directory = path_length > 1 && path[path_length - 1] == '/';
+    if (create_directory) {
+        path.setLength(static_cast<int>(path_length - 1));
+    }
+
+    if (LittleFS.exists(path)) {
+        File f = LittleFS.open(path);
+        if (!f.isDirectory() && create_directory)
+            return request.send_plain(400, "File " + path + " already exists and is not a directory");
+        if (f.isDirectory() && !create_directory)
+            return request.send_plain(400, "Directory " + path + " already exists");
+        if (f.isDirectory())
+            return request.send_plain(200, "Directory " + path + " already exists");
+        else {
+            f.close();
+            LittleFS.remove(path);
+        }
+    }
+
+    if (create_directory) {
+        LittleFS.mkdir(path);
+        return request.send_plain(200, "Directory " + path + " created");
+    }
+
+    File f = LittleFS.open(path, "w");
+
+    auto size = request.contentLength();
+    auto payload = heap_alloc_array<char>(size);
+    if (request.receive(payload.get(), size) < 0)
+        return request.send_plain(500, "failed to receive");
+
+    f.write(reinterpret_cast<uint8_t *>(payload.get()), size);
+    return request.send_plain(200, "File " + path + " created.");
+}
+
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wswitch-enum"
+static WebServerRequestReturnProtect browse_method_switch(WebServerRequest &request, const char *path) {
+    const httpd_method_t method = request.method();
+
+    switch (method) {
+        case HTTP_GET:
+            return browse_get(request, path);
+        case HTTP_PUT:
+            return browse_put(request, path);
+        case HTTP_DELETE:
+            return browse_delete(request, path);
+        default:
+            return request.send_plain(405, "Method not allowed for filesystem browser");
+    }
+}
+#pragma GCC diagnostic pop
+
+enum class BootloaderAccess {
+    VerifyOnly,
+    WriteVerify,
+};
+
+[[gnu::noinline]]
+static esp_err_t write_and_verify_boot_data(BootloaderAccess access_type, const uint8_t *data, uint32_t length, uint32_t address, bool force_write)
+{
+    if (length == 0) {
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+
+    bool flash_protected = false;
+    esp_err_t read_protect_err = esp_flash_get_chip_write_protect(esp_flash_default_chip, &flash_protected);
+
+    if (read_protect_err != ESP_OK) {
+        logger.printfln("esp_flash_get_chip_write_protect failed: %s (0x%04X)", esp_err_to_name(read_protect_err), static_cast<unsigned>(read_protect_err));
+        return read_protect_err;
+    }
+
+    uint8_t *buf = static_cast<uint8_t *>(heap_caps_malloc_prefer(length, 1, MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL));
+
+    if (buf == nullptr) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    // Use unique_ptr to auto-free buffer.
+    std::unique_ptr<uint8_t> buf_u{buf};
+
+    uint32_t attempts = 0;
+    uint32_t delay_ms = 0;
+
+    while (attempts < 10) {
+        // Delay between write and verify to possibly avoid unstable writes.
+        if (delay_ms == 0) {
+            delay_ms = 1;
+        } else {
+            vTaskDelay_ms(delay_ms);
+            delay_ms += 50;
+        }
+
+        if (access_type == BootloaderAccess::VerifyOnly || !force_write) {
+            esp_err_t err;
+
+            if (esp32_common.is_encrypted()) {
+                err = esp_flash_read_encrypted(esp_flash_default_chip, address, buf, length);
+            } else {
+                err = esp_flash_read(esp_flash_default_chip, buf, address, length);
+            }
+
+            if (err != ESP_OK) {
+                return err;
+            }
+
+            const int result = memcmp(data, buf, length);
+
+            if (result == 0) { // Match
+                if (access_type == BootloaderAccess::WriteVerify && attempts == 0) {
+                    return ESP_ERR_INVALID_STATE;
+                }
+                return ESP_OK;
+            }
+
+            if (access_type == BootloaderAccess::VerifyOnly) {
+                return ESP_FAIL;
+            }
+        }
+
+        attempts++;
+
+        if (flash_protected) {
+            esp_err_t write_protect_err = esp_flash_set_chip_write_protect(esp_flash_default_chip, false);
+
+            if (write_protect_err != ESP_OK) {
+                logger.printfln("esp_flash_set_chip_write_protect failed to unlock chip: %s (0x%04X)", esp_err_to_name(write_protect_err), static_cast<unsigned>(write_protect_err));
+                return write_protect_err;
+            }
+        }
+
+        memcpy(buf, data, length);
+
+        esp_flash_set_dangerous_write_protection(esp_flash_default_chip, false);
+
+        const micros_t t_start = now_us();
+
+        const uint32_t erase_length = ALIGNUP(esp_flash_default_chip->chip_drv->sector_size, length);
+        const esp_err_t err_erase = esp_flash_erase_region(esp_flash_default_chip, address, erase_length);
+
+        if (err_erase != ESP_OK) {
+            logger.printfln("Boot data erase failed: %s (0x%04X)", esp_err_to_name(err_erase), static_cast<unsigned>(err_erase));
+            continue;
+        }
+
+        const micros_t t_mid = now_us();
+
+        esp_err_t err_write;
+
+        if (esp32_common.is_encrypted()) {
+            err_write = esp_flash_write_encrypted(esp_flash_default_chip, address, buf, length);
+        } else {
+            err_write = esp_flash_write(esp_flash_default_chip, buf, address, length);
+        }
+
+        if (err_write != ESP_OK) {
+            logger.printfln("Boot data write failed: %s (0x%04X)", esp_err_to_name(err_write), static_cast<unsigned>(err_write));
+            continue;
+        }
+
+        const micros_t t_end = now_us();
+
+        esp_flash_set_dangerous_write_protection(esp_flash_default_chip, true);
+
+        if (flash_protected) {
+            esp_err_t write_protect_err = esp_flash_set_chip_write_protect(esp_flash_default_chip, true);
+
+            if (write_protect_err != ESP_OK) {
+                logger.printfln("esp_flash_set_chip_write_protect failed to lock chip: %s (0x%04X) (ignoring)", esp_err_to_name(write_protect_err), static_cast<unsigned>(write_protect_err));
+            }
+        } else {
+            logger.printfln("Not locking flash chip");
+        }
+
+        logger.printfln("Address 0x%lx: Erase %lums, write %lums", address, (t_mid - t_start).as<uint32_t>() / 1000, (t_end - t_mid  ).as<uint32_t>() / 1000);
+
+        return ESP_OK;
+    };
+
+    return ESP_ERR_NOT_FINISHED;
+}
+
+[[gnu::noinline]]
+static esp_err_t write_and_verify_bootloader(BootloaderAccess access_type, bool force_write = false)
+{
+    return write_and_verify_boot_data(access_type, embedded_bootloader_data, embedded_bootloader_length, CONFIG_BOOTLOADER_OFFSET_IN_FLASH, force_write);
+}
+
+[[gnu::noinline]]
+static esp_err_t write_and_verify_partition_table(BootloaderAccess access_type, bool force_write = false)
+{
+    return write_and_verify_boot_data(access_type, embedded_partition_table_data, embedded_partition_table_length, CONFIG_PARTITION_TABLE_OFFSET, force_write);
+}
+
+bool Debug::repartition(String &errmsg, bool reboot_immediately)
+{
+    esp_err_t err = write_and_verify_partition_table(BootloaderAccess::WriteVerify, true);
+
+    if (err == ESP_ERR_NOT_SUPPORTED) {
+        errmsg = "No embedded partition table";
+        return false;
+    }
+
+    if (err == ESP_OK) {
+        err = write_and_verify_bootloader(BootloaderAccess::WriteVerify, true);
+
+        if (err == ESP_ERR_NOT_SUPPORTED) {
+            errmsg = "No embedded bootloader";
+            return false;
+        }
+    }
+
+    if (err != ESP_OK) {
+        char msg[128];
+        StringWriter sw{msg, std::size(msg)};
+        sw.printf("Repartitioning failed: %s (0x%04X)", esp_err_to_name(err), static_cast<unsigned>(err));
+        errmsg = sw.getPtr();
+        return false;
+    }
+
+#if MODULE_FIRMWARE_UPDATE_AVAILABLE()
+    if (!firmware_update.erase_other_partition(errmsg, FirmwareUpdate::EraseType::Beginning)) {
+        logger.printfln("Destroying other partition failed: %s", errmsg.c_str());
+        // Clear errmsg to make this error non-fatal.
+        errmsg.clear();
+    } else {
+        logger.printfln("Other partition destroyed");
+    }
+#endif
+
+    if (reboot_immediately) {
+        logger.printfln("Bootloader updated, rebooting into it");
+        esp_restart();
+    } else {
+        trigger_reboot("bootloader update", 1_s);
+    }
+
+    return true;
+}
+#endif
+
+extern Arena dram_arena;
+extern Arena iram_arena;
+#if defined(BOARD_HAS_PSRAM)
+extern Arena psram_arena;
+#endif
+
+void Debug::register_urls()
+{
+#ifdef DEBUG_FS_ENABLE
+    task_scheduler.scheduleOnce([](){
+        dram_arena.print_statistics();
+        iram_arena.print_statistics();
+#if defined(BOARD_HAS_PSRAM)
+        psram_arena.print_statistics();
+#endif
+    }, 10_s);
+#endif
+
+    api.addState("debug/state_static", &state_static);
+    api.addState("debug/state_fast", &state_fast);
+    api.addState("debug/state_slow", &state_slow);
+    api.addState("debug/state_slots", &state_slots);
+    api.addState("debug/state_hwm", &state_hwm);
+
+#ifdef DEBUG_FS_ENABLE
+    server.on_HTTPThread("/debug/crash", HTTP_GET, [](WebServerRequest req) {
+        esp_system_abort("Crash requested");
+        return req.send_plain(200);
+    });
+#endif
+
+    server.on_HTTPThread("/debug/state_sizes", HTTP_GET, [](WebServerRequest req) {
+        auto buf = heap_alloc_array<char>(8192);
+        StringWriter sw(buf.get(), 8192);
+        sw.printf("flash/c   api/c   dbg/c  name\n");
+        auto result = task_scheduler.await([&sw]() {
+            for (const auto &reg : api.states) {
+                sw.printf("%5zu %zu %5zu %zu %5zu %zu %s\n",
+                          reg.config->string_length(nullptr, 0),
+                          0u,
+                          reg.config->string_length(reg.keys_to_censor, reg.get_keys_to_censor_len()),
+                          reg.get_keys_to_censor_len(),
+                          reg.config->string_length(reg.keys_to_censor_in_debug_report, reg.get_keys_to_censor_in_debug_report_len()),
+                          reg.get_keys_to_censor_in_debug_report_len(),
+                          reg.path);
+            }
+        });
+        if (!result)
+            return req.send_plain(500, "await failed");
+        return req.send_plain(200, sw);
+    });
+
+    server.on_HTTPThread("/debug/max_state_sizes", HTTP_GET, [](WebServerRequest req) {
+        auto buf = heap_alloc_array<char>(8192);
+        StringWriter sw(buf.get(), 8192);
+        sw.printf("flash/c   api/c   dbg/c  name\n");
+        auto result = task_scheduler.await([&sw]() {
+            for (const auto &reg : api.states) {
+                sw.printf("%5zu %zu %5zu %zu %5zu %zu %s\n",
+                          reg.config->max_string_length(nullptr, 0),
+                          0u,
+                          reg.config->max_string_length(reg.keys_to_censor, reg.get_keys_to_censor_len()),
+                          reg.get_keys_to_censor_len(),
+                          reg.config->max_string_length(reg.keys_to_censor_in_debug_report, reg.get_keys_to_censor_in_debug_report_len()),
+                          reg.get_keys_to_censor_in_debug_report_len(),
+                          reg.path);
+            }
+        });
+        if (!result)
+            return req.send_plain(500, "await failed");
+        return req.send_plain(200, sw);
+    });
+
+    server.on_HTTPThread("/debug/task_accounting_names", HTTP_GET, [this](WebServerRequest req) {
+        constexpr size_t BUF_SIZE = 131072;
+        auto buf = heap_alloc_array<char>(BUF_SIZE);
+        TFJsonSerializer json{buf.get(), BUF_SIZE};
+
+        json.addArray();
+
+        for (size_t i = 0; i < task_scheduler_accounting.entries_used; i++) {
+            json.addObject();
+
+            const TaskAccounting::TaskData *data = task_scheduler_accounting.tdata + i;
+
+            json.addMemberString("file", data->file);
+            json.addMemberNumber("line", data->line);
+
+            json.endObject();
+        }
+
+        json.endArray();
+        json.end();
+
+        return req.send_json(200, json);
+    });
+
+    server.on_HTTPThread("/debug/task_accounting_data", HTTP_GET, [this](WebServerRequest req) {
+        constexpr size_t BUF_SIZE = 131072;
+        auto buf = heap_alloc_array<char>(BUF_SIZE);
+        TFJsonSerializer json{buf.get(), BUF_SIZE};
+
+        json.addArray();
+
+        for (size_t i = 0; i < task_scheduler_accounting.entries_used; i++) {
+            json.addObject();
+
+            const TaskAccounting::TaskData *data = task_scheduler_accounting.tdata + i;
+
+            json.addMemberNumber("runs", data->executions);
+            json.addMemberNumber("ttot", data->runtime_total.as<int64_t>());
+            json.addMemberNumber("tmin", data->runtime_min);
+            json.addMemberNumber("tmax", data->runtime_max);
+
+            json.endObject();
+        }
+
+        json.endArray();
+        json.end();
+
+        return req.send_json(200, json);
+    });
+
+    server.on_HTTPThread("/debug/task_accounting_simple", HTTP_GET, [this](WebServerRequest req) {
+#if defined(BOARD_HAS_PSRAM)
+        constexpr size_t BUF_SIZE = 131072;
+#else
+        constexpr size_t BUF_SIZE = 16384;
+#endif
+        auto buf = heap_alloc_array<char>(BUF_SIZE);
+        StringWriter sw{buf.get(), BUF_SIZE};
+
+        for (size_t i = 0; i < task_scheduler_accounting.entries_used; i++) {
+            const TaskAccounting::TaskData *data = task_scheduler_accounting.tdata + i;
+
+            sw.printf("%s:%lu %lu %lli %lu %lu\n",
+                data->file, data->line,
+                data->executions,
+                data->runtime_total.as<int64_t>(),
+                data->runtime_min, data->runtime_max
+            );
+        }
+
+        return req.send_plain(200, sw);
+    });
+
+#ifdef DEBUG_FS_ENABLE
+    server.on_HTTPThread("/debug/rtos_tasks", HTTP_GET, [](WebServerRequest req) {
+        char buf[2048]; // "This buffer is assumed to be large enough to contain the generated report. Approximately 40 bytes per task should be sufficient." - vTaskGetRunTimeStats@FreeRTOS
+        vTaskGetRunTimeStats(buf);
+        return req.send_plain(200, buf);
+    });
+
+    server.on_HTTPThread("/debug/fs/*", static_cast<httpd_method_t>(HTTP_ANY), [this](WebServerRequest request) {
+        return browse_method_switch(request, request.uriCStr() + 9); // Cut off leading /debug/fs
+    });
+
+    server.on_HTTPThread("/debug/fs", static_cast<httpd_method_t>(HTTP_ANY), [this](WebServerRequest request) {
+        return browse_method_switch(request, "/");
+    });
+
+    server.on_HTTPThread("/debug/bootloader", HTTP_GET, [](WebServerRequest req) {
+        constexpr size_t BOOTLOADER_SIZE = CONFIG_PARTITION_TABLE_OFFSET - CONFIG_BOOTLOADER_OFFSET_IN_FLASH;
+
+        uint8_t *buf = static_cast<uint8_t *>(heap_caps_malloc_prefer(BOOTLOADER_SIZE, 1, MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL));
+
+        if (buf == nullptr) {
+            return req.send_plain(500, "No memory");
+        }
+
+        // Use unique_ptr to auto-free buffer.
+        std::unique_ptr<uint8_t> buf_u{buf};
+
+        esp_err_t err;
+
+        if (esp32_common.is_encrypted()) {
+            err = esp_flash_read_encrypted(esp_flash_default_chip, CONFIG_BOOTLOADER_OFFSET_IN_FLASH, buf, BOOTLOADER_SIZE);
+        } else {
+            err = esp_flash_read(esp_flash_default_chip, buf, CONFIG_BOOTLOADER_OFFSET_IN_FLASH, BOOTLOADER_SIZE);
+        }
+
+        if (err != ESP_OK) {
+            logger.printfln("esp_flash_read_failed: %s (0x%04X)", esp_err_to_name(err), static_cast<unsigned>(err));
+            return req.send_plain(500, "esp_flash_read failed");
+        }
+
+        return req.send_bytes(200, reinterpret_cast<const char *>(buf), BOOTLOADER_SIZE);
+    });
+
+    server.on_HTTPThread("/debug/bootloader_check", HTTP_GET, [](WebServerRequest req) {
+        const esp_err_t err = write_and_verify_bootloader(BootloaderAccess::VerifyOnly);
+
+        if (err == ESP_ERR_NOT_SUPPORTED) {
+            return req.send_plain(500, "No embedded bootloader");
+        }
+        if (err == ESP_OK) {
+            return req.send_bytes(200, "Bootloader match");
+        }
+        if (err == ESP_FAIL) {
+            return req.send_bytes(200, "Bootloader mismatch");
+        }
+
+        char msg[128];
+        const size_t len = snprintf_u(msg, std::size(msg), "Check failed: %s (0x%04X)", esp_err_to_name(err), static_cast<unsigned>(err));
+        return req.send_plain(500, msg, len);
+    });
+
+    server.on_HTTPThread("/debug/bootloader_write", HTTP_GET, [](WebServerRequest req) {
+        const esp_err_t err = write_and_verify_bootloader(BootloaderAccess::WriteVerify);
+
+        if (err == ESP_ERR_NOT_SUPPORTED) {
+            return req.send_plain(500, "No embedded bootloader");
+        }
+        if (err == ESP_ERR_INVALID_STATE) {
+            return req.send_bytes(200, "Bootloader already up to date");
+        }
+        if (err == ESP_OK) {
+            return req.send_bytes(200, "Bootloader update OK");
+        }
+
+        char msg[128];
+        const size_t len = snprintf_u(msg, std::size(msg), "Write failed: %s (0x%04X)", esp_err_to_name(err), static_cast<unsigned>(err));
+        return req.send_plain(500, msg, len);
+    });
+
+    server.on_HTTPThread("/debug/partition_table_check", HTTP_GET, [](WebServerRequest req) {
+        const esp_err_t err = write_and_verify_partition_table(BootloaderAccess::VerifyOnly);
+
+        if (err == ESP_ERR_NOT_SUPPORTED) {
+            return req.send_plain(500, "No embedded partition table");
+        }
+        if (err == ESP_OK) {
+            return req.send_bytes(200, "Partition table match");
+        }
+        if (err == ESP_FAIL) {
+            return req.send_bytes(200, "Partition table mismatch");
+        }
+
+        char msg[128];
+        const size_t len = snprintf_u(msg, std::size(msg), "Check failed: %s (0x%04X)", esp_err_to_name(err), static_cast<unsigned>(err));
+        return req.send_plain(500, msg, len);
+    });
+
+    server.on_HTTPThread("/debug/partition_table_write", HTTP_GET, [](WebServerRequest req) {
+        const esp_err_t err = write_and_verify_partition_table(BootloaderAccess::WriteVerify);
+
+        if (err == ESP_ERR_NOT_SUPPORTED) {
+            return req.send_plain(500, "No embedded partition table");
+        }
+        if (err == ESP_ERR_INVALID_STATE) {
+            return req.send_bytes(200, "Partition table already up to date");
+        }
+        if (err == ESP_OK) {
+            return req.send_bytes(200, "Partition table update OK");
+        }
+
+        char msg[128];
+        const size_t len = snprintf_u(msg, std::size(msg), "Write failed: %s (0x%04X)", esp_err_to_name(err), static_cast<unsigned>(err));
+        return req.send_plain(500, msg, len);
+    });
+
+    server.on_HTTPThread("/debug/repartition", HTTP_GET, [](WebServerRequest req) {
+        String errmsg;
+
+        if (repartition(errmsg, false)) {
+            return req.send_plain(200, "Repartitioning OK");
+        } else {
+            return req.send_plain(500, errmsg);
+        }
+    });
+#endif
+}
+
+void Debug::register_events()
+{
+    // Query SPI buses and tasks here after everything else has been set up.
+
+    uint32_t apb_clk = state_static.get("apb_clk")->asUint();
+    Config *conf_spi_buses = static_cast<Config *>(state_static.get("spi_buses"));
+
+    for (uint32_t i = 0; i < 4; i++) {
+        uint32_t spi_clk;
+        uint32_t dummy_cyclelen;
+        const char *spi_mode;
+
+        get_spi_settings(i, apb_clk, &spi_clk, &dummy_cyclelen, &spi_mode);
+
+        Config *conf = static_cast<Config *>(conf_spi_buses->get(i));
+        conf->get("clk")->updateUint(spi_clk);
+        conf->get("dummy_cycles")->updateUint(dummy_cyclelen);
+        conf->get("spi_mode")->updateString(spi_mode);
+    }
+
+    register_task(TCPIP_THREAD_NAME,TCPIP_THREAD_STACKSIZE);
+    register_task("wifi",           6656, ExpectPresent); // stack size observed at runtime from task creation
+    register_task("sys_evt",        ESP_TASKD_EVENT_STACK); // created in WiFiGeneric.cpp
+    register_task("arduino_events", 4096); // stack size from NetworkEvents.cpp
+
+    register_task("async_udp",       0, ExpectMissing);
+    register_task("btm_rrm_t",       0, ExpectMissing);
+    register_task("console_repl",    0, ExpectMissing);
+    register_task("https_ota_task",  0, ExpectMissing);
+    register_task("l2tap_clean_tas", 0, ExpectMissing);
+    register_task("main",            0, ExpectMissing);
+    register_task("ot_cli",          0, ExpectMissing);
+    register_task("protocomm_conso", 0, ExpectMissing);
+    register_task("sc_ack_send_tas", 0, ExpectMissing);
+    register_task("tcpip_thread",    0, ExpectMissing);
+    register_task("uart_event_task", 0, ExpectMissing);
+    register_task("wpsT",            0, ExpectMissing);
+}
+
+#if defined(BOARD_HAS_PSRAM)
+#define CHECK_PSRAM 1
+#else
+#define CHECK_PSRAM 0
+#endif
+
+void Debug::task_scheduler_idle_call()
+{
+    micros_t start = now_us();
+    if (CHECK_PSRAM && check_psram_next) {
+        psram_heap_valid = heap_caps_check_integrity(MALLOC_CAP_SPIRAM, integrity_check_print_errors);
+        check_psram_next = false;
+    } else {
+        internal_heap_valid = heap_caps_check_integrity(MALLOC_CAP_INTERNAL, integrity_check_print_errors);
+        if (CHECK_PSRAM) {
+            check_psram_next = true;
+        }
+    }
+    uint32_t runtime = (now_us() - start).as<uint32_t>();
+
+    integrity_check_runs++;
+    integrity_check_runtime_sum += runtime;
+
+    if (runtime > integrity_check_runtime_max) {
+        integrity_check_runtime_max = runtime;
+    }
+
+    if (!(internal_heap_valid & psram_heap_valid)) {
+        state_slow.get("heap_integrity_ok")->updateBool(false);
+        integrity_check_print_errors = false;
+    }
+}
+
+void Debug::task_scheduler_task_accounting_call(const char *file, uint_least32_t line, micros_t runtime)
+{
+    task_scheduler_accounting.add(file, line, runtime);
+}
+
+extern const char *task_fn_file;
+extern uint_least32_t task_fn_line;
+
+void Debug::custom_loop() {
+    micros_t start = now_us();
+    uint32_t run = (start - last_run).as<uint32_t>();
+    if (run > run_max && last_run != 0_us) {
+        run_max = run;
+        state_slow.get("loop_max_us")->updateUint(run_max);
+        if (task_fn_file != nullptr) {
+            state_slow.get("loop_max_fn_file")->updateString(task_fn_file);
+            state_slow.get("loop_max_fn_line")->updateUint(task_fn_line);
+        }
+    }
+    last_run = start;
+}
+
+void Debug::api_state_count(size_t count)
+{
+    state_slow.get("api_states")->updateUint(count);
+}
+
+void Debug::api_command_count(size_t count)
+{
+    state_slow.get("api_commands")->updateUint(count);
+}
+
+void Debug::api_response_count(size_t count)
+{
+    state_slow.get("api_responses")->updateUint(count);
+}
+
+void Debug::register_task(const char *task_name, uint32_t stack_size, TaskAvailability availability)
+{
+    size_t task_count = state_hwm.count();
+    for (size_t i = 0; i < task_count; i++) {
+        if (state_hwm.get(i)->get("task_name")->asString() == task_name) {
+            logger.printfln("Can't register task: A task named '%s' is already registered.", task_name);
+            return;
+        }
+    }
+
+    TaskHandle_t handle = xTaskGetHandle(task_name);
+    if (!handle) {
+        if (availability == ExpectPresent) {
+            logger.printfln("Can't find task '%s'", task_name);
+        }
+        return;
+    }
+    if (availability == ExpectMissing) {
+        logger.printfln("Found task '%s'", task_name);
+    }
+    register_task(handle, stack_size);
+}
+
+void Debug::register_task(TaskHandle_t handle, uint32_t stack_size)
+{
+    if (!handle) {
+        logger.printfln("register_task called with invalid handle.");
+        return;
+    }
+
+    const char *task_name = pcTaskGetName(handle);
+    if (!task_name) {
+        logger.printfln("register_task couldn't find task.");
+        return;
+    }
+
+    size_t task_count = task_handles.size();
+    for (size_t i = 0; i < task_count; i++) {
+        if (task_handles[i] == handle) {
+            logger.printfln("Can't register task: TaskHandle of task '%s' already registered.", task_name);
+            return;
+        }
+    }
+
+    task_handles.push_back(handle);
+
+    TaskStatus_t task_status;
+    vTaskGetInfo(handle, &task_status, 0, eReady);
+
+    Config *conf = static_cast<Config *>(state_hwm.add());
+    conf->get("task_name")->updateString(task_name);
+    conf->get("hwm")->updateUint(uxTaskGetStackHighWaterMark(handle));
+    conf->get("stack_size")->updateUint(stack_size);
+    conf->get("prio")->updateUint(static_cast<uint32_t>(task_status.uxBasePriority));
+    conf->get("core")->updateInt(task_status.xCoreID);
+}
+
+void Debug::deregister_task(const char *task_name)
+{
+    size_t task_count = state_hwm.count();
+    for (size_t i = 0; i < task_count; i++) {
+        if (state_hwm.get(i)->get("task_name")->asString() == task_name) {
+            deregister_task_internal(i);
+            return;
+        }
+    }
+
+    logger.printfln("Cannot deregister task: Name '%s' not found.", task_name);
+}
+
+void Debug::deregister_task(TaskHandle_t handle)
+{
+    if (!handle) {
+        logger.printfln("deregister_task called with invalid handle.");
+        return;
+    }
+
+    size_t task_count = task_handles.size();
+    for (size_t i = 0; i < task_count; i++) {
+        if (task_handles[i] == handle) {
+            deregister_task_internal(i);
+            return;
+        }
+    }
+
+    logger.printfln("Cannot deregister task: Handle not found.");
+}
+
+void Debug::deregister_task_internal(size_t i)
+{
+    task_handles.erase(task_handles.begin() + static_cast<int>(i));
+    state_hwm.remove(i);
+}
+
+[[gnu::noinline]]
+static float benchmark_spi_flash()
+{
+    uint8_t buf[4000];
+
+    micros_t start_time = now_us();
+    esp_err_t err = esp_flash_read(esp_flash_default_chip, buf, 0, sizeof(buf));
+    uint32_t runtime = (now_us() - start_time).as<uint32_t>();
+
+    if (err != ESP_OK) {
+        logger.printfln("SPI Flash benchmark failed: 0x%x", static_cast<unsigned>(err));
+        return -1;
+    }
+
+    float runtime_f = static_cast<float>(runtime);
+    float test_length_f = static_cast<float>(sizeof(buf));
+    float speed_MiBps = (test_length_f * 1000000.0F) / (runtime_f * 1024 * 1024);
+
+    return speed_MiBps;
+}
+
+static float benchmark_area(uint32_t *start_address, size_t max_length)
+{
+    uint32_t *end_address = start_address + (max_length / 4);
+
+    micros_t start_time = now_us();
+    while (start_address < end_address) {
+        asm volatile ("" : /* No outputs */ : "r" (*start_address++));
+        asm volatile ("" : /* No outputs */ : "r" (*start_address++));
+        asm volatile ("" : /* No outputs */ : "r" (*start_address++));
+        asm volatile ("" : /* No outputs */ : "r" (*start_address++));
+        asm volatile ("" : /* No outputs */ : "r" (*start_address++));
+        asm volatile ("" : /* No outputs */ : "r" (*start_address++));
+        asm volatile ("" : /* No outputs */ : "r" (*start_address++));
+        asm volatile ("" : /* No outputs */ : "r" (*start_address++));
+        asm volatile ("" : /* No outputs */ : "r" (*start_address++));
+        asm volatile ("" : /* No outputs */ : "r" (*start_address++));
+        asm volatile ("" : /* No outputs */ : "r" (*start_address++));
+        asm volatile ("" : /* No outputs */ : "r" (*start_address++));
+        asm volatile ("" : /* No outputs */ : "r" (*start_address++));
+        asm volatile ("" : /* No outputs */ : "r" (*start_address++));
+        asm volatile ("" : /* No outputs */ : "r" (*start_address++));
+        asm volatile ("" : /* No outputs */ : "r" (*start_address++));
+        asm volatile ("" : /* No outputs */ : "r" (*start_address++));
+        asm volatile ("" : /* No outputs */ : "r" (*start_address++));
+        asm volatile ("" : /* No outputs */ : "r" (*start_address++));
+        asm volatile ("" : /* No outputs */ : "r" (*start_address++));
+        asm volatile ("" : /* No outputs */ : "r" (*start_address++));
+        asm volatile ("" : /* No outputs */ : "r" (*start_address++));
+        asm volatile ("" : /* No outputs */ : "r" (*start_address++));
+        asm volatile ("" : /* No outputs */ : "r" (*start_address++));
+        asm volatile ("" : /* No outputs */ : "r" (*start_address++));
+        asm volatile ("" : /* No outputs */ : "r" (*start_address++));
+        asm volatile ("" : /* No outputs */ : "r" (*start_address++));
+        asm volatile ("" : /* No outputs */ : "r" (*start_address++));
+        asm volatile ("" : /* No outputs */ : "r" (*start_address++));
+        asm volatile ("" : /* No outputs */ : "r" (*start_address++));
+        asm volatile ("" : /* No outputs */ : "r" (*start_address++));
+        asm volatile ("" : /* No outputs */ : "r" (*start_address++));
+    }
+    micros_t runtime = now_us() - start_time;
+
+    uint32_t runtime32 = runtime.as<uint32_t>();
+    float runtime_f = static_cast<float>(runtime32);
+    float test_length_f = static_cast<float>(max_length);
+    float speed_MiBps = (test_length_f * 1000000.0F) / (runtime_f * 1024 * 1024);
+
+    return speed_MiBps;
+}
+
+static void get_spi_settings(uint32_t spi_num, uint32_t apb_clk, uint32_t *spi_clk, uint32_t *dummy_cyclelen, const char **spi_mode)
+{
+    // Dummy cycles
+    uint32_t spi_user1_reg = *reinterpret_cast<uint32_t *>(SPI_USER1_REG(spi_num));
+    *dummy_cyclelen = spi_user1_reg >> SPI_USR_DUMMY_CYCLELEN_S & SPI_USR_DUMMY_CYCLELEN_V;
+
+    // Mode
+    uint32_t spi_ctrl_reg = *reinterpret_cast<uint32_t *>(SPI_CTRL_REG(spi_num));
+    uint32_t fread_qio  = spi_ctrl_reg >> SPI_FREAD_QIO_S  & SPI_FREAD_QIO_V;
+    uint32_t fread_dio  = spi_ctrl_reg >> SPI_FREAD_DIO_S  & SPI_FREAD_DIO_V;
+    uint32_t fread_quad = spi_ctrl_reg >> SPI_FREAD_QUAD_S & SPI_FREAD_QUAD_V;
+    uint32_t fread_dual = spi_ctrl_reg >> SPI_FREAD_DUAL_S & SPI_FREAD_DUAL_V;
+    uint32_t mode_count = fread_qio + fread_dio + fread_quad + fread_dual;
+
+    if (mode_count == 0) {
+        *spi_mode = "four-wire";
+    } else if (mode_count == 1) {
+        if (fread_qio) {
+            *spi_mode = "qio";
+        } else if (fread_dio) {
+            *spi_mode = "dio";
+        } else if (fread_quad) {
+            *spi_mode = "quad";
+        } else {
+            *spi_mode = "dual";
+        }
+    } else {
+        *spi_mode = "invalid mode";
+        logger.printfln("fread_qio=%lu fread_dio=%lu fread_quad=%lu fread_dual=%lu", fread_qio, fread_dio, fread_quad, fread_dual);
+    }
+
+    // Clock
+    uint32_t spi_clock_reg = *reinterpret_cast<uint32_t *>(SPI_CLOCK_REG(spi_num));
+    uint32_t clk_equ_sysclk = spi_clock_reg >> SPI_CLK_EQU_SYSCLK_S & SPI_CLK_EQU_SYSCLK_V;
+    uint32_t clkdiv_pre     = spi_clock_reg >> SPI_CLKDIV_PRE_S     & SPI_CLKDIV_PRE_V;
+    uint32_t clkcnt_n       = spi_clock_reg >> SPI_CLKCNT_N_S       & SPI_CLKCNT_N_V;
+    uint32_t clkcnt_h       = spi_clock_reg >> SPI_CLKCNT_H_S       & SPI_CLKCNT_H_V;
+    uint32_t clkcnt_l       = spi_clock_reg >> SPI_CLKCNT_L_S       & SPI_CLKCNT_L_V;
+
+    *spi_clk = apb_clk / ((clkcnt_n + 1) * (clkdiv_pre + 1));
+
+    // Clock check
+    uint32_t clk_conf_sum = clkdiv_pre + clkcnt_n + clkcnt_h + clkcnt_l;
+    if (clk_equ_sysclk == 0) {
+        if (clk_conf_sum == 0) {
+            *spi_mode = "zero clock";
+        }
+    } else {
+        if (clk_conf_sum != 0) {
+            *spi_mode = "invalid clock";
+        }
+    }
+}
+
+void Debug::TaskAccounting::init(size_t max_entries)
+{
+    tinfo = static_cast<decltype(tinfo)>(heap_caps_malloc_prefer(max_entries * sizeof(TaskInfo), 1,                                      MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+    tdata = static_cast<decltype(tdata)>(heap_caps_malloc_prefer(max_entries * sizeof(TaskData), 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+
+    if (tinfo == nullptr || tdata == nullptr) {
+        logger.printfln("Failed to allocate memory for task accounting: %p %p", static_cast<void *>(tinfo), static_cast<void *>(tdata));
+
+        free(tinfo);
+        tinfo = nullptr;
+
+        free(tdata);
+        tdata = nullptr;
+
+        return;
+    }
+
+    entries_max = max_entries;
+
+    const uint32_t same_msb = static_cast<uint32_t>(__builtin_clz(reinterpret_cast<std::uintptr_t>(&_rodata_start) ^ reinterpret_cast<std::uintptr_t>(&_rodata_end)));
+
+    task_accounting_file_mask  = ~0lu >> same_msb;
+    task_accounting_line_shift = 32lu  - same_msb;
+}
+
+void Debug::TaskAccounting::add(const char *file, uint_least32_t line, micros_t runtime)
+{
+    if (tinfo == nullptr) {
+        return;
+    }
+
+    const std::uintptr_t id = (line << task_accounting_line_shift) | (reinterpret_cast<std::uintptr_t>(file) & task_accounting_file_mask);
+
+    for (size_t i = 0; i < entries_used; i++) {
+        if (tinfo[i].id != id) {
+            continue;
+        }
+
+        TaskData *data = tinfo[i].data;
+
+        data->runtime_total += runtime;
+
+        // This can be 32 bit because a task can't run longer than 1.2 hours.
+        const uint32_t runtime32 = runtime.as<uint32_t>();
+
+        if (runtime32 < data->runtime_min) {
+            data->runtime_min = runtime32;
+        } else if (runtime32 > data->runtime_max) {
+            data->runtime_max = runtime32;
+        }
+
+        data->executions++;
+
+        if (i > 0 && data->executions > tinfo[i - 1].data->executions) {
+            tinfo[i].id = tinfo[i - 1].id;
+            tinfo[i - 1].id = id;
+
+            tinfo[i].data = tinfo[i - 1].data;
+            tinfo[i - 1].data = data;
+        }
+
+        return;
+    }
+
+    if (entries_used >= entries_max) {
+        logger.printfln("Task accounting has no room for 0x%08x", id);
+        return;
+    }
+
+    if (strncmp(file, "src/", 4) == 0) {
+        file += 4;
+    }
+
+    if (strncmp(file, "modules/", 8) == 0) {
+        file += 8;
+    }
+
+    TaskData *data = tdata + entries_used;
+    data->file = file;
+    data->line = line;
+
+    data->executions = 1;
+    data->runtime_total = runtime;
+    data->runtime_min = data->runtime_max = runtime.as<uint32_t>();
+
+    tinfo[entries_used].data = data;
+    tinfo[entries_used].id = id;
+
+    entries_used++;
+}

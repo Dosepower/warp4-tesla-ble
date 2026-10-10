@@ -1,0 +1,34 @@
+#!/usr/bin/env -S /bin/sh -c 'uv run --project "$(dirname "$0")" --script "$0" "$@"'
+
+import shutil
+import subprocess
+import sys
+import os
+import tinkerforge_util as tfutil
+
+if len(sys.argv) != 3:
+    print("Usage: {} path/to/esp32-arduino-lib-builder path/to/defconfig".format(sys.argv[0]))
+    sys.exit(1)
+
+root = sys.argv[1]
+
+if not os.path.isfile(os.path.join(root, "configs", "defconfig.esp32")):
+    print("defconfig not found. Is the lib-builder root correct?")
+    sys.exit(1)
+
+shutil.move(os.path.join(root, "configs", "defconfig.esp32"), os.path.join(root, "configs", "defconfig.esp32vanilla"))
+try:
+    shutil.copy(os.path.join(sys.argv[2]), os.path.join(root, "configs", "defconfig.esp32"))
+    with tfutil.ChangedDirectory(os.path.join(root)):
+        env = os.environ
+
+        env['PATH'] = ':'.join(path for path in env['PATH'].split(':') if not path.startswith(env['VIRTUAL_ENV']))
+
+        del env['UV']
+        del env['UV_RUN_RECURSION_DEPTH']
+        del env['VIRTUAL_ENV']
+
+        subprocess.call(['bash', '-c', '. esp-idf/export.sh && ./build.sh -s -t esp32'], stdin=sys.stdin, stdout=sys.stdout, stderr=sys.stderr, env=env)
+
+finally:
+    shutil.move(os.path.join(root, "configs", "defconfig.esp32vanilla"), os.path.join(root, "configs", "defconfig.esp32"))

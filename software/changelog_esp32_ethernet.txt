@@ -1,0 +1,213 @@
+2022-05-03: 2.0.0 (5ab6df8c)
+- Initial release
+
+2022-05-13: 2.0.1 (bce0b522)
+- More WebSocket fixes
+- Fix initialized flag not being set for some modules
+- Fix WiFi scan sometimes not starting
+- Select unoccupied channel when starting WiFi AP
+
+2022-11-25: 2.0.2 (9dbdd9f5)
+- Add WireGuard
+- Add configuration for authentication secret, listen address and port
+- Add NTP state and synced time to status page
+- Add config reset API
+- Add uptime tracker for debug purposes
+- Add reset button to configuration pages
+- Allow HTTP POST for commands
+- Allow HTTP GET/POST for payload-less commands
+- Support config updates without "_update" suffix (only via HTTP)
+- Print reason for last firmware restart to event log
+- Improve recovery page
+- Allow forcing a firmware update via the recovery page
+- Increase WiFi scan timeout for AP channel selection
+- Fix form validation display on success
+- Fix memory leak in WebSocket queue cleanup
+- Fix WebSockets blocking the web server if a connection stays active over weeks
+- Fix softAP as fallback not starting correctly
+- Fix deserialization errors not being returned via HTTP
+- Fix status page showing up before the correct sub-page when reloading the web interface
+- Fix manual and firmware URLs
+- Fix error message if firmware update is too small
+- Check static IP configuration for common mistakes
+- Update timezone database
+- Improve translations
+- Improve firmware update error handling in web interface
+- Improve network timeout handing in web interface
+- Fix firmware hanging after 2^32 ms (~ 49 days 17 hours)
+
+2024-05-28: 2.0.3 (e99886bf)
+- Add watchdog protecting against WebSocket failure
+- Add API to retrieve core dump
+- Add watchdog protecting against firmware lock-ups
+- Add core dump to debug report
+- Add PWA-style bookmark support
+- Add identity API to device modules
+- Add subnet mask to WiFi and network state
+- Add WPA Enterprise EAP-TLS, EAP-PEAP and EAP-TTLS support
+- Add modal for WiFi scan results
+- Add warning to event log if Ethernet and WiFi station are used at the same time
+- Fix repeated WiFi scans taking a long time
+- Fix optional DNS servers in static IP configuration
+- Fix WiFi RSSI alt text
+- Fix NTP servers with short names/IPs
+- Fix config reset
+- Fix WiFi not allowing configuration to be saved if only the selected network has changed
+- Fix float configuration values being dropped if configuration is saved by pressing enter in float input
+- Fix status page label widths
+- Fix error feedback of text inputs
+- Fix WiFi station passphrase placeholder text
+- Fix deletion of WiFi station passphrase
+- Fix length check of text and password inputs
+- Fix localization of float numbers in web interface
+- Fix API states sporadically missing some entries
+- Fix race condition in web server initialization
+- Fix ESP crash when accessing API concurrently
+- Fix web interface errors caused by wrong web socket message order
+- Fix recovery API call payloads
+- Fix invalid feedback if no subnet mask is selected
+- Fix potential deadlock when calling API commands
+- Fix WireGuard crashing after a multiple of 7 days
+- Fix Ethernet and WiFi alternative DNS server config
+- Fix recovery page API call instructions
+- Fix race-conditions when calling API at the same time via different backends
+- Fix reverse proxy support
+- Fix web interface labels referencing non-existing IDs
+- Fix modification of certificates
+- Fix 0% progress bar width
+- Fix browser's back button not working when accessing web interface main page
+- Fix date input keyboard entry
+- Fix HTTP API causing errors if receiving payload is slow
+- Fix low entropy of boot ID
+- Fix automatic channel selection of soft AP
+- Fix NTP server configuration via DHCP
+- Fix WiFi scan not showing as completed if no WiFi was found
+- Fix reported WiFi reception quality when not connected
+- Fix Ethernet log messages
+- Improve IP configuration robustness on 10MBit Ethernet connections
+- Make static IP configuration of Ethernet interface more reliable
+- Improve API payload parsing performance
+- Improve API error messages
+- Don't require second NTP server to be set
+- Use freshly build bootloader in merged firmware
+- Update timezone database
+- Reorganize web interface menu structure
+- Improve translations
+- Improve WiFi connection establishment speed
+- Change default NTP server for improved reliability
+- Make Bricklet flashing more robust
+- Remove stale RSSI and IP values if WiFi connection is lost
+- Make web interface listen port configurable
+- Improve WiFi reception by disabling HT40 mode and 11b
+- Log connection duration when WiFi, Ethernet or WireGuard connection is lost
+- Remove NetBIOS support
+- Increase DNS cache size
+- Check for overlapping networks between WiFi, Ethernet or WireGuard IPs
+- Immediately start WiFi AP if no WiFi configured and Ethernet disabled or not plugged in
+- Clarify event log messages
+- Show firmware build time in human readable format
+- Allow full subnet mask (/0 to /32) for WireGuard
+- Stop using disabled items in InputSelect as placeholder
+- Correctly mark Ethernet and WiFi DNS server and alternative NTP server as optional
+- Improve flash performance
+- Immediately show event log messages in web interface
+- Collect event log in web interface
+- Auto scroll event log if scrolled down to bottom
+- Work around Firefox table width calculation bug
+- Check that entered IP addresses are not network or broadcast addresses
+- Improve WebSocket connection establishment reliability and performance
+- Improve WiFi softAP performance while connecting to WiFi network
+- Improve error feedback in web interface forms
+- Show hint if capslock is enabled when entering passwords
+- Remove support of TLS versions older than 1.2
+- Keep WiFi softAP open for five minutes if connection establishment takes some time
+- Make sure to connect to AP with best RSSI
+- Allow /24 to /30 subnets for softAP
+- Make sure that WiFi HT40 mode is always disabled
+- Make generation of first web socket frame more memory efficient
+- WiFi Enterprise: Fix EAP-TLS connections with client key
+- Print module in event log messages
+- Unify label/content split of status and other subpages
+- Allow to re-enable 802.11b mode to improve WiFi reception
+- Don't require login before sending main page to Safari
+- Update default NTP servers
+- Improve NTP sync speed
+- Improve web server robustness
+- Disable gratuitous ARP
+- Disable trusting sender of IP packets for ARP
+- Disable TLS elliptic curves smaller than the required default of 256
+- Allow up to 2kb of HTTP request headers
+
+2025-04-29: 2.1.0 (c1c34bd5)
+- Close network connections before reboot
+- Sign firmware updates
+- Fix focus loss when starting to edit device display name
+- Fix localization of names of downloaded files
+- Fix long SSIDs overflowing the web interface layout
+- Show error message if recovery page failed to start factory reset
+- Add system language setting
+- Use browser's preferred language for login page translation
+- Don't attempt to connect to servers if no network connection is available
+- Improve time keeping between RTCs, NTP and other time sources
+- Fix missing web interface alert texts
+- Fix WiFi scan results with unexpected characters
+- Fix Caps Lock detection of password inputs
+- Add device info to web interface menu bottom
+- Disconnect least recently active web interface if all connections are in use and a new web interface connects
+- Don't allow setting the web interface listen port to an "unsafe" port
+- Fix colors of disabled inputs in web interface
+- Speed up debug report (trace log) download
+- Update core software libraries (ESP-IDF 5.4 and arduino-esp32 3.2)
+- Update timezone database
+- Improve translations
+
+2026-06-25: 2.2.0 (b887d9c0)
+- Add TLS 1.3 support
+- Add configuration changes without reboot for most modules
+- Add status information to many subpages
+- Add status widget to web interface
+- Add dark mode to web interface
+- Center header logo on small screens
+- Unify device scan dialogs
+- Restart all Bricklets when rebooting via system subpage
+- Support reading and writing sub-APIs via URL suffix
+- Speed up establishing WiFi connection
+- Speed up WiFi network scan
+- Fix WiFi AP's automatic channel selection interfering with first STA connection attempt
+- Improve hostname/IP address inputs and validation
+- Extend network address misconfiguration detection
+- Warn more when disabling network interfaces to prevent lock-out
+- Improve WireGuard robustness
+- Prevent WireGuard keys from being leaked via debug report
+- Add key generation to WireGuard subpage
+- Make WireGuard MTU configurable
+- Fix crashes caused by WireGuard (re)connects
+- Improve web server and WebSocket robustness against dropped connections
+- Fix crash when another HTTP request arrives while rebooting
+- Fix login dialog for Firefox and Chrome on iOS
+- Fix firmware update progress bar
+- Make sure broken web server results in firmware rollback
+- Show warning for unexpected reboots
+- Show warning if web interface and browser UI locale differ
+- Fix crash in the common config logic
+- Fix mDNS spam
+- Speed up Ethernet initialization
+- Display MAC addresses and BSSIDs on Ethernet and WiFi subpages
+- Always prefer Ethernet connection over WiFi connection
+- Fix network interface priority
+- Improve translations
+- Update timezone database
+
+2026-09-17: 2.3.0 (c009b78f)
+- Add IPv6 support
+- Increase maximum certificate (chain) size to 10179 bytes
+- Redirect HTTP to HTTPS when in https-only mode
+- Fix web server returning 404 to all requests for a short time after reboot
+- Fix validation and error display of number inputs and modal windows
+- Fix crash when receiving strange mDNS packets
+- Improve JSON (de)serialization robustness
+- Improve WebSocket robustness
+- Improve password manager support
+- Improve translations
+- Update timezone database
+- Improve Bricklet communication robustness

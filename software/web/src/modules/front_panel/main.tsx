@@ -1,0 +1,207 @@
+/* esp32-firmware
+ * Copyright (C) 2024 Olaf Lüke <olaf@tinkerforge.com>
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, write to the
+ * Free Software Foundation, Inc., 59 Temple Place - Suite 330,
+ * Boston, MA 02111-1307, USA.
+ */
+
+import * as util from "../../ts/util";
+import * as API from "../../ts/api";
+import { h } from "preact";
+import { __ } from "../../ts/translation";
+import { Switch } from "../../ts/components/switch";
+import { ConfigComponent } from "../../ts/components/config_component";
+import { ConfigForm } from "../../ts/components/config_form";
+import { FormRow } from "../../ts/components/form_row";
+import { SubPage } from "../../ts/components/sub_page";
+import { NavbarItem } from "../../ts/components/navbar_item";
+import { Monitor } from "react-feather";
+import { Collapse } from "react-bootstrap";
+import { InputSelect } from "../../ts/components/input_select";
+import { FormSeparator } from "../../ts/components/form_separator";
+import { MeterValueID } from "../meters/generated/meter_value_id";
+import { get_noninternal_meter_slots, NoninternalMeterSelector } from "../power_manager/main";
+import { get_managed_chargers } from "../charge_manager/chargers";
+import { TileType } from "./generated/tile_type.enum";
+
+const FRONT_PANEL_TILES = 6;
+
+export function FrontPanelNavbar() {
+    return <NavbarItem name="front_panel" module="front_panel" title={__("front_panel.navbar.front_panel")} symbol={<Monitor />} />;
+}
+
+type FrontPanelConfig = API.getType["front_panel/config"];
+
+export class FrontPanel extends ConfigComponent<"front_panel/config", {}> {
+    static options_tile(): [string, string][] {
+        return [
+            [TileType.Empty.toString(),               __("front_panel.content.empty")],
+            [TileType.Charger.toString(),             __("front_panel.content.charger")],
+            [TileType.ChargeManagement.toString(),    __("front_panel.content.charge_management")],
+            [TileType.Meter.toString(),               __("front_panel.content.meter")],
+            [TileType.DayAheadPrices.toString(),      __("front_panel.content.day_ahead_prices")],
+            [TileType.SolarForecast.toString(),       __("front_panel.content.solar_forecast")],
+            [TileType.EnergyManagerStatus.toString(), __("front_panel.content.energy_manager_status")],
+            [TileType.HeatingStatus.toString(),       __("front_panel.content.heating_status")],
+        ];
+    }
+
+    static options_charger_unknown(): [string, string][] { return [...Array(32).keys()].map((i) => [
+        i.toString(),
+        __("front_panel.content.charger") + " " + i + " (" + __("front_panel.content.unconfigured") + ")"
+    ])}
+
+    static options_charger(): [string, string][] {
+        const chargers = get_managed_chargers();
+        let charger_slots = FrontPanel.options_charger_unknown();
+
+        chargers.forEach((charger) => {
+            const index = charger_slots.findIndex(([id]) => id === charger[0]);
+            if (index !== -1) {
+                charger_slots[index] = charger;
+            }
+        });
+
+        return charger_slots;
+    }
+
+    static options_meter_unkown(): [string, string][] { return [...Array(7).keys()].map((i) => [
+        i.toString(), __("front_panel.content.meter") + " " + i + " (" + __("front_panel.content.unconfigured") + ")"
+    ])}
+
+    static options_meter(): [string, string][] {
+        const active_meter_slots = get_noninternal_meter_slots([MeterValueID.PowerActiveLSumImExDiff], NoninternalMeterSelector.AllValues, __("power_manager.content.meter_slot_grid_power_missing_value"));
+        let meter_slots = FrontPanel.options_meter_unkown();
+
+        active_meter_slots.forEach((slot) => {
+            const index = meter_slots.findIndex(([id]) => id === slot[0]);
+            if (index !== -1) {
+                meter_slots[index] = slot;
+            }
+        });
+
+        return meter_slots;
+    }
+
+    static options_day_ahead_prices(): [string, string][] { return [
+        ["0", __("front_panel.content.current_electricity_price")],
+        ["1", __("front_panel.content.average_price_today")],
+        ["2", __("front_panel.content.average_price_tomorrow")],
+    ]}
+
+    static options_solar_forecast(): [string, string][] { return [
+        ["0", __("front_panel.content.pv_yield_forecast_today")],
+        ["1", __("front_panel.content.pv_yield_forecast_tomorrow")],
+    ]}
+
+    constructor() {
+        super('front_panel/config',
+              () => __("front_panel.script.save_failed"));
+    }
+
+    get_tile_config(tile_index: number, tile_items: [string, string][]) {
+        return <div class="input-group mt-3">
+                <span class="input-group-text">{__("front_panel.content.setting")}</span>
+                <InputSelect
+                    items={tile_items}
+                    value={this.state.tiles[tile_index][1]}
+                    onValue={(v) => {
+                        let tiles = this.state.tiles;
+                        tiles[tile_index][1] = parseInt(v);
+                        this.setState({tiles: tiles})
+                    }}
+                />
+            </div>;
+    }
+
+    get_default_value(tile_type: TileType) {
+        switch (tile_type) {
+            case TileType.Empty:               return null;
+            case TileType.Charger:             return 0;
+            case TileType.ChargeManagement:    return null;
+            case TileType.Meter:               return 0;
+            case TileType.DayAheadPrices:      return 0;
+            case TileType.SolarForecast:       return 0;
+            case TileType.EnergyManagerStatus: return null;
+            case TileType.HeatingStatus:       return null;
+            default:                           return undefined;
+        }
+    }
+
+    render(props: {}, state: FrontPanelConfig) {
+        if (!util.render_allowed()) {
+            return <SubPage name="front_panel" />;
+        }
+
+        function get_tile_symbol(tile_index: number) {
+            return <svg xmlns="http://www.w3.org/2000/svg" width="38" height="35" viewBox="0 0 38 35" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather feather-grid">
+                <rect fill={tile_index == 0 ? "currentColor" : ""} y="3"  x="3"  width="14" height="7"></rect>
+                <rect fill={tile_index == 1 ? "currentColor" : ""} y="14" x="3"  width="14" height="7"></rect>
+                <rect fill={tile_index == 2 ? "currentColor" : ""} y="25" x="3"  width="14" height="7"></rect>
+                <rect fill={tile_index == 3 ? "currentColor" : ""} y="3"  x="21" width="14" height="7"></rect>
+                <rect fill={tile_index == 4 ? "currentColor" : ""} y="14" x="21" width="14" height="7"></rect>
+                <rect fill={tile_index == 5 ? "currentColor" : ""} y="25" x="21" width="14" height="7"></rect>
+            </svg>
+        }
+
+        return (
+            <SubPage name="front_panel">
+                <ConfigForm id="front_panel_config_form"
+                            title={__("front_panel.content.front_panel")}
+                            isDirty={this.isDirty()}
+                            onSave={this.save}
+                            onDirtyChange={this.setDirty}>
+                    <FormRow label={__("front_panel.content.enable")} label_muted={__("front_panel.content.enable_muted")}>
+                        <Switch desc={__("front_panel.content.enable_desc")}
+                                checked={state.enable}
+                                onClick={this.toggle('enable')}
+                        />
+                    </FormRow>
+                    <Collapse in={state.enable}>
+                        <div>
+                            {util.range(FRONT_PANEL_TILES).map((tile_index) => {
+                                return <div>
+                                    <FormSeparator/>
+                                    <FormRow symbol={get_tile_symbol(tile_index)} label={__("front_panel.content.tile") + " " + (tile_index+1)}>
+                                        <InputSelect
+                                            items={FrontPanel.options_tile()}
+                                            value={state.tiles[tile_index][0]}
+                                            onValue={(v) => {
+                                                let tiles = state.tiles;
+                                                let tile_type = parseInt(v);
+                                                tiles[tile_index] = [tile_type, this.get_default_value(tile_type)];
+                                                this.setState({tiles: tiles})}
+                                            }
+                                        />
+                                    {state.tiles[tile_index][0] === TileType.Charger        && (this.get_tile_config(tile_index, FrontPanel.options_charger()))}
+                                    {state.tiles[tile_index][0] === TileType.Meter          && (this.get_tile_config(tile_index, FrontPanel.options_meter()))}
+                                    {state.tiles[tile_index][0] === TileType.DayAheadPrices && (this.get_tile_config(tile_index, FrontPanel.options_day_ahead_prices()))}
+                                    {state.tiles[tile_index][0] === TileType.SolarForecast  && (this.get_tile_config(tile_index, FrontPanel.options_solar_forecast()))}
+                                    </FormRow>
+                                </div>
+                            })}
+                        </div>
+                    </Collapse>
+                </ConfigForm>
+            </SubPage>
+        );
+    }
+}
+
+export function pre_init() {
+}
+
+export function init() {
+}

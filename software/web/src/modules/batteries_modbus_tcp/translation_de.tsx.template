@@ -1,0 +1,166 @@
+/** @jsxImportSource preact */
+import { h } from "preact";
+let x = {
+    "batteries_modbus_tcp": {
+        "status": {
+        },
+        "navbar": {
+        },
+        "content": {
+            "battery_class": "Modbus/TCP",
+            "export_basename_suffix": "-Modbus-TCP",
+            "test": "Test",
+            "test_mode": "Für Speichermodus",
+            "test_start": "Starten",
+            "test_stop": /*SFN*/(mode: string) => mode ? "Stoppen: " + mode : "Stoppen"/*NF*/,
+            "display_name": "Anzeigename",
+            "host": "Host",
+            "host_invalid": "Host ist ungültig",
+            "port": "Port",
+            "port_muted": "typischerweise 502 oder 1502",
+            "discovering": "Einrichtung läuft",
+            "checking": "prüfe Vorbedingung",
+            "testing": "Test läuft",
+            "table": "Registertabelle",
+            "table_custom": "Benutzerdefiniert",
+            {{{tables}}},
+            "sma_hybrid_inverter_warning": <><p>Diese SMA Wechselrichterserien werden nicht unterstüzt: Sunny Boy Smart Energy, Sunny Tripower Storage und Sunny Island.</p>
+                                             <p>Das SMA eigene <a href="https://manuals.sma.de/HM-20/de-DE/8644254859.html">prognosebasierte Batterieladen</a> kann die Batteriesteuerung beinträchtigen. Bitte sicherstellen, dass das prognosebasierte Batterieladen im SMA Sunny Portal deaktiviert ist.</p></>,
+            "sax_power_home_basic_mode_warning": <><p>Bitte sicherstellen, dass die Modbus/TCP-Register 40044/40045 (43/44) beim SAX Power Home Batteriespeicher freigeschaltet sind.</p></>,
+            "sax_power_home_basic_mode_degradation_warning": <><p>Bedingt durch die limitierte Steuerbarkeit des SAX Power Home Batteriespeichers, können das Laden und Entladen nicht erzwungen werden. Stattdessen wird in diesen Fällen das Laden bzw. Entladen auf normal belassen und das Entladen bzw. Laden blockiert.</p></>,
+            "kostal_plenticore_warning": <><p>Bitte sicherstellen, dass die "Batteriesteuerung" im KOSTAL Wechselrichter auf "Extern über Protokoll (Modbus TCP)" konfiguriert ist. Für eine optimale Reaktionszeit der Batterie, bitte sicherstellen, dass der "Timeout ext. Batteriesteuerung [s]" so kurz wie möglich, aber nicht kürzer als 30 Sekunden, konfiguriert ist.</p>
+                                           <p>Bedingt durch das Verhalten der externen Batteriesteuerung von KOSTAL Wechselrichtern kann der Wechsel zwischen den verschiedenen Modi um den "Timeout ext. Batteriesteuerung [s]" verzögert sein.</p></>,
+            "kostal_plenticore_discovering_warning": <><p>Die Modbus/TCP-Byte-Reihenfolge des KOSTAL Wechselrichters wird ermittelt. Sollte dieser Zustand mehr als ein paar Sekunden anhalten, dann liegt vermutlich ein Kommunikationsproblem mit dem Wechselrichter vor.</p></>,
+            "kostal_plenticore_plus_g2_checking_warning": <><p>Bedingt durch das Verhalten der externen Batteriesteuerung von KOSTAL PLENTICORE plus G2 Wechselrichtern, muss beim Verlassen der Modi "Laden erzwingen" und "Entladen erzwingen" die Batteriesteuerung pausiert werden bis der "Timeout ext. Batteriesteuerung [s]" des Wechselrichters abgelaufen ist. Erst danach kann die Batteriesteuerung in den neuen Modus wechseln.</p></>,
+            "kostal_plenticore_g3_firmware_warning": <><p>Bitte sicherstellen, das mindestens Software Version 03.05.xxxxx auf dem Wechselrichter installiert ist.</p></>,
+            "custom_mode_degradation_warning": <><p>Der effektive Modus weicht vom aktiven Modus ab, bedingt durch explizite Auswahl in der benutzerdefinierten Registertabelle für diesen Batteriespeicher.</p></>,
+            "testing_warning": <><p>Durch den laufenden Test kann der aktive Modus dieses Batteriespeichers vom globalen Modus der Batteriesteuerung abweichen.</p></>,
+            "device_address": "Geräteadresse",
+            "device_address_muted": /*SFN*/(device_address: number) => "typischerweise " + device_address/*NF*/,
+            "repeat_interval": "Wiederholungs-Interval",
+            "repeat_interval_muted": "0 deaktivert Wiederholung",
+            "grid_draw_setpoint": "Sollwert Netzbezug",
+            "grid_draw_setpoint_muted_normal": "normal",
+            "grid_draw_setpoint_muted_force_charge": "Laden erzwungen",
+            "grid_draw_setpoint_muted_force_discharge": "Entladen erzwungen",
+            "force_charge_current": "Erzwungener Ladestrom",
+            "force_discharge_current": "Erzwungener Entladestrom",
+            "force_charge_power": "Erzwungene Ladeleistung",
+            "force_discharge_power": "Erzwungene Entladeleistung",
+            "max_normal_charge_current": "Maximaler normaler Ladestrom",
+            "max_normal_discharge_current": "Maximaler normaler Entladestrom",
+            "max_normal_charge_power": "Maximale normale Ladeleistung",
+            "max_normal_discharge_power": "Maximale normale Entladeleistung",
+            "force_charge_rate": "Erzwungene Laderate",
+            "force_discharge_rate": "Erzwungene Entladerate",
+            "register_title": /*SFN*/(mode: string, mode_long: string) => "Speichermodus: " + mode + " (" + mode_long + ")"/*NF*/,
+            "register_address_mode": "Adressmodus",
+            "register_address_mode_address": "Registeradresse (beginnt bei 0)",
+            "register_address_mode_number": "Registernummer (beginnt bei 1)",
+            "register_blocks": "Registerblöcke",
+            "register_blocks_add_title": "Registerblock hinzufügen",
+            "register_blocks_add_message_register_blocks": /*SFN*/(have: number, max: number) => `${have} von ${max} Registerblöcken konfiguriert`/*NF*/,
+            "register_blocks_add_message_total_values": /*SFN*/(have: number, max: number) => `${have} von ${max} Werten konfiguriert`/*NF*/,
+            "register_blocks_add_select_address_mode": "Zuerst Adressmodus auswählen...",
+            "register_blocks_edit_title": "Registerblock bearbeiten",
+            "register_blocks_desc": "Beschreibung",
+            "register_blocks_desc_muted": "optional",
+            "register_blocks_function_code": "Funktionscode",
+            "register_blocks_function_code_read_coils": "1 – Coils lesen",
+            "register_blocks_function_code_read_discrete_inputs": "2 – Discrete Inputs lesen",
+            "register_blocks_function_code_read_holding_registers": "3 – Holding Register lesen",
+            "register_blocks_function_code_read_input_registers": "4 – Input Register lesen",
+            "register_blocks_function_code_write_single_coil": "5 – Einzelne Coil schreiben",
+            "register_blocks_function_code_write_single_register": "6 – Einzelnes Register schreiben",
+            "register_blocks_function_code_write_multiple_coils": "15 – Mehrere Coils schreiben",
+            "register_blocks_function_code_write_multiple_registers": "16 – Mehrere Register schreiben",
+            "register_blocks_function_code_mask_write_register": "22 – Register maskiert schreiben",
+            "register_blocks_function_code_read_mask_write_single_register": "3 + 6 – Einzelnes Register lesen und maskiert schreiben",
+            "register_blocks_function_code_read_mask_write_multiple_registers": "3 + 16 – Mehrere Register lesen und maskiert schreiben",
+            "register_blocks_function_code_if_different_write_single_coil": "100 + 5 – Falls abweichend, einzelne Coil schreiben",
+            "register_blocks_function_code_if_different_write_single_register": "100 + 6 – Falls abweichend, einzelnes Register schreiben",
+            "register_blocks_function_code_if_different_write_multiple_coils": "100 + 15 – Falls abweichend, mehrere Coils schreiben",
+            "register_blocks_function_code_if_different_write_multiple_registers": "100 + 16 – Falls abweichend, mehrere Register schreiben",
+            "register_blocks_function_code_if_different_mask_write_register": "100 + 22 – Falls abweichend, Register maskiert schreiben",
+            "register_blocks_function_code_if_different_read_mask_write_single_register": "100 + 3 + 6 – Falls abweichend, einzelnes Register lesen und maskiert schreiben",
+            "register_blocks_function_code_if_different_read_mask_write_multiple_registers": "100 + 3 + 16 – Falls abweichend, mehrere Register lesen und maskiert schreiben",
+            "register_blocks_start_address": "Startadresse",
+            "register_blocks_start_address_muted": "beginnt bei 0",
+            "register_blocks_start_number": "Startnummer",
+            "register_blocks_start_number_muted": "beginnt bei 1",
+            "register_blocks_value": "Wert",
+            "register_blocks_value_muted": "",
+            "register_blocks_value_invalid": "Der Wert muss eine Dezimalzahl sein.",
+            "register_blocks_values": "Werte",
+            "register_blocks_values_muted": "kommagetrennt",
+            "register_blocks_values_invalid": "Die Werte müssen eine kommagetrennte Liste von Dezimalzahlen sein.",
+            "register_blocks_mask": "Bitmaske",
+            "register_blocks_mask_muted": "",
+            "register_blocks_mask_invalid": "Die Bitmaske muss eine Folge von 0, 1 oder x sein.",
+            "register_blocks_masks": "Bitmasken",
+            "register_blocks_masks_muted": "kommagetrennt",
+            "register_blocks_masks_invalid": "Die Bitmasken müssen eine kommagetrennte Liste von Folgen von 0, 1 oder x sein.",
+            "register_blocks_values_desc": /*SFN*/(func: number, addr: number, values: string) => {
+                let action = "";
+                let rtyp = "Unbekannt";
+
+                switch (func) {
+                case 1:
+                    action = "Prüfe";
+                    rtyp = values.indexOf(",") >= 0 ? "Coils" : "Coil";
+                    break;
+
+                case 2:
+                    action = "Prüfe";
+                    rtyp = values.indexOf(",") >= 0 ? "Discrete Inputs" : "Discrete Input";
+                    break;
+
+                case 3:
+                    action = "Prüfe";
+                    rtyp = "Holding Register";
+                    break;
+
+                case 4:
+                    action = "Prüfe";
+                    rtyp = "Input Register";
+                    break;
+
+                case 5:
+                case 15:
+                case 105:
+                case 115:
+                    action = "Setze";
+                    rtyp = values.indexOf(",") >= 0 ? "Coils" : "Coil";
+                    break;
+
+                case 6:
+                case 16:
+                case 22:
+                case 9:
+                case 19:
+                case 106:
+                case 116:
+                case 122:
+                case 109:
+                case 119:
+                    action = "Setze";
+                    rtyp = "Register";
+                    break;
+                }
+
+                return action + " " + (values.indexOf(",") >= 0 ? "ab" : "") + " " + rtyp + " " + addr + " auf " + values;
+            }/*NF*/,
+            "register_effective_mode": "Effektiver Modus",
+            "register_effective_mode_matching": "Übereinstimmend",
+            "register_effective_mode_different": "Abweichend",
+            "register_effective_mode_help": <><p>Falls es nicht möglich ist den jeweiligen Speichermodus vollständig umzusetzen, dann sollte der Speichermodus so gut wie möglich angenähert werden und der Speichermodus, der dann wirklich effektiv umgesetzt wurde, als effektiver Modus gesetzt werden.</p>
+                                              <p>Wenn es also z.B. nicht möglich ist für den Modus "Laden blockieren", das Laden alleine zu blockieren und gleichzeitig das Entladen normal zu belassen, sondern Laden und Entladen nur zusammen blockiert werden können, dann sollte der effektive Modus in diesem Fall auf "Blockieren" gesetzt werden.</p></>,
+
+            "test_start_error": "Fehler beim Starten des Tests",
+            "test_continue_error": "Fehler beim Fortsetzen des Tests",
+            "test_stop_error": "Fehler beim Stoppen des Tests"
+        },
+        "script": {
+        }
+    }
+}

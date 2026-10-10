@@ -1,0 +1,33 @@
+{
+  "name": "TeslaBLE-WARP",
+  "version": "5.2.0",
+  "description": "Pinned Tesla BLE protocol library for the WARP4 optional build",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yoziru/tesla-ble.git"
+  },
+  "authors": [
+    {
+      "name": "Yasir Ekinci",
+      "email": "hi@yasirekinci.com",
+      "url": "https://yasirekinci.com",
+      "maintainer": true
+    }
+  ],
+  "homepage": "https://github.com/yoziru/tesla-ble/wiki",
+  "license": "AGPL-3.0-only",
+  "build": {
+    "srcDir": ".",
+    "srcFilter": [
+      "+<src/>",
+      "+<generated/src/>"
+    ],
+    "flags": [
+      "-Iinclude",
+      "-Igenerated/include"
+    ]
+  },
+  "dependencies": {
+    "nanopb/Nanopb": "0.4.92"
+  }
+}

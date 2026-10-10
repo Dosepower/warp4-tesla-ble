@@ -1,0 +1,290 @@
+/* esp32-firmware
+ * Copyright (C) 2020-2021 Erik Fleckstein <erik@tinkerforge.com>
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, write to the
+ * Free Software Foundation, Inc., 59 Temple Place - Suite 330,
+ * Boston, MA 02111-1307, USA.
+ */
+
+#include "network.h"
+
+#include <esp_netif.h>
+#include <sdkconfig.h> // For CONFIG_MDNS_TASK_STACK_SIZE
+#include <mdns.h>
+
+#include "event_log_prefix.h"
+#include "generated/module_dependencies.h"
+#include "tools/string_builder.h"
+#include "build.h"
+#include "options.h"
+
+#include "unsafe_ports.h"
+
+#if MODULE_ETHERNET_AVAILABLE()
+#include "modules/ethernet/generated/ethernet_state.enum.h"
+#endif
+
+#if MODULE_WIFI_AVAILABLE()
+#include "modules/wifi/generated/wifi_state.enum.h"
+#endif
+
+#if !MODULE_CERTS_AVAILABLE()
+#define MAX_CERT_ID -1
+#endif
+
+#if OPTIONS_WEB_SERVER_HTTPS_ENABLED() && OPTIONS_WEB_SERVER_HTTP_ENABLED()
+static constexpr TransportMode default_transport_mode = TransportMode::InsecureAndSecure;
+#elif OPTIONS_WEB_SERVER_HTTPS_ENABLED()
+static constexpr TransportMode default_transport_mode = TransportMode::Secure;
+#elif OPTIONS_WEB_SERVER_HTTP_ENABLED()
+static constexpr TransportMode default_transport_mode = TransportMode::Insecure;
+#else
+#error "Must enable at least one transport mode"
+#endif
+
+void Network::pre_setup()
+{
+    config = ConfigRoot{Config::Object({
+        {"hostname", Config::Str("hostname", 1, 32)}, // Will be replaced with stored config or sensible default. Cannot be empty.
+        {"enable_mdns", Config::Bool(true)},
+        {"transport_mode", Config::Enum<TransportMode>(default_transport_mode)},
+        {"web_server_port", Config::Uint16(OPTIONS_NETWORK_WEB_SERVER_PORT())},
+        {"web_server_port_secure", Config::Uint16(OPTIONS_NETWORK_WEB_SERVER_PORT_SECURE())},
+        {"cert_id", Config::Int(-1, -1, MAX_CERT_ID)},
+        {"key_id", Config::Int(-1, -1, MAX_CERT_ID)},
+    }), [this](Config &update, ConfigSource source) -> String {
+        const uint16_t new_port_http  = update.get("web_server_port")->asUint16();
+        const uint16_t new_port_https = update.get("web_server_port_secure")->asUint16();
+
+        for (size_t i = 0; i < unsafe_ports_length; ++i) {
+            if (unsafe_ports[i] == new_port_http) {
+                return "Selected http web server port is regarded as unsafe by web browsers. Please select another port.";
+            }
+            if (unsafe_ports[i] == new_port_https) {
+                return "Selected https web server port is regarded as unsafe by web browsers. Please select another port.";
+            }
+        }
+
+        String cert_error;
+
+        const TransportMode transport_mode_update = update.get("transport_mode")->asEnum<TransportMode>();
+
+        if (source != ConfigSource::File && transport_mode_update != TransportMode::Insecure) {
+            const int32_t cert_id_update = update.get("cert_id")->asInt();
+            const int32_t key_id_update  = update.get("key_id" )->asInt();
+
+            if (transport_mode_update != config.get("transport_mode")->asEnum<TransportMode>() ||
+                cert_id_update        != config.get("cert_id"       )->asInt() ||
+                key_id_update         != config.get("key_id"        )->asInt()) {
+
+                if (!server.reload_web_server_cert(cert_id_update, key_id_update, false, &cert_error)) {
+                    if (cert_error.isEmpty()) {
+                        cert_error = "Invalid certificate or key; see event log for details";
+                    }
+                }
+            }
+        }
+
+        return cert_error;
+    }};
+
+    state = Config::Object({
+        {"connected", Config::Bool(false)}
+    });
+}
+
+void Network::setup()
+{
+    if (!api.restorePersistentConfig("network/config", &config)) {
+        config.get("hostname")->updateString(esp32_common.get_default_name());
+    }
+
+    this->hostname               = config.get("hostname")->asString();
+    this->enable_mdns            = config.get("enable_mdns")->asBool();
+    this->transport_mode         = config.get("transport_mode")->asEnum<TransportMode>();
+    this->web_server_port        = config.get("web_server_port")->asUint();
+    this->web_server_port_secure = config.get("web_server_port_secure")->asUint();
+    this->cert_id                = config.get("cert_id")->asInt();
+    this->key_id                 = config.get("key_id")->asInt();
+
+    esp_netif_init();
+
+    initialized = true;
+}
+
+void Network::register_urls()
+{
+    api.addPersistentConfig("network/config", &config, {}, {"hostname"});
+
+#if !MODULE_NETWORK_HELPER_AVAILABLE()
+    register_urls_late();
+#endif
+
+    if (!this->enable_mdns) {
+        return;
+    }
+
+    esp_err_t ret;
+
+    if ((ret = mdns_init()) != ESP_OK) {
+        logger.printfln("Failed to initialize mDNS responder: %s", esp_err_to_name(ret));
+        return;
+    }
+
+    // "required if you want to advertise services."
+    if((ret = mdns_hostname_set(get_hostname().c_str())) != ESP_OK) {
+        logger.printfln("Failed to set mDNS hostname: %s", esp_err_to_name(ret));
+        mdns_free();
+        return;
+    }
+
+    if ((ret = mdns_service_add(NULL, "_http", "_tcp", get_web_server_port(), NULL, 0)) != ESP_OK) {
+        logger.printfln("Failed to add mDNS service: %s", esp_err_to_name(ret));
+        mdns_free();
+        return;
+    }
+
+    ret = mdns_service_txt_item_set("_http", "_tcp", "firmware_version", build_version_full_str());
+    if (ret != ESP_OK) {
+        logger.printfln("Failed to set mDNS txt firmware_version: %s", esp_err_to_name(ret));
+        return;
+    }
+
+    ret = mdns_service_txt_item_set("_http", "_tcp", "txtvers", "1");
+    if (ret != ESP_OK) {
+        logger.printfln("Failed to set mDNS txt txtvers: %s", esp_err_to_name(ret));
+        return;
+    }
+
+    ret = mdns_service_txt_item_set("_http", "_tcp", "brand", OPTIONS_MANUFACTURER());
+    if (ret != ESP_OK) {
+        logger.printfln("Failed to set mDNS txt brand: %s", esp_err_to_name(ret));
+        return;
+    }
+
+    ret = mdns_service_txt_item_set("_http", "_tcp", "model", OPTIONS_PRODUCT_NAME());
+    if (ret != ESP_OK) {
+        logger.printfln("Failed to set mDNS txt model: %s", esp_err_to_name(ret));
+        return;
+    }
+
+    // The remote access frontend expects the UID to be in numerical format
+    char uid_buf[32];
+    snprintf(uid_buf, 32, "%lu", esp32_common.get_uid_num());
+    ret = mdns_service_txt_item_set("_http", "_tcp", "uid", uid_buf);
+    if (ret != ESP_OK) {
+        logger.printfln("Failed to set mDNS txt uid: %s", esp_err_to_name(ret));
+        return;
+    }
+
+    mdns_started = true;
+    logger.printfln("mDNS responder started");
+
+#if MODULE_DEBUG_AVAILABLE()
+    debug.register_task("mdns", CONFIG_MDNS_TASK_STACK_SIZE);
+#endif
+}
+
+void Network::register_urls_late()
+{
+    api.addState("network/state", &state);
+}
+
+void Network::register_events()
+{
+#if MODULE_ETHERNET_AVAILABLE()
+    event.registerEvent("ethernet/state", {"connection_state"}, [this](const Config *connection_state) {
+        ethernet_connected = connection_state->asEnum<EthernetState>() == EthernetState::Connected;
+        update_connected();
+        return EventResult::OK;
+    });
+#endif
+
+#if MODULE_WIFI_AVAILABLE()
+    event.registerEvent("wifi/state", {"connection_state"}, [this](const Config *connection_state) {
+        wifi_sta_connected = connection_state->asEnum<WifiState>() == WifiState::Connected;
+        update_connected();
+        return EventResult::OK;
+    });
+
+    event.registerEvent("wifi/state", {"ap_sta_count"}, [this](const Config *ap_sta_count) {
+        wifi_ap_sta_count = ap_sta_count->asUint();
+        update_connected();
+        return EventResult::OK;
+    });
+#endif
+
+#if MODULE_DEVICE_NAME_AVAILABLE()
+    if (mdns_started) {
+        event.registerEvent("info/display_name", {"display_name"}, [](const Config *display_name) {
+            // It's fine if this fails. mDNS will fall back to the hostname.
+            mdns_instance_name_set(display_name->asEphemeralCStr());
+            return EventResult::OK;
+        });
+    }
+#endif
+}
+
+void Network::update_connected()
+{
+    uint8_t new_mask = (ethernet_connected ? 1 : 0)
+                     | (wifi_sta_connected ? 2 : 0)
+                     | ((wifi_ap_sta_count > 0) ? 4 : 0);
+
+    connected = (new_mask != 0);
+    bool value_changed   = state.get("connected")->updateBool(connected);
+    bool interface_added = connected && !value_changed && ((new_mask & ~connected_interface_mask) != 0);
+
+    if (interface_added) {
+        state.get("connected")->set_updated(0xFF);
+    }
+
+    connected_interface_mask = new_mask;
+
+    if (value_changed || interface_added) {
+        if (connected) {
+            char connections_str[24];
+            StringWriter str{connections_str, ARRAY_SIZE(connections_str)};
+            bool needs_comma = false;
+
+            if (ethernet_connected) {
+                str.puts("Ethernet");
+                needs_comma = true;
+            }
+            if (wifi_sta_connected) {
+                if (needs_comma) {
+                    str.puts(", ");
+                } else {
+                    needs_comma = true;
+                }
+                str.puts("WiFi");
+            }
+            if (wifi_ap_sta_count > 0) {
+                if (needs_comma) {
+                    str.puts(", ");
+                }
+                str.puts("AP");
+            }
+
+            logger.printfln("Network connected (%s)", connections_str);
+        } else {
+            logger.printfln("Network disconnected");
+        }
+    }
+}
+
+int64_t Network::on_network_connected(std::function<EventResult(const Config *)> &&callback)
+{
+    return event.registerEvent("network/state", {"connected"}, std::move(callback));
+}

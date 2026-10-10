@@ -1,0 +1,1057 @@
+/* esp32-firmware
+ * Copyright (C) 2020-2021 Erik Fleckstein <erik@tinkerforge.com>
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, write to the
+ * Free Software Foundation, Inc., 59 Temple Place - Suite 330,
+ * Boston, MA 02111-1307, USA.
+ */
+
+//#include "generated/module_available.inc"
+//#include "../../options.inc"
+
+import * as util from "../../ts/util";
+import * as API from "../../ts/api";
+import * as options from "../../options";
+import { h, Fragment, Component, RefObject } from "preact";
+import { effect } from "@preact/signals-core";
+import { __, get_active_language_enum } from "../../ts/translation";
+import { FormRow } from "../../ts/components/form_row";
+import { FormSeparator } from "../../ts/components/form_separator";
+import { InputText } from "../../ts/components/input_text";
+import { InputDate } from "../../ts/components/input_date";
+import { Button, Collapse, ListGroup, ListGroupItem, Spinner, Dropdown, Row } from "react-bootstrap";
+import { InputSelect } from "../../ts/components/input_select";
+import { Switch } from "../../ts/components/switch";
+import { ConfigComponent } from "../../ts/components/config_component";
+import { ConfigForm } from "../../ts/components/config_form";
+import { InputFloat } from "../../ts/components/input_float";
+import { SubPage } from "../../ts/components/sub_page";
+import { Table, TableRow } from "../../ts/components/table";
+import { useMemo } from "preact/hooks";
+import { NavbarItem } from "../../ts/components/navbar_item";
+import { StatusSection } from "../../ts/components/status_section";
+import { BatteryCharging, Calendar, Clock, Download, User, List, Send, Mail, Zap } from "react-feather";
+import { CSVFlavor } from "./generated/csv_flavor.enum";
+import { Language } from "../../ts/language";
+import { GenerationState } from "./generated/generation_state.enum";
+import { FileType } from "./generated/file_type.enum";
+import { CMAuthType } from "../cm_networking/generated/cm_auth_type.enum";
+//#if MODULE_EV_AVAILABLE
+import { EvSymbol } from "../ev/main";
+//#else
+const EvSymbol = <></>
+//#endif
+
+export function ChargeTrackerNavbar() {
+    return <NavbarItem name="charge_tracker" module="charge_tracker" title={__("charge_tracker.navbar.charge_tracker")} symbol={<List />} />;
+}
+
+type Charge = API.getType["charge_tracker/last_charges"][0];
+type ChargeTrackerConfig = API.getType["charge_tracker/config"];
+
+interface S {
+    user_filter: string;
+    device_filter: string;
+    start_date: Date;
+    end_date: Date;
+    file_type: string;
+    language: string;
+    pdf_letterhead: string;
+    csv_flavor: "excel" | "rfc4180";
+    filter_empty_charges: boolean;
+    show_spinner: boolean;
+    last_charges: Readonly<Charge[]>;
+//#if MODULE_REMOTE_ACCESS_AVAILABLE
+    new_remote_upload_config: {
+        user_filter: number;
+        device_filter: number;
+        file_type: number;
+        language: Language;
+        letterhead: string;
+        user_id: number;
+        csv_delimiter: CSVFlavor;
+        filter_empty_charges: boolean;
+        last_upload_timestamp_min: number;
+    };
+    next_upload_timestamp_min: number;
+//#endif
+}
+
+type ChargeTrackerState = S & API.getType['charge_tracker/state'];
+
+let wallet_icon = <svg width="24" height="24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><rect x="1" y="6.0999" width="22" height="16" rx="2" ry="2"/><path d="m2.9474 6.0908 15.599-4.8048s0.59352-0.22385 0.57647 0.62527c-0.02215 1.1038-0.01535 3.6833-0.01535 3.6833"/></svg>
+
+let wallbox_icon = <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="currentColor" stroke="none" class="feather feather-type2"><path d="M23 10.846c0 6.022-4.925 10.904-11 10.904S1 16.868 1 10.846c0-1.506.308-2.94.864-4.244C2.143 5.95 2.88 4.75 2.88 4.75h18.243s.736 1.2 1.014 1.852c.556 1.304.864 2.738.864 4.244z" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><circle cx="9" cy="8.5" r="1.5"/><circle cx="15" cy="8.5" r="1.5"/><circle cx="9" cy="16.75" r="2"/><circle cx="15" cy="16.75" r="2"/><circle cx="6" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="18" cy="12" r="2"/></svg>
+
+function BatteryFilled(props:{percent: number}) {
+    let pct = `${props.percent}%`;
+    return <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather feather-battery"><defs><linearGradient id="partialFill"><stop offset={pct} stop-color="currentColor" /><stop offset={pct} stop-color="currentColor" stop-opacity="0"/></linearGradient></defs><rect fill="url(#partialFill)" x="1" y="6" width="18" height="12" rx="2" ry="2"></rect><line x1="23" y1="13" x2="23" y2="11"></line></svg>
+}
+
+function TrackedCharge(props: {charge: Charge, users: API.getType['users/config']['users'], electricity_price: number, ev_name?: string, ev_soc?: number}) {
+    const display_name = useMemo(
+        () => {
+            let result = __("charge_tracker.script.unknown_user");
+
+            let filtered = props.users.filter(x => x.id == props.charge.user_id);
+
+            if (props.charge.user_id != 0 || filtered[0].display_name != "Anonymous") {
+                result = __("charge_tracker.script.deleted_user")
+                if (filtered.length == 1)
+                    result = filtered[0].display_name
+            }
+            return result;
+        },
+        [props.users, props.charge.user_id, get_active_language_enum()]
+    );
+
+    let have_charge_cost = props.electricity_price > 0 && props.charge.energy_charged != null;
+
+    return <ListGroupItem>
+        <div class="row justify-content-end">
+            <div class="col-auto pe-2 mb-2">
+                <span class="pe-2"><User/></span>
+                <span class="align-middle">{display_name}</span>
+            </div>
+            <div class="col px-0" />
+            <div class="col-auto ps-2 mb-2">
+                <span class="align-middle">{props.charge.energy_charged === null ? "N/A" : util.toLocaleFixed(props.charge.energy_charged, 3)} kWh</span>
+                <span class="ps-2"><Zap/></span>
+            </div>
+        </div>
+        {props.ev_name || props.ev_soc ?
+            <div class="row justify-content-end">
+                {props.ev_name ?
+                    <div class="col-auto pe-2 mb-2">
+                        <span class="pe-2">
+                        {EvSymbol}
+                        </span>
+                        <span class="align-middle">{props.ev_name}</span>
+                    </div> : undefined}
+                <div class="col px-0" />
+                {props.ev_soc ?
+                    <div class="col-auto ps-2 mb-2">
+                        <span class="align-middle">{util.toLocaleFixed(props.ev_soc, 0)} %</span>
+                        <span class="ps-2"><BatteryFilled percent={props.ev_soc}/></span>
+                    </div> : undefined}
+            </div> : undefined}
+        <div class="row justify-content-end">
+            <div class="col-auto pe-2 mb-2">
+                <span class="pe-2"><Calendar/></span>
+                <span class="align-middle">{util.timestamp_min_to_date(props.charge.timestamp_minutes, __("charge_tracker.script.unknown_charge_start"))}</span>
+            </div>
+            <div class="col px-0" />
+            <div class="col-auto ps-2 mb-2">
+                <span class="align-middle">{util.format_timespan(props.charge.charge_duration)}</span>
+                <span class="ps-2"><Clock/></span>
+            </div>
+        </div>
+        <div class="row justify-content-end mb-n2">
+            <div class="col-auto pe-2 mb-2">
+                <span class="pe-2">{wallbox_icon}</span>
+                <span class="align-middle">{props.charge.charger_name}</span>
+            </div>
+            <div class="col px-0" />
+            {have_charge_cost ?
+                <div class="col-auto ps-2 mb-2">
+                    <span class="align-middle">{util.toLocaleFixed(props.electricity_price / 100 * props.charge.energy_charged / 100, 2)} €</span>
+                    <span class="ps-2">{wallet_icon}</span>
+                </div> : undefined}
+        </div>
+    </ListGroupItem>
+}
+
+
+function is_valid_date(d: Date) {
+    // dates are "invalid date" (i.e. getTime returns NaN) if the user clicks an input's clear button.
+    return d != null && !isNaN(d.getTime()) && d.getTime() != 0;
+}
+
+// The end filter is exclusive: Use the start of the next day for 'end_of_day' to include all charges that started on the selected day.
+function date_to_minutes(d: Date, round_mode: 'start_of_day' | 'end_of_day') {
+    if (!is_valid_date(d))
+        return 0;
+
+    // Copy the date: The caller's date (i.e. the one shown in the date input) must not be modified.
+    let date = new Date(d.getTime());
+    date.setHours(0, 0, 0, 0);
+
+    if (round_mode == 'end_of_day')
+        date.setDate(date.getDate() + 1);
+
+    return Math.floor(date.getTime() / 1000 / 60);
+}
+
+function format_date_for_filename(d: Date) {
+    const pad = (n: number) => (n < 10 ? "0" : "") + n.toString();
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
+// Makes e.g. Ladelog-warp4-AbC-2026-08.pdf for a whole month and Ladelog-warp4-AbC-2026-08-01_2026-08-15.pdf otherwise
+function download_charge_log(content: BlobPart, language: Language, start_date: Date, end_date: Date, extension: string, content_type: string) {
+    const german = language == Language.German;
+    const file_type = german ? "Ladelog" : "charge-log";
+    const have_start = is_valid_date(start_date);
+    const have_end = is_valid_date(end_date);
+
+    if (!have_start && !have_end) {
+        util.downloadToTimestampedFile(content, file_type, extension, content_type);
+        return;
+    }
+
+    let period: string;
+
+    if (have_start && have_end) {
+        const last_day_of_start_month = new Date(start_date.getFullYear(), start_date.getMonth() + 1, 0).getDate();
+        const whole_month = (start_date.getDate() == 1)
+                         && (end_date.getFullYear() == start_date.getFullYear())
+                         && (end_date.getMonth() == start_date.getMonth())
+                         && (end_date.getDate() == last_day_of_start_month);
+
+        if (whole_month) {
+            period = format_date_for_filename(start_date).substring(0, 7);
+        } else {
+            period = format_date_for_filename(start_date) + "_" + format_date_for_filename(end_date);
+        }
+    } else if (have_start) {
+        period = (german ? "ab-" : "from-") + format_date_for_filename(start_date);
+    } else {
+        period = (german ? "bis-" : "until-") + format_date_for_filename(end_date);
+    }
+
+    const name = API.get_unchecked('info/name')?.name ?? "unknown";
+    util.downloadToFile(content, `${file_type}-${name}-${period}.${extension}`, content_type);
+}
+
+export class ChargeTracker extends ConfigComponent<'charge_tracker/config', {status_ref?: RefObject<ChargeTrackerStatus>}, ChargeTrackerState> {
+    constructor() {
+        super('charge_tracker/config',
+              () => __("charge_tracker.script.save_failed"),
+              undefined, {
+                  user_filter: "-2",
+                  device_filter: "-2",
+                  file_type: "0",
+                  language: null,
+                  csv_flavor: 'excel',
+                  filter_empty_charges: true,
+                  start_date: new Date(NaN),
+                  end_date: new Date(NaN),
+//#if MODULE_REMOTE_ACCESS_AVAILABLE
+                  remote_upload_configs: [],
+                  new_remote_upload_config: {
+                    user_filter: -2,
+                    device_filter: -2,
+                    file_type: 0,
+                    language: get_active_language_enum(),
+                    letterhead: "",
+                    user_id: 0,
+                    csv_delimiter: CSVFlavor.Excel,
+                    filter_empty_charges: true,
+                    last_upload_timestamp_min: 0,
+                  },
+                  next_upload_timestamp_min: 0,
+//#endif
+              });
+
+        effect(() => {
+            // set initial value on language change
+            let language_enum = get_active_language_enum();
+
+            if (util.render_allowed() && this.state.language == null) {
+                this.setState({language: language_enum.toString()});
+            }
+        });
+
+        util.addApiEventListener('charge_tracker/state', () => {
+            this.setState({...API.get('charge_tracker/state')});
+        });
+
+        util.addApiEventListener('charge_tracker/last_charges', () => {
+            this.setState({last_charges: API.get('charge_tracker/last_charges')});
+        });
+
+//#if MODULE_REMOTE_ACCESS_AVAILABLE
+        util.addApiEventListener('charge_tracker/config', () => {
+            let config = API.get('charge_tracker/config');
+            let last_upload_timestamp_min = 0;
+            for (const cfg of config.remote_upload_configs) {
+                if (last_upload_timestamp_min < cfg.last_upload_timestamp_min) {
+                    last_upload_timestamp_min = cfg.last_upload_timestamp_min;
+                }
+            }
+
+            let next_upload_timestamp_min = 0;
+            if (last_upload_timestamp_min != 0) {
+                const date = new Date(last_upload_timestamp_min * 60 * 1000);
+                date.setDate(1);
+                date.setMonth(date.getMonth() + 1);
+                date.setHours(0, 0, 0, 0);
+                next_upload_timestamp_min = Math.floor(date.getTime() / 1000 / 60);
+            }
+
+            this.setState({
+                electricity_price: config.electricity_price,
+                remote_upload_configs: config.remote_upload_configs,
+                next_upload_timestamp_min,
+            });
+        });
+
+        util.addApiEventListener('charge_tracker/upload_result', () => {
+            let upload_result = API.get('charge_tracker/upload_result');
+
+            const result = JSON.parse(JSON.stringify(upload_result)); // deep copy since it would be overridden later otherwise
+            const alertName = "charge-log-upload-" + result.cookie;
+            util.add_alert(
+                alertName,
+                result.error === "" ? "success" : "danger",
+                () => result.error === "" ? __("charge_tracker.script.upload_charge_log_success") : __("charge_tracker.script.upload_charge_log_failed"),
+                () => result.error
+            );
+            if (result.error === "") {
+                setTimeout(() => util.remove_alert(alertName), 5000);
+            }
+        });
+//#endif
+
+        util.addApiEventListener('charge_tracker/pdf_letterhead_config', () => {
+            let pdf_letterhead_config = API.get('charge_tracker/pdf_letterhead_config');
+            this.setState({pdf_letterhead: pdf_letterhead_config.letterhead});
+        });
+    }
+
+    get_last_charges(charges: Readonly<Charge[]>, price: number) {
+        let users_config = API.get('users/config');
+
+        return charges.map(c => <TrackedCharge charge={c} users={users_config.users} electricity_price={price}/>)
+                      .reverse();
+    }
+
+//#if MODULE_REMOTE_ACCESS_AVAILABLE
+    getRemoteUploadConfigTableRows(user_filter_items: [string, string][]): TableRow[] {
+        const remote_upload_configs = this.state.remote_upload_configs;
+        const users_config = API.get('users/config');
+
+        return remote_upload_configs.map((send_config, index) => {
+            const user_filter_str = send_config.user_filter === -2 ? __("charge_tracker.script.all_users") :
+                                  send_config.user_filter === -1 ? __("charge_tracker.script.deleted_users") :
+                                  this.get_user_display_name(send_config.user_filter, users_config.users);
+
+            const file_type_str = send_config.file_type === 0 ? "PDF" : "CSV";
+            const target_user_str = this.get_remote_access_user_email(send_config.user_id, API.get("remote_access/config").users);
+
+            return {
+                key: `remote_upload_config_${index}`,
+                columnValues: [
+                    user_filter_str,
+                    file_type_str,
+                    target_user_str,
+                ],
+                onEditShow: async () => {
+                    this.setState({
+                        new_remote_upload_config: {
+                            user_filter: send_config.user_filter,
+                            device_filter: send_config.device_filter,
+                            file_type: send_config.file_type,
+                            language: send_config.language,
+                            letterhead: send_config.letterhead,
+                            user_id: send_config.user_id,
+                            csv_delimiter: send_config.csv_delimiter,
+                            filter_empty_charges: send_config.filter_empty_charges,
+                            last_upload_timestamp_min: send_config.last_upload_timestamp_min,
+                        }
+                    });
+                },
+                editTitle: __("charge_tracker.content.charge_log_email_send_edit_modal_title"),
+                onEditGetChildren: () => this.onAddRemoteUploadConfigGetChildren(user_filter_items),
+                editAdditionalFooterButtons: (
+                    <Button
+                        variant="info"
+                        disabled={this.state.new_remote_upload_config.user_id === 0 || this.state.generator_state != GenerationState.Ready}
+                        onClick={async (e) => {
+                            e.preventDefault();
+                            await this.testSendChargeLog();
+                        }}
+                    >
+                        <span class="me-2"><Send size={16}/></span>
+                        {this.state.generator_state === GenerationState.ManualRemoteSend ? __("charge_tracker.content.sending") : __("charge_tracker.content.test_send")}
+                        {this.state.generator_state === GenerationState.ManualRemoteSend && <Spinner animation="border" size="sm" as="span" class="ms-2"/>}
+                    </Button>
+                ),
+                onRemoveClick: async () => {
+                    const newState = this.state.remote_upload_configs.filter((_, i) => i !== index);
+                    this.setState({remote_upload_configs: newState});
+                    this.setDirty(true);
+                    return true;
+                },
+                onEditSubmit: async () => {
+                    const remote_upload_configs = this.state.remote_upload_configs;
+                    remote_upload_configs[index] = this.state.new_remote_upload_config;
+                    this.setDirty(true);
+                },
+            };
+        });
+    }
+
+    get_user_display_name(user_id: number, users: API.getType['users/config']['users']): string {
+        let result = __("charge_tracker.script.unknown_user");
+        let filtered = users.filter(x => x.id == user_id);
+
+        if (user_id != 0 || filtered[0]?.display_name != "Anonymous") {
+            result = __("charge_tracker.script.deleted_user");
+            if (filtered.length == 1)
+                result = filtered[0].display_name;
+        }
+        return result;
+    }
+
+    get_remote_access_user_email(user_id: number, users: API.getType['remote_access/config']['users']): string {
+        const user = users.find(u => u.id === user_id);
+        return user.email
+    }
+
+    async testSendChargeLog() {
+        try {
+            const config = this.state.new_remote_upload_config;
+            const remote_access_config = API.get("remote_access/config");
+            const user = remote_access_config.users.find(u => u.id === config.user_id);
+
+            // Get last month's time range
+            const now = new Date();
+            const startOfLastMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+            // The end filter is exclusive.
+            const startOfThisMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+
+            let start_minutes = Math.floor(startOfLastMonth.getTime() / 1000 / 60);
+            let end_minutes = Math.floor(startOfThisMonth.getTime() / 1000 / 60);
+
+            if (config.file_type == FileType.PDF) {
+                await API.call("charge_tracker/send_charge_log_pdf", {
+                    api_not_final_acked: true,
+                    language: config.language,
+                    start_timestamp_min: start_minutes,
+                    end_timestamp_min: end_minutes,
+                    user_filter: config.user_filter,
+                    device_filter: config.device_filter,
+                    letterhead: config.letterhead,
+                    persist_letterhead: false,
+                    filter_empty_charges: config.filter_empty_charges,
+                    cookie: Math.floor(Math.random() * 0xFFFFFFFF),
+                    remote_access_user_uuid: user.uuid
+                }, () => __("charge_tracker.script.upload_charge_log_failed"));
+            } else if (config.file_type == FileType.CSV) {
+                await API.call("charge_tracker/send_charge_log_csv", {
+                    api_not_final_acked: true,
+                    language: config.language,
+                    start_timestamp_min: start_minutes,
+                    end_timestamp_min: end_minutes,
+                    user_filter: config.user_filter,
+                    device_filter: config.device_filter,
+                    csv_delimiter: config.csv_delimiter,
+                    filter_empty_charges: config.filter_empty_charges,
+                    cookie: Math.floor(Math.random() * 0xFFFFFFFF),
+                    remote_access_user_uuid: user.uuid
+                }, () => __("charge_tracker.script.upload_charge_log_failed"));
+            }
+
+            this.setState({generator_state: GenerationState.ManualRemoteSend});
+            util.add_alert("test-charge-log-send", "info", () => __("charge_tracker.script.test_charge_log_upload_started"), () => "");
+            setTimeout(() => util.remove_alert("test-charge-log-send"), 3000);
+        } catch (err) {}
+    }
+
+    async onAddRemoteUploadConfigShow() {
+        this.setState({
+            new_remote_upload_config: {
+                user_filter: -2,
+                device_filter: -2,
+                file_type: 0,
+                language: get_active_language_enum(),
+                letterhead: "",
+                user_id: 0,
+                csv_delimiter: CSVFlavor.Excel,
+                filter_empty_charges: true,
+                last_upload_timestamp_min: Math.floor(Date.now() / 1000 / 60),
+            }
+        });
+    }
+
+    async onAddRemoteUploadConfigSubmit() {
+        const remote_upload_configs = this.state.remote_upload_configs;
+        remote_upload_configs.push(this.state.new_remote_upload_config);
+        this.setState({remote_upload_configs});
+        this.setDirty(true);
+    }
+
+    onAddRemoteUploadConfigGetChildren(user_filter_items: [string, string][]) {
+        const remote_access_config = API.get("remote_access/config").users;
+        const remote_access_user_items: [string, string][] = remote_access_config.map(u => [u.id.toString(), u.email]);
+        const device_items: [string, string][] = (API.get('charge_manager/state').chargers || []).map(x => [x.uid.toString(), x.n]);
+
+        return <>
+                <FormRow label={__("charge_tracker.content.user_filter_label")}>
+                    <InputSelect
+                        value={this.state.new_remote_upload_config.user_filter.toString()}
+                        onValue={(v) =>
+                            this.setState({
+                                new_remote_upload_config: {
+                                    ...this.state.new_remote_upload_config,
+                                    user_filter: parseInt(v),
+                                },
+                            })
+                        }
+                        items={user_filter_items}
+                    />
+            </FormRow>
+{/*#ifn OPTIONS_PRODUCT_ID_IS_WARP*/}
+            <FormRow label={__("charge_tracker.content.device_filter_label")}>
+                    <InputSelect
+                        value={this.state.new_remote_upload_config.device_filter.toString()}
+                        onValue={(v) =>
+                            this.setState({
+                                new_remote_upload_config: {
+                                    ...this.state.new_remote_upload_config,
+                                    device_filter: parseInt(v),
+                                },
+                            })
+                        }
+                        items={[
+                            ["-2", __("charge_tracker.script.all_chargers")],
+                            ["-3", __("charge_tracker.script.configured_chargers")],
+                            ["-1", __("charge_tracker.script.deleted_chargers")],
+                            ...device_items
+                        ]}
+                    />
+            </FormRow>
+{/*#endif*/}
+            <FormRow label={__("charge_tracker.content.file_type_label")}>
+                <InputSelect
+                    value={this.state.new_remote_upload_config.file_type.toString()}
+                    onValue={v => this.setState({
+                        new_remote_upload_config: {
+                            ...this.state.new_remote_upload_config,
+                            file_type: parseInt(v)
+                        }
+                    })}
+                    items={[
+                        ["0", "PDF"],
+                        ["1", "CSV"]
+                    ]}
+                />
+            </FormRow>
+            <FormRow label={__("charge_tracker.content.language_label")}>
+                <InputSelect
+                    value={this.state.new_remote_upload_config.language.toString()}
+                    onValue={v => this.setState({
+                        new_remote_upload_config: {
+                            ...this.state.new_remote_upload_config,
+                            language: parseInt(v) as Language
+                        }
+                    })}
+                    items={[
+                        [Language.German.toString(), __("charge_tracker.content.language_german")],
+                        [Language.English.toString(), __("charge_tracker.content.language_english")]
+                    ]}
+                />
+            </FormRow>
+            <FormRow label={__("charge_tracker.content.filter_empty_charges")}>
+                <Switch
+                    desc={__("charge_tracker.content.filter_empty_charges_desc")}
+                    checked={this.state.new_remote_upload_config.filter_empty_charges}
+                    onClick={() => this.setState({
+                        new_remote_upload_config: {
+                            ...this.state.new_remote_upload_config,
+                            filter_empty_charges: !this.state.new_remote_upload_config.filter_empty_charges
+                        }
+                    })}
+                />
+            </FormRow>
+            <Collapse in={this.state.new_remote_upload_config.file_type === 0}>
+                <div>
+                    <FormRow label={__("charge_tracker.content.letterhead_label")}>
+                        <textarea
+                            class="form-control"
+                            value={this.state.new_remote_upload_config.letterhead}
+                            onInput={(e) => {
+                                const value = (e.target as HTMLTextAreaElement).value;
+                                this.setState({
+                                    new_remote_upload_config: {
+                                        ...this.state.new_remote_upload_config,
+                                        letterhead: value
+                                    }
+                                });
+                            }}
+                            rows={3}
+                        />
+                    </FormRow>
+                </div>
+            </Collapse>
+            <Collapse in={this.state.new_remote_upload_config.file_type === 1}>
+                <div>
+                    <FormRow label={__("charge_tracker.content.csv_flavor")}>
+                        <InputSelect
+                            value={this.state.new_remote_upload_config.csv_delimiter.toString()}
+                            onValue={v => this.setState({
+                                new_remote_upload_config: {
+                                    ...this.state.new_remote_upload_config,
+                                    csv_delimiter: parseInt(v) as CSVFlavor
+                                }
+                            })}
+                            items={[
+                                [CSVFlavor.Excel.toString(), __("charge_tracker.content.csv_flavor_excel")],
+                                [CSVFlavor.RFC4180.toString(), __("charge_tracker.content.csv_flavor_rfc4180")]
+                            ]}
+                        />
+                    </FormRow>
+                </div>
+            </Collapse>
+            <FormRow label={__("charge_tracker.content.target_user")}>
+                <InputSelect
+                    value={this.state.new_remote_upload_config.user_id.toString()}
+                    placeholder={__("select")}
+                    required
+                    onValue={v => this.setState({
+                        new_remote_upload_config: {
+                            ...this.state.new_remote_upload_config,
+                            user_id: parseInt(v)
+                        }
+                    })}
+                    items={remote_access_user_items}
+                />
+            </FormRow>
+        </>;
+    }
+//#endif
+
+    async downloadCSVChargeLog(language: number, flavor: 'excel' | 'rfc4180', user_filter: number, device_filter: number, start_date: Date, end_date: Date, filter_empty_charges: boolean) {
+        const start_minutes = date_to_minutes(start_date, 'start_of_day');
+        const end_minutes = date_to_minutes(end_date, 'end_of_day');
+        const csvFlavorEnum = flavor === 'excel' ? 0 : 1; // CSVFlavor.Excel = 0, RFC4180 = 1
+
+        const payload = {
+            api_not_final_acked: true,
+            language: language,
+            start_timestamp_min: start_minutes,
+            end_timestamp_min: end_minutes,
+            user_filter: user_filter,
+            device_filter: device_filter,
+            csv_delimiter: csvFlavorEnum,
+            filter_empty_charges: filter_empty_charges,
+        };
+
+        try {
+            const csv = await API.call("charge_tracker/csv", payload, () => __("charge_tracker.script.download_charge_log_failed"), undefined, 2 * 60 * 1000);
+            download_charge_log(csv, language, start_date, end_date, "csv", flavor === 'excel' ? "text/csv; charset=windows-1252; header=present" : "text/csv; charset=utf-8; header=present");
+        } catch (err) {
+            util.add_alert("download-charge-log", "danger", () => __("charge_tracker.script.download_charge_log_failed"), err);
+        }
+    }
+
+    override async isSaveAllowed(cfg: ChargeTrackerConfig) {
+        return cfg.electricity_price == 0 || cfg.electricity_price >= 100;
+    }
+
+    render(props: {}, state: Readonly<ChargeTrackerState> & ChargeTrackerConfig) {
+        if (!util.render_allowed())
+            return <SubPage name="charge_tracker" />;
+
+        let user_filter_items: [string, string][] = API.get('users/config').users.map(x => [x.id.toString(), (x.display_name == "Anonymous" && x.id == 0) ? __("charge_tracker.script.unknown_users") : x.display_name]);
+        user_filter_items.unshift(["-1",  __("charge_tracker.script.deleted_users")]);
+        user_filter_items.unshift(["-3",  __("charge_tracker.script.configured_users")]);
+        user_filter_items.unshift(["-2", __("charge_tracker.script.all_users")]);
+
+//#ifn OPTIONS_PRODUCT_ID_IS_WARP
+        let device_filter_items: [string, string][] = (API.get('charge_manager/state').chargers || []).map(x => [x.uid.toString(), x.n]);
+        device_filter_items.unshift(["-1", __("charge_tracker.script.deleted_chargers")]);
+        device_filter_items.unshift(["-3", __("charge_tracker.script.configured_chargers")]);
+        device_filter_items.unshift(["-2", __("charge_tracker.script.all_chargers")]);
+//#endif
+
+        // TODO show hint that day ahead prices are not used here!
+
+        let dap_enabled = false;
+//#if MODULE_DAY_AHEAD_PRICES_AVAILABLE
+        dap_enabled = API.get('day_ahead_prices/config').enable;
+//#endif
+        let sendEmailComponent = <></>;
+        let sendEmailDropdown = <></>;
+//#if MODULE_REMOTE_ACCESS_AVAILABLE
+        sendEmailComponent = <>
+                <FormSeparator heading={__("charge_tracker.content.charge_log_email_send_config")}/>
+                <FormRow label={__("charge_tracker.content.charge_log_email_send_config")} help={__("charge_tracker.content.charge_log_email_send_config_help")}>
+                    <Table
+                        columnNames={[
+                            __("charge_tracker.content.user_filter"),
+                            __("charge_tracker.content.file_type"),
+                            __("charge_tracker.content.target_user"),
+                        ]}
+                        rows={this.getRemoteUploadConfigTableRows(user_filter_items)}
+                        addEnabled={state.remote_upload_configs.length < options.REMOTE_ACCESS_MAX_USERS}
+                        addTitle={__("charge_tracker.content.charge_log_email_send_add_modal_title")}
+                        addMessage={__("charge_tracker.content.charge_log_send_add_message")(state.remote_upload_configs.length, options.REMOTE_ACCESS_MAX_USERS)}
+                        onAddShow={() => this.onAddRemoteUploadConfigShow()}
+                        onAddGetChildren={() => this.onAddRemoteUploadConfigGetChildren(user_filter_items)}
+                        onAddSubmit={() => this.onAddRemoteUploadConfigSubmit()}
+                        addAdditionalFooterButtons={
+                            <Button
+                                variant="info"
+                                disabled={this.state.new_remote_upload_config.user_id === 0 || this.state.generator_state != GenerationState.Ready}
+                                onClick={async (e) => {
+                                    e.preventDefault();
+                                    await this.testSendChargeLog();
+                                }}
+                            >
+                                <span class="me-2"><Send size={16}/></span>
+                                {this.state.generator_state === GenerationState.ManualRemoteSend ? __("charge_tracker.content.sending") : __("charge_tracker.content.test_send")}
+                                <Spinner animation="border" size="sm" as="span" className="ms-2" hidden={this.state.generator_state !== GenerationState.ManualRemoteSend}/>
+                            </Button>
+                        }
+                    />
+                </FormRow>
+                <FormRow label={__("charge_tracker.content.next_send")}>
+                    <InputText value={state.next_upload_timestamp_min == 0 ? __("charge_tracker.content.never") : util.timestamp_min_to_date(state.next_upload_timestamp_min)}/>
+                </FormRow>
+            </>
+
+        const onDropdownClick = async (remote_access_user_uuid: string) => {
+            try {
+                let start_minutes = date_to_minutes(state.start_date, 'start_of_day');
+                let end_minutes = date_to_minutes(state.end_date, 'end_of_day');
+
+                let file_type = parseInt(state.file_type);
+                if (file_type == FileType.PDF) {
+                    await API.call("charge_tracker/send_charge_log_pdf", {
+                        api_not_final_acked: true,
+                        language: parseInt(state.language),
+                        start_timestamp_min: start_minutes,
+                        end_timestamp_min: end_minutes,
+                        user_filter: parseInt(state.user_filter),
+                        device_filter: parseInt(state.device_filter),
+                        letterhead: state.pdf_letterhead,
+                        filter_empty_charges: state.filter_empty_charges,
+                        cookie: Math.floor(Math.random() * 0xFFFFFFFF),
+                        remote_access_user_uuid,
+                        persist_letterhead: true
+                    }, () => __("charge_tracker.script.upload_charge_log_failed"));
+                } else if (file_type == FileType.CSV) {
+                    await API.call("charge_tracker/send_charge_log_csv", {
+                        api_not_final_acked: true,
+                        language: parseInt(state.language),
+                        start_timestamp_min: start_minutes,
+                        end_timestamp_min: end_minutes,
+                        user_filter: parseInt(state.user_filter),
+                        device_filter: parseInt(state.device_filter),
+                        csv_delimiter: state.file_type === "1" ? (state.csv_flavor === 'excel' ? 0 : 1) : 0,
+                        filter_empty_charges: state.filter_empty_charges,
+                        cookie: Math.floor(Math.random() * 0xFFFFFFFF),
+                        remote_access_user_uuid
+                    }, () => __("charge_tracker.script.upload_charge_log_failed"));
+                }
+            } catch {}
+        };
+        const remoteAccessConfig = API.get('remote_access/config');
+        const sendEmailDropdownItems = remoteAccessConfig.users.map((user) => {
+            return <Dropdown.Item onClick={() => onDropdownClick(user.uuid)}>{user.email}</Dropdown.Item>
+        });
+        sendEmailDropdown = remoteAccessConfig.users.length > 0 ? <div class="col"><Dropdown>
+            <Dropdown.Toggle className="text-nowrap w-100" disabled={state.generator_state !== GenerationState.Ready}>
+                <span class="me-2">
+                    {__("charge_tracker.content.charge_log_email_send_to_user")}
+                </span>
+                    <Mail />
+                <Spinner animation="border" size="sm" className="ms-2" hidden={state.generator_state !== GenerationState.ManualRemoteSend}/>
+            </Dropdown.Toggle>
+            <Dropdown.Menu renderOnMount align="end">
+                {sendEmailDropdownItems}
+            </Dropdown.Menu>
+        </Dropdown></div>
+        : <></>;
+//#endif
+
+        return (
+            <SubPage name="charge_tracker">
+                <ConfigForm id="charge_tracker_config_form" title={__("charge_tracker.content.charge_tracker" )} isDirty={this.isDirty()} onSave={this.save} onDirtyChange={this.setDirty}>
+                    <FormRow label={__("charge_tracker.content.price")} warning={__("charge_tracker.content.price_not_dynamic_yet")(dap_enabled)} show_warning>
+                        <InputFloat class={state.electricity_price == 0 || state.electricity_price >= 100 ? "" : "is-invalid"} value={state.electricity_price} onValue={this.set('electricity_price')} digits={2} unit="ct/kWh" max={65535} min={0}/>
+                        <div class="invalid-feedback">{__("charge_tracker.content.price_invalid")}</div>
+                    </FormRow>
+                </ConfigForm>
+
+                {sendEmailComponent}
+
+                <FormSeparator heading={__("charge_tracker.content.download")}/>
+
+                <FormRow label={__("charge_tracker.content.user_filter")} label_muted={__("charge_tracker.content.user_filter_muted")}>
+                    <InputSelect
+                        value={state.user_filter}
+                        onValue={(v) => this.setState({user_filter: v})}
+                        items={user_filter_items ?? []}
+                    />
+                </FormRow>
+{/*#ifn OPTIONS_PRODUCT_ID_IS_WARP*/}
+                <FormRow label={__("charge_tracker.content.device_filter")} label_muted={__("charge_tracker.content.device_filter_muted")}>
+                    <InputSelect
+                        value={state.device_filter}
+                        onValue={(v) => this.setState({device_filter: v})}
+                        items={device_filter_items ?? []}
+                    />
+                </FormRow>
+{/*#endif*/}
+                <FormRow label={__("charge_tracker.content.date_filter")} label_muted={__("charge_tracker.content.date_filter_muted")}>
+                    <div class="row gx-0 gy-1">
+                        <div class="col-md-6">
+                            <div class="input-group">
+                                <span class="input-group-text">{__("charge_tracker.content.from")}</span>
+                                <InputDate
+                                    className="rounded-end-md-0"
+                                    date={state.start_date}
+                                    onDate={(d: Date) => this.setState({start_date: d})}
+                                />
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="input-group">
+                                <span class="input-group-text rounded-start-md-0 ms-md-n1px">{__("charge_tracker.content.to")}</span>
+                                <InputDate
+                                    date={state.end_date}
+                                    onDate={(d: Date) => this.setState({end_date: d})}
+                                />
+                            </div>
+                        </div>
+                    </div>
+                </FormRow>
+
+                <FormRow label={__("charge_tracker.content.filter_empty_charges")} label_muted={__("charge_tracker.content.filter_empty_charges_muted")}>
+                    <Switch
+                        desc={__("charge_tracker.content.filter_empty_charges_desc")}
+                        checked={state.filter_empty_charges}
+                        onClick={() => this.setState({filter_empty_charges: !state.filter_empty_charges})}
+                    />
+                </FormRow>
+
+                <FormRow label={__("charge_tracker.content.file_type")} label_muted={__("charge_tracker.content.file_type_muted")}>
+                    <InputSelect
+                        value={state.file_type}
+                        onValue={this.set("file_type")}
+                        items={[
+                            ["0", __("charge_tracker.content.file_type_pdf")],
+                            ["1", __("charge_tracker.content.file_type_csv")]
+                        ]}
+                    />
+                </FormRow>
+
+                <FormRow label={__("charge_tracker.content.language_label")}>
+                    <InputSelect
+                        value={state.language}
+                        onValue={this.set("language")}
+                        items={[
+                            [Language.German.toString(), __("charge_tracker.content.language_german")],
+                            [Language.English.toString(), __("charge_tracker.content.language_english")]
+                        ]}
+                    />
+                </FormRow>
+
+                <Collapse in={state.file_type == "0"}>
+                    <div>
+                        <FormRow label={__("charge_tracker.content.pdf_letterhead")} label_muted={__("charge_tracker.content.pdf_letterhead_muted")}>
+                            <textarea name="letterhead" class="font-monospace form-control" id="letterhead" value={state.pdf_letterhead} onInput={(e) => {
+                                let value = (e.target as HTMLInputElement).value;
+                                if (new Blob([value]).size <= 512)
+                                    this.setState({pdf_letterhead: value});
+                                else
+                                    this.setState({pdf_letterhead: state.pdf_letterhead});
+                            }} cols={30} rows={6}/>
+                        </FormRow>
+                    </div>
+                </Collapse>
+
+                <Collapse in={state.file_type == "1"}>
+                    <div>
+                        <FormRow label={__("charge_tracker.content.csv_flavor")} label_muted={__("charge_tracker.content.csv_flavor_muted")}>
+                            <InputSelect
+                                value={state.csv_flavor}
+                                onValue={(v) => this.setState({csv_flavor: v as any})}
+                                items={[
+                                    ["excel", __("charge_tracker.content.csv_flavor_excel")],
+                                    ["rfc4180", __("charge_tracker.content.csv_flavor_rfc4180")]
+                                ]}
+                            />
+                        </FormRow>
+                    </div>
+                </Collapse>
+
+                <FormRow>
+                    <div class="row g-2">
+                        <div class="col">
+                        <Button variant="primary" className="text-nowrap w-100" disabled={state.generator_state !== GenerationState.Ready} onClick={async () => {
+                            this.setState({show_spinner: true});
+
+                            let start_minutes = date_to_minutes(state.start_date, 'start_of_day');
+                            let end_minutes = date_to_minutes(state.end_date, 'end_of_day');
+
+                            try {
+                                if (state.file_type === "0") {
+                                    let pdf = await API.call("charge_tracker/pdf", {
+                                        api_not_final_acked: true,
+                                        language: parseInt(state.language),
+                                        start_timestamp_min: start_minutes,
+                                        end_timestamp_min: end_minutes,
+                                        user_filter: parseInt(state.user_filter),
+                                        device_filter: parseInt(state.device_filter),
+                                        letterhead: state.pdf_letterhead,
+                                        filter_empty_charges: state.filter_empty_charges,
+                                    }, () => __("charge_tracker.script.download_charge_log_failed"), undefined, 2 * 60 * 1000);
+                                    download_charge_log(pdf, parseInt(state.language), state.start_date, state.end_date, "pdf", "application/pdf");
+                                } else {
+                                    // Download CSV
+                                    await this.downloadCSVChargeLog(parseInt(state.language), state.csv_flavor, parseInt(state.user_filter), parseInt(state.device_filter), state.start_date, state.end_date, state.filter_empty_charges);
+                                }
+                            } finally {
+                                this.setState({show_spinner: false});
+                            }
+                        }}>
+                            <span class="me-2">{__("charge_tracker.content.download_btn")}</span>
+                            <Download/>
+                            <Spinner animation="border" size="sm" as="span" className="ms-2" hidden={!state.show_spinner}/>
+                        </Button>
+                        </div>
+                        {sendEmailDropdown}
+                    </div>
+                </FormRow>
+                <FormSeparator heading={__("charge_tracker.content.tracked_charges")}/>
+
+                <FormRow label={__("charge_tracker.content.tracked_charges")} label_muted={__("charge_tracker.content.tracked_charges_muted")}>
+                    <InputText value={__("charge_tracker.script.tracked_charge_count")(state.tracked_charges, options.CHARGE_TRACKER_MAX_TRACKED_CHARGES)}/>
+                </FormRow>
+
+                <FormRow label={__("charge_tracker.content.first_charge_timestamp")} label_muted={__("charge_tracker.content.first_charge_timestamp_muted")}>
+                    <InputText value={util.timestamp_min_to_date(state.first_charge_timestamp, __("charge_tracker.script.unknown_charge_start"))}/>
+                </FormRow>
+
+                <FormRow label={__("charge_tracker.content.remove")} label_muted={__("charge_tracker.content.remove_desc")}>
+                    <Button variant="danger" className="w-100" onClick={async () => {
+                        const modal = util.async_modal_ref.current;
+                        if (!await modal.show({
+                                title: () => __("charge_tracker.content.remove"),
+                                body: () => __("charge_tracker.content.charge_tracker_remove_modal_text"),
+                                no_text: () => __("charge_tracker.content.abort_remove"),
+                                yes_text: () => __("charge_tracker.content.confirm_remove"),
+                                no_variant: "secondary",
+                                yes_variant: "danger"
+                            }))
+                            return;
+
+                            await API.call('charge_tracker/remove_all_charges', {
+                                    "do_i_know_what_i_am_doing": true
+                                }, () => __("charge_tracker.script.remove_failed"));
+
+                            util.postReboot(__("charge_tracker.script.remove_init"), __("util.reboot_text"));
+                    }}>
+                        {__("charge_tracker.content.remove_btn")}
+                    </Button>
+                </FormRow>
+
+                <FormRow label={__("charge_tracker.content.last_charges")} label_muted={__("charge_tracker.content.last_charges_desc")}>
+                    <ListGroup>
+                        {this.get_last_charges(state.last_charges ?? [], state.electricity_price)}
+                    </ListGroup>
+                </FormRow>
+            </SubPage>
+        );
+    }
+}
+
+export class ChargeTrackerStatus extends Component {
+    render() {
+        if (!util.render_allowed())
+            return <StatusSection name="charge_tracker" />;
+
+        let last_charges = API.get('charge_tracker/last_charges');
+        let cc = API.get('charge_tracker/current_charge');
+        let users = API.get('users/config').users;
+        let electricity_price = API.get('charge_tracker/config').electricity_price;
+
+        let current_charge = <></>;
+
+        let ev_name = undefined;
+        let ev_soc = undefined;
+//#if MODULE_EV_AVAILABLE
+        let ev_state = API.get("ev/state");
+        let evs = API.get("ev/config").evs;
+        if (ev_state.mac != "") {
+            if (ev_state.active_ev_index >= 0 && ev_state.active_ev_index < evs.length)
+                ev_name = evs[ev_state.active_ev_index].name;
+            else
+                ev_name = __("charge_tracker.status.unknown_ev_mac")(ev_state.mac);
+        } else if (ev_state.soc != null) {
+            ev_name = __("charge_tracker.status.unknown_ev")
+        }
+        ev_soc = ev_state.soc;
+//#endif
+
+//#if MODULE_EVSE_COMMON_AVAILABLE
+        let evse_uptime = API.get('evse/low_level_state').uptime;
+        let energy_abs = API.get('meter/values').energy_abs;
+
+        if (cc.user_id != -1) {
+            let charge_duration = evse_uptime - cc.evse_uptime_start
+            if (evse_uptime < cc.evse_uptime_start)
+                charge_duration += 0xFFFFFFFF;
+
+            charge_duration = Math.floor(charge_duration / 1000);
+
+            let charge: Charge = {
+                charge_duration: charge_duration,
+                energy_charged: (energy_abs === null || cc.meter_start === null) ? null : (energy_abs - cc.meter_start),
+                timestamp_minutes: cc.timestamp_minutes,
+                user_id: cc.user_id,
+                charger_name: cc.charger_name,
+            };
+
+            current_charge = <FormRow label={__("charge_tracker.status.current_charge")}>
+                <ListGroup>
+                    <TrackedCharge charge={charge}
+                                    users={users}
+                                    electricity_price={electricity_price}
+                                    ev_name={ev_name}
+                                    ev_soc={ev_soc}
+                                    />
+                </ListGroup>
+            </FormRow>;
+        }
+//#endif
+
+        let last_charges_list = last_charges.length == 0 ? <></>
+            : <FormRow label={__("charge_tracker.status.last_charges")}>
+                <ListGroup>
+                    {last_charges.slice(-3).map(c =>
+                        <TrackedCharge charge={c}
+                                        users={users}
+                                        electricity_price={electricity_price}
+                                        />
+                    ).reverse()}
+                </ListGroup>
+            </FormRow>;
+
+        return <StatusSection name="charge_tracker">
+                {current_charge}
+                {last_charges_list}
+            </StatusSection>;
+    }
+}
+
+export function pre_init() {
+}
+
+export function init() {
+}

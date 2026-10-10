@@ -1,0 +1,106 @@
+/** @jsxImportSource preact */
+import { h } from "preact";
+import { __ } from "../../ts/translation";
+let x = {
+    "users": {
+        "status": {},
+        "navbar": {
+            "users": "Benutzerverwaltung"
+        },
+        "content": {
+            "users": "Benutzerverwaltung",
+
+            "enable_authentication": "Anmeldung aktiviert",
+            "enable_authentication_desc":
+                "Beim Aufrufen des Webinterfaces oder bei Verwendung der HTTP-API muss eine Anmeldung als einer der konfigurieren Benutzer durchgeführt werden",
+            "enable_authentication_invalid":
+                "Damit die Anmeldung aktiviert sein kann, muss mindestens ein Benutzer mit einem konfigurierten Passwort vorhanden sein.",
+
+            "authorized_users": "Berechtigte Benutzer",
+
+            "unknown_username": "Anzeigename des unbekannten Benutzers",
+
+            "table_username": "Benutzername",
+            "table_display_name": "Anzeigename",
+            "table_current": "Maximaler Ladestrom",
+            "table_password": "Passwort",
+
+            "nfc_table_assigned_user": "Zugeordneter Benutzer",
+
+            "add_user_title": "Benutzer hinzufügen",
+            "add_user_message": /*SFN*/ (have: number, max: number) =>
+                `${have} von ${max} Benutzern konfiguriert` /*NF*/,
+            "add_user_user_ids_exhausted":
+                "Die maximale Anzahl an Benutzern hat Ladevorgänge aufgezeichnet. Damit ein neuer Benutzer angelegt werden kann, müssen aufgezeichnete Ladevorgänge oder ein existierender Benutzer ohne aufgezeichnete Ladevorgänge gelöscht werden.",
+
+            "edit_user_title": "Benutzer bearbeiten",
+            "edit_user_username": "Benutzername",
+            "edit_user_username_desc": "zur Anmeldung beim Webinterface",
+            "edit_user_display_name": "Anzeigename",
+            "edit_user_display_name_desc":
+                "zur Anzeige im Ladelog und Webinterface",
+            "edit_user_current": "Maximaler Ladestrom",
+            "edit_user_password": "Passwort",
+            "edit_user_password_help": "Bis zu 64 Zeichen. Keine Umlaute, Akzente oder Emoji.",
+
+            "evse_user_description": "Ladefreigabe",
+
+            "evse_user_enable": <>
+                    Verlangt eine Freigabe des Ladevorgangs durch einen Benutzer
+                    zum Laden (z.B. per NFC-Tag)
+                </>,
+            "evse_user_enable_invalid":
+                "Für die Ladefreigabe ist mindestens ein Benutzer notwendig.",
+            "evse_user_enable_central_management_warning": /*FFN*/(manager_ip: string) => <>{__("This_device")} wird von {manager_ip} zentral verwaltet. Die (lokale) Ladefreigabe kann parallel benutzt werden, Benutzer und NFC-Tags müssen dann aber sowohl hier, als auch auf dem Lastmanager hinterlegt werden.</>/*NF*/,
+
+            "nfc_tags": "NFC-Tags",
+            "nfc_tag_id": "Tag-ID",
+            "nfc_tag_type": "Tag-Typ",
+            "nfc_no_tags_assigned": "Keine NFC-Tags zugeordnet",
+            "nfc_no_seen_tags": /*FFN*/(no_bricklet: boolean, central_management: boolean) =>
+                no_bricklet ?
+                    <>Kein NFC-Bricklet verbunden. Ein NFC-Bricklet kann bei uns im Shop erworben werden, oder benutze die Tag-Injection API.</> :
+                    central_management ?
+                        <>In letzter Zeit wurden keine NFC-Tags erkannt. Halte ein Tag an eine der kontrollierten Wallboxen, um es zu erkennen.</> :
+                        <>In letzter Zeit wurden keine NFC-Tags erkannt. Halte ein Tag an diese Wallbox, um es zu erkennen.</>
+                /*NF*/,
+            "nfc_tag_already_assigned": /*SFN*/ (other_name: string) =>
+                `Bereits Benutzer "${other_name}" zugeordnet` /*NF*/,
+            "nfc_add_tag": "NFC-Tag hinzufügen",
+            "nfc_add_tag_message": /*SFN*/ (
+                have: number,
+                max: number
+            ) =>
+                `${have} von ${max} Tags konfiguriert` /*NF*/,
+            "nfc_seen_tags": "Erkannte Tags",
+            "nfc_last_seen": "Zuletzt erkannt",
+            "nfc_add_tag_manually": "Tag manuell hinzuf\u00fcgen",
+            "nfc_tag_id_placeholder": "z.B. 01:23:45:67",
+            "nfc_tag_id_invalid":
+                "Die Tag-ID muss aus vier bis zehn Gruppen mit jeweils einer zweistelligen Hexadezimalzahl, getrennt durch einen Doppelpunkt, bestehen. Zum Beispiel 01:23:45:67:89:AB",
+
+            "nfc_smartphone_this_device": "Smartphone (dieses Gerät)",
+
+            "ev_macs": "Fahrzeuge",
+            "ev_name": "Name",
+            "ev_mac": "MAC-Adresse",
+            "ev_mac_already_assigned": /*SFN*/ (other_name: string) => `Bereits Benutzer "${other_name}" zugeordnet` /*NF*/,
+            "ev_add_mac": "Fahrzeug hinzufügen",
+            "ev_add_mac_message": /*SFN*/ (
+                haveForUser: number,
+                numConfigured: number
+            ) => `${haveForUser} von ${numConfigured} Fahrzeugen diesem Benutzer zugeordnet` /*NF*/,
+            "ev_available_evs": "Fahrzeuge",
+            "ev_no_evs": <>Es sind keine Fahrzeuge konfiguriert. Zuerst <a href="#ev">Fahrzeuge</a> konfigurieren, um diese dann Benutzern zuordnen zu können.</>
+        },
+        "script": {
+            "reboot_content_changed": "Benutzereinstellungen",
+            "login_disabled": "Anmeldung deaktiviert",
+            "save_failed": "Speichern der Benutzereinstellungen fehlgeschlagen.",
+            "username_already_tracked":
+                "Benutzername ist bereits in aufgezeichneten Ladevorgängen",
+            "username_already_used": "Benutzername ist bereits vergeben ",
+            "all_user_ids_in_use": "Keine freien Benutzer-IDs mehr."
+        }
+    }
+}

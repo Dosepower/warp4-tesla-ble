@@ -1,0 +1,1599 @@
+/* esp32-firmware
+ * Copyright (C) 2025-2026 Olaf Lüke <olaf@tinkerforge.com>
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, write to the
+ * Free Software Foundation, Inc., 59 Temple Place - Suite 330,
+ * Boston, MA 02111-1307, USA.
+ */
+
+// IPv6/TCP/ISO-15118-20
+// This implementation follows the requirements from ISO 15118-20:2022.
+// Requirements are referenced using [V2G20-xxx] notation.
+
+#include "iso20.h"
+#include "event_log_prefix.h"
+#include "generated/module_dependencies.h"
+#include "build.h"
+#include "tools/hexdump.h"
+#include "tools/malloc.h"
+
+#include "gcc_warnings.h"
+
+void ISO20::pre_setup()
+{
+    api_state = Config::Object({
+        {"state", Config::Enum(ISO20State::Idle)},
+        {"session_id", Config::Str("", 0, 16)},   // 8 bytes as hex string (16 chars)
+        {"evcc_id", Config::Str("", 0, 20)},      // Up to 20 character string
+        {"soc", Config::Int8(-1)},                // Present SOC in %, -1 = not available
+        {"active_power", Config::Int32(-1)},      // EV present active power in W, -1 = not available
+        {"energy_capacity", Config::Int32(-1)},   // Battery energy capacity in Wh, -1 = not available
+    });
+}
+
+void ISO20::handle_bitstream(exi_bitstream *exi, V2GTPPayloadType payload_type)
+{
+    // Increment state on first call
+    if (state == ISO20State::Idle) {
+        state = ISO20State::BitstreamReceived;
+    }
+
+    // Handle AC-specific messages
+    if (payload_type == V2GTPPayloadType::ISO20AC) {
+        handle_ac_bitstream(exi);
+        return;
+    }
+
+    // Handle common messages
+    // Lazy-alloc ISO 15118-20 buffers on first use. Stays allocated once used.
+    if (iso20DocDec == nullptr) {
+        iso20DocDec = static_cast<struct iso20_exiDocument*>(calloc_psram_or_dram(1, sizeof(struct iso20_exiDocument)));
+    }
+    if (iso20DocEnc == nullptr) {
+        iso20DocEnc = static_cast<struct iso20_exiDocument*>(calloc_psram_or_dram(1, sizeof(struct iso20_exiDocument)));
+    }
+    memset(iso20DocDec, 0, sizeof(struct iso20_exiDocument));
+    memset(iso20DocEnc, 0, sizeof(struct iso20_exiDocument));
+
+    int ret = decode_iso20_exiDocument(exi, iso20DocDec);
+    if (ret != 0) {
+        iso15118.trace("ISO20: Could not decode EXI document: %d", ret);
+        return;
+    }
+
+    cancel_sequence_timeout(next_timeout);
+
+    dispatch_common_messages();
+
+#ifdef ISO15118_TRACE_MESSAGES
+    trace_request_response();
+#endif
+
+    api_state.get("state")->updateEnum(state);
+
+    // [V2G20-435] The SECC shall implement the SECC specific timeouts and performance times
+    //             defined in Table 214 and Table 215.
+    // [V2G20-441] The SECC shall set V2G_SECC_Sequence_Timeout and start monitoring when
+    //             it sends a response message.
+    // [V2G20-443] The SECC shall stop waiting for a request message when the timer expires.
+    schedule_sequence_timeout(next_timeout, V2G_SECC_SEQUENCE_TIMEOUT, "ISO20");
+}
+
+void ISO20::dispatch_common_messages()
+{
+    auto &doc = *iso20DocDec;
+
+    // SessionSetupReq - no session validation needed (session is established here)
+    V2G_DISPATCH(doc, SessionSetupReq, handle_session_setup_req);
+    if (doc.SessionSetupReq_isUsed) return;
+
+    // [V2G20-753] All messages after SessionSetup require session ID validation.
+    // If the SessionID received does not match the previously communicated SessionID,
+    // the SECC shall respond with FAILED_UnknownSession.
+    // Note: All request types in the union have Header as their first member,
+    // so we can access it directly by casting to the header type.
+    auto *header = reinterpret_cast<const struct iso20_MessageHeaderType*>(&doc.AuthorizationSetupReq);
+    if (!validate_session_id(header->SessionID.bytes,
+                             ISO20_SESSION_ID_LENGTH,
+                             session_id,
+                             ISO20_SESSION_ID_LENGTH)) {
+        iso15118.trace("ISO20: Session ID mismatch, sending FAILED_UnknownSession");
+        send_failed_unknown_session();
+        return;
+    }
+
+    // Implemented message handlers (session already validated)
+    V2G_DISPATCH(doc, AuthorizationSetupReq, handle_authorization_setup_req);
+    V2G_DISPATCH(doc, AuthorizationReq,      handle_authorization_req);
+    V2G_DISPATCH(doc, ServiceDiscoveryReq,   handle_service_discovery_req);
+    V2G_DISPATCH(doc, ServiceDetailReq,      handle_service_detail_req);
+    V2G_DISPATCH(doc, ServiceSelectionReq,   handle_service_selection_req);
+    V2G_DISPATCH(doc, ScheduleExchangeReq,   handle_schedule_exchange_req);
+    V2G_DISPATCH(doc, PowerDeliveryReq,      handle_power_delivery_req);
+    V2G_DISPATCH(doc, SessionStopReq,        handle_session_stop_req);
+
+    // Not yet implemented
+
+    // This is for Plug&Charge certificate handling, currently not supported
+    V2G_NOT_IMPL("ISO20", doc, CertificateInstallationReq);
+
+    // This is to Plug&Charge signed meter data transfer, currently not supported
+    V2G_NOT_IMPL("ISO20", doc, MeteringConfirmationReq);
+
+    // These are used for automated/robotic charging system
+    // like pantograph chargers or robotic arm chargers.
+    // See Section 8.3.4.8.1.1 of ISO 15118-20:2022.
+    // We will not support these.
+    V2G_NOT_IMPL("ISO20", doc, VehicleCheckInReq);
+    V2G_NOT_IMPL("ISO20", doc, VehicleCheckOutReq);
+}
+
+void ISO20::send_failed_unknown_session()
+{
+    auto &doc = *iso20DocDec;
+
+    constexpr auto rc = iso20_responseCodeType_FAILED_UnknownSession;
+
+    // Respond with the matching message type and populate all mandatory child fields.
+    if (doc.AuthorizationSetupReq_isUsed) {
+        auto *res = &iso20DocEnc->AuthorizationSetupRes;
+        iso20DocEnc->AuthorizationSetupRes_isUsed = 1;
+        prepare_header(&res->Header);
+        res->ResponseCode = rc;
+        res->AuthorizationServices.array[0] = iso20_authorizationType_EIM;
+        res->AuthorizationServices.arrayLen = 1;
+        res->CertificateInstallationService = 0;
+        res->EIM_ASResAuthorizationMode_isUsed = 1;
+        res->PnC_ASResAuthorizationMode_isUsed = 0;
+    } else if (doc.AuthorizationReq_isUsed) {
+        auto *res = &iso20DocEnc->AuthorizationRes;
+        iso20DocEnc->AuthorizationRes_isUsed = 1;
+        prepare_header(&res->Header);
+        res->ResponseCode = rc;
+        res->EVSEProcessing = iso20_processingType_Finished;
+    } else if (doc.ServiceDiscoveryReq_isUsed) {
+        auto *res = &iso20DocEnc->ServiceDiscoveryRes;
+        iso20DocEnc->ServiceDiscoveryRes_isUsed = 1;
+        prepare_header(&res->Header);
+        res->ResponseCode = rc;
+        res->ServiceRenegotiationSupported = 0;
+        res->EnergyTransferServiceList.Service.array[0].ServiceID = V2G_SERVICE_ID_CHARGING;
+        res->EnergyTransferServiceList.Service.array[0].FreeService = 1;
+        res->EnergyTransferServiceList.Service.arrayLen = 1;
+        res->VASList_isUsed = 0;
+    } else if (doc.ServiceDetailReq_isUsed) {
+        auto *res = &iso20DocEnc->ServiceDetailRes;
+        iso20DocEnc->ServiceDetailRes_isUsed = 1;
+        prepare_header(&res->Header);
+        res->ResponseCode = rc;
+        res->ServiceID = iso20DocDec->ServiceDetailReq.ServiceID;
+        res->ServiceParameterList.ParameterSet.arrayLen = 0;
+    } else if (doc.ServiceSelectionReq_isUsed) {
+        auto *res = &iso20DocEnc->ServiceSelectionRes;
+        iso20DocEnc->ServiceSelectionRes_isUsed = 1;
+        prepare_header(&res->Header);
+        res->ResponseCode = rc;
+    } else if (doc.ScheduleExchangeReq_isUsed) {
+        auto *res = &iso20DocEnc->ScheduleExchangeRes;
+        iso20DocEnc->ScheduleExchangeRes_isUsed = 1;
+        prepare_header(&res->Header);
+        res->ResponseCode = rc;
+        res->EVSEProcessing = iso20_processingType_Finished;
+        res->GoToPause_isUsed = 0;
+        // Provide the (required) control-mode choice; all its fields are optional.
+        res->Scheduled_SEResControlMode_isUsed = 0;
+        res->Dynamic_SEResControlMode_isUsed = 1;
+    } else if (doc.PowerDeliveryReq_isUsed) {
+        auto *res = &iso20DocEnc->PowerDeliveryRes;
+        iso20DocEnc->PowerDeliveryRes_isUsed = 1;
+        prepare_header(&res->Header);
+        res->ResponseCode = rc;
+        res->EVSEStatus_isUsed = 0;
+    } else if (doc.SessionStopReq_isUsed) {
+        auto *res = &iso20DocEnc->SessionStopRes;
+        iso20DocEnc->SessionStopRes_isUsed = 1;
+        prepare_header(&res->Header);
+        res->ResponseCode = rc;
+    } else {
+        iso15118.trace("ISO20: Unknown message type for FAILED_UnknownSession");
+        return;
+    }
+
+    iso15118.common.send_exi(Common::ExiType::Iso20);
+}
+
+void ISO20::prepare_header(struct iso20_MessageHeaderType *header)
+{
+    // Copy session ID (8 bytes for ISO 20)
+    for (uint8_t i = 0; i < ISO20_SESSION_ID_LENGTH; i++) {
+        header->SessionID.bytes[i] = session_id[i];
+    }
+    header->SessionID.bytesLen = ISO20_SESSION_ID_LENGTH;
+
+    // Timestamp is Unix timestamp (seconds since epoch)
+    timeval now;
+    if (!rtc.clock_synced(&now)) {
+        now.tv_sec = 0;
+    }
+    header->TimeStamp = static_cast<uint64_t>(now.tv_sec);
+
+    // Signature not used (no Plug&Charge)
+    header->Signature_isUsed = 0;
+}
+
+void ISO20::handle_session_setup_req()
+{
+    // [V2G20-751] The SessionID value returned by the SECC in SessionSetupRes shall not
+    //             change as long as the V2G communication session is not terminated.
+    // [V2G20-752] The header of any message sent by the SECC during an active V2G
+    //             communication session shall contain the same SessionID.
+    iso20_SessionSetupReqType *req = &iso20DocDec->SessionSetupReq;
+    iso20_SessionSetupResType *res = &iso20DocEnc->SessionSetupRes;
+
+    // Reset soc_read flag for new session
+    soc_read = false;
+    ev_supports_asymmetric = false;
+
+    // Store EVCCID in API state (up to 20 characters)
+    char evcc_id_str[21] = {0};
+    size_t evcc_id_len = req->EVCCID.charactersLen;
+    if (evcc_id_len > 20) evcc_id_len = 20;
+    memcpy(evcc_id_str, req->EVCCID.characters, evcc_id_len);
+    evcc_id_str[evcc_id_len] = '\0';
+    api_state.get("evcc_id")->updateString(evcc_id_str);
+
+    // Check if session ID is all zeros (new session) or matches existing session (resume)
+    bool all_zero = true;
+    for (size_t i = 0; i < req->Header.SessionID.bytesLen; i++) {
+        if (req->Header.SessionID.bytes[i] != 0x00) {
+            all_zero = false;
+            break;
+        }
+    }
+
+    // Check if received session ID matches our stored session ID
+    bool different_to_known = false;
+    if (req->Header.SessionID.bytesLen == ISO20_SESSION_ID_LENGTH) {
+        for (uint16_t i = 0; i < ISO20_SESSION_ID_LENGTH; i++) {
+            if (req->Header.SessionID.bytes[i] != session_id[i]) {
+                different_to_known = true;
+                break;
+            }
+        }
+    } else {
+        different_to_known = true;
+    }
+
+    // Generate new session ID if requested or session ID doesn't match
+    if (all_zero || different_to_known) {
+        // Generate new random session ID (8 bytes for ISO 20)
+        for (uint8_t i = 0; i < ISO20_SESSION_ID_LENGTH; i++) {
+            session_id[i] = static_cast<uint8_t>(random(256));
+        }
+        res->ResponseCode = iso20_responseCodeType_OK_NewSessionEstablished;
+    } else {
+        res->ResponseCode = iso20_responseCodeType_OK_OldSessionJoined;
+    }
+
+    // Store session ID in API state as hex string
+    char session_id_hex[17];
+    hexdump(session_id, ISO20_SESSION_ID_LENGTH, session_id_hex, sizeof(session_id_hex), HexdumpCase::Upper);
+    api_state.get("session_id")->updateString(session_id_hex);
+
+    iso20DocEnc->SessionSetupRes_isUsed = 1;
+    prepare_header(&res->Header);
+
+    strncpy(res->EVSEID.characters, iso15118.evseid_iso, iso15118.evseid_iso_len);
+    res->EVSEID.charactersLen = iso15118.evseid_iso_len;
+
+    iso15118.common.send_exi(Common::ExiType::Iso20);
+    state = ISO20State::SessionSetup;
+}
+
+void ISO20::handle_authorization_setup_req()
+{
+    // [V2G20-1220] If the SECC does not offer PnC, it shall use EIM_ASResAuthorizationMode.
+    // [V2G20-2567] If the SECC offers only EIM, it shall include EIM_ASResAuthorizationMode.
+    iso20_AuthorizationSetupResType *res = &iso20DocEnc->AuthorizationSetupRes;
+
+    iso20DocEnc->AuthorizationSetupRes_isUsed = 1;
+    prepare_header(&res->Header);
+
+    res->ResponseCode = iso20_responseCodeType_OK;
+
+    // Offer only EIM (External Identification Means) authorization - no Plug&Charge
+    res->AuthorizationServices.array[0] = iso20_authorizationType_EIM;
+    res->AuthorizationServices.arrayLen = 1;
+
+    // We don't support certificate installation service
+    res->CertificateInstallationService = 0;
+
+    // EIM authorization mode is used (empty structure, but must be marked as used)
+    res->EIM_ASResAuthorizationMode_isUsed = 1;
+    res->PnC_ASResAuthorizationMode_isUsed = 0;
+
+    iso15118.common.send_exi(Common::ExiType::Iso20);
+    state = ISO20State::AuthorizationSetup;
+}
+
+void ISO20::handle_authorization_req()
+{
+    // [V2G20-1200] In case of EIM, the SECC shall send AuthorizationRes with ResponseCode
+    //              = "OK" and EVSEProcessing = "Finished" once authorization is complete.
+    // [V2G20-2560] In case EIM was selected, elements prefixed with EIM shall be used.
+    iso20_AuthorizationReqType *req = &iso20DocDec->AuthorizationReq;
+    iso20_AuthorizationResType *res = &iso20DocEnc->AuthorizationRes;
+
+    iso20DocEnc->AuthorizationRes_isUsed = 1;
+    prepare_header(&res->Header);
+
+    // Only accept EIM authorization
+    if (req->SelectedAuthorizationService == iso20_authorizationType_EIM) {
+        res->ResponseCode = iso20_responseCodeType_OK;
+    } else {
+        // If PnC was selected, respond with warning
+        res->ResponseCode = iso20_responseCodeType_WARNING_AuthorizationSelectionInvalid;
+        iso15118.trace("ISO20: PnC authorization not supported, sending warning");
+    }
+
+    // Authorization is immediately finished (no waiting for external authorization)
+    res->EVSEProcessing = iso20_processingType_Finished;
+
+    iso15118.common.send_exi(Common::ExiType::Iso20);
+    state = ISO20State::Authorization;
+}
+
+void ISO20::handle_service_discovery_req()
+{
+    // [V2G20-1980] After receiving the ServiceDiscoveryReq, the SECC shall respond with a
+    //              ServiceDiscoveryRes within V2G_SECC_Msg_Performance_Time.
+    // [V2G20-1931] To indicate that SECC is capable of a ServiceRenegotiation, the SECC shall set
+    //              ServiceRenegotiationSupported to "True"/"False" in the first ServiceDiscoveryRes.
+    // [V2G20-1249] The EVCC and the SECC shall implement the message elements as defined in Table 39.
+    iso20_ServiceDiscoveryResType *res = &iso20DocEnc->ServiceDiscoveryRes;
+
+    iso20DocEnc->ServiceDiscoveryRes_isUsed = 1;
+    prepare_header(&res->Header);
+
+    res->ResponseCode = iso20_responseCodeType_OK;
+
+    // [V2G20-1931] To indicate that SECC is capable of a ServiceRenegotiation, the SECC shall set
+    //              ServiceRenegotiationSupported to "True" in the first ServiceDiscoveryRes.
+    // [V2G20-1932] The value shall be identical throughout the session.
+    res->ServiceRenegotiationSupported = 1;
+
+    // Offer AC charging service (ISO 15118-20 Table 203)
+    res->EnergyTransferServiceList.Service.array[0].ServiceID = V2G_SERVICE_ID_CHARGING;
+    res->EnergyTransferServiceList.Service.array[0].FreeService = 1;  // Free (no payment needed)
+    res->EnergyTransferServiceList.Service.arrayLen = 1;
+
+    // No value-added services
+    res->VASList_isUsed = 0;
+
+    iso15118.common.send_exi(Common::ExiType::Iso20);
+    state = ISO20State::ServiceDiscovery;
+}
+
+void ISO20::handle_service_detail_req()
+{
+    // [V2G20-1981] After receiving the ServiceDetailReq the SECC shall respond with a ServiceDetailRes
+    //              within V2G_SECC_Msg_Performance_Time. The allowed next requests shall be either
+    //              ServiceDetailReq or ServiceSelectionReq.
+    // [V2G20-425]  The SECC shall respond with ResponseCode "FAILED_ServiceIDInvalid" if the EVCC
+    //              provided a not previously offered ServiceID in the ServiceDetailReq.
+    // [V2G20-1251] The EVCC and the SECC shall implement the message elements as defined in Table 41.
+    iso20_ServiceDetailReqType *req = &iso20DocDec->ServiceDetailReq;
+    iso20_ServiceDetailResType *res = &iso20DocEnc->ServiceDetailRes;
+
+    iso20DocEnc->ServiceDetailRes_isUsed = 1;
+    prepare_header(&res->Header);
+
+    // Check if the requested service is valid (we only offer AC = ServiceID 1)
+    if (req->ServiceID != V2G_SERVICE_ID_CHARGING) {
+        res->ResponseCode = iso20_responseCodeType_FAILED_ServiceIDInvalid;
+        res->ServiceID = req->ServiceID;
+        res->ServiceParameterList.ParameterSet.arrayLen = 0;
+        iso15118.common.send_exi(Common::ExiType::Iso20);
+        return;
+    }
+
+    res->ResponseCode = iso20_responseCodeType_OK;
+    res->ServiceID = req->ServiceID;
+
+    // Define AC service parameters per ISO 15118-20 Table 205:
+    // - Connector: 1=SinglePhase, 2=ThreePhase (usage of the connector)
+    // - ControlMode: 1=Scheduled, 2=Dynamic
+    // - EVSENominalVoltage: Line voltage in V (between one phase and neutral)
+    // - MobilityNeedsMode: 1=ProvidedByEvcc, 2=ProvidedBySecc
+    // - Pricing: 0=NoPricing, 1=AbsolutePricing, 2=PriceLevels
+    //
+    // We offer two ParameterSets to enable ServiceRenegotiation for phase switching:
+    //   ParameterSetID 1: ThreePhase, Dynamic, 230V, ProvidedByEvcc, NoPricing
+    //   ParameterSetID 2: SinglePhase, Dynamic, 230V, ProvidedByEvcc, NoPricing
+    // The EV selects one during ServiceSelection and can switch via ServiceRenegotiation.
+
+    // Helper to fill one ParameterSet with 5 parameters (only Connector differs)
+    auto fill_parameter_set = [](iso20_ParameterSetType *ps, uint16_t set_id, int connector_type) {
+        ps->ParameterSetID = set_id;
+
+        // Parameter 1: Connector - 1=SinglePhase, 2=ThreePhase per ISO 15118-20 Table 205
+        // [V2G20-1815] SinglePhase: only base power elements (L1) shall be used.
+        // [V2G20-1816] ThreePhase: _L2 and _L3 suffixed elements shall be allowed.
+        auto &p0 = ps->Parameter.array[0];
+        strcpy(p0.Name.characters, "Connector");
+        p0.Name.charactersLen = strlen("Connector");
+        p0.intValue = connector_type;  // ISO20_CONNECTOR_SINGLE_PHASE or ISO20_CONNECTOR_THREE_PHASE
+        p0.intValue_isUsed = 1;
+        p0.boolValue_isUsed = 0;
+        p0.byteValue_isUsed = 0;
+        p0.shortValue_isUsed = 0;
+        p0.finiteString_isUsed = 0;
+        p0.rationalNumber_isUsed = 0;
+
+        // Parameter 2: ControlMode - 1=Scheduled, 2=Dynamic
+        auto &p1 = ps->Parameter.array[1];
+        strcpy(p1.Name.characters, "ControlMode");
+        p1.Name.charactersLen = strlen("ControlMode");
+        p1.intValue = ISO20_CONTROL_MODE_DYNAMIC;
+        p1.intValue_isUsed = 1;
+        p1.boolValue_isUsed = 0;
+        p1.byteValue_isUsed = 0;
+        p1.shortValue_isUsed = 0;
+        p1.finiteString_isUsed = 0;
+        p1.rationalNumber_isUsed = 0;
+
+        // Parameter 3: EVSENominalVoltage - line voltage between one phase and neutral
+        auto &p2 = ps->Parameter.array[2];
+        strcpy(p2.Name.characters, "EVSENominalVoltage");
+        p2.Name.charactersLen = strlen("EVSENominalVoltage");
+        p2.intValue = V2G_NOMINAL_VOLTAGE_V;
+        p2.intValue_isUsed = 1;
+        p2.boolValue_isUsed = 0;
+        p2.byteValue_isUsed = 0;
+        p2.shortValue_isUsed = 0;
+        p2.finiteString_isUsed = 0;
+        p2.rationalNumber_isUsed = 0;
+
+        // Parameter 4: MobilityNeedsMode - 1=ProvidedByEvcc, 2=ProvidedBySecc
+        auto &p3 = ps->Parameter.array[3];
+        strcpy(p3.Name.characters, "MobilityNeedsMode");
+        p3.Name.charactersLen = strlen("MobilityNeedsMode");
+        p3.intValue = ISO20_MOBILITY_NEEDS_PROVIDED_BY_EVCC;
+        p3.intValue_isUsed = 1;
+        p3.boolValue_isUsed = 0;
+        p3.byteValue_isUsed = 0;
+        p3.shortValue_isUsed = 0;
+        p3.finiteString_isUsed = 0;
+        p3.rationalNumber_isUsed = 0;
+
+        // Parameter 5: Pricing - 0=NoPricing, 1=AbsolutePricing, 2=PriceLevels
+        auto &p4 = ps->Parameter.array[4];
+        strcpy(p4.Name.characters, "Pricing");
+        p4.Name.charactersLen = strlen("Pricing");
+        p4.intValue = ISO20_PRICING_NONE;
+        p4.intValue_isUsed = 1;
+        p4.boolValue_isUsed = 0;
+        p4.byteValue_isUsed = 0;
+        p4.shortValue_isUsed = 0;
+        p4.finiteString_isUsed = 0;
+        p4.rationalNumber_isUsed = 0;
+
+        ps->Parameter.arrayLen = 5;
+    };
+
+    // ParameterSetID 1: ThreePhase (Connector = 2)
+    fill_parameter_set(&res->ServiceParameterList.ParameterSet.array[0], ISO20_PARAM_SET_THREE_PHASE, ISO20_CONNECTOR_THREE_PHASE);
+    // ParameterSetID 2: SinglePhase (Connector = 1)
+    fill_parameter_set(&res->ServiceParameterList.ParameterSet.array[1], ISO20_PARAM_SET_SINGLE_PHASE, ISO20_CONNECTOR_SINGLE_PHASE);
+    res->ServiceParameterList.ParameterSet.arrayLen = 2;
+
+    // Send response
+    iso15118.common.send_exi(Common::ExiType::Iso20);
+    state = ISO20State::ServiceDetail;
+}
+
+void ISO20::handle_service_selection_req()
+{
+    // [V2G20-1983] After receiving the ServiceSelectionReq, the SECC shall respond with
+    //              ServiceSelectionRes within V2G_SECC_Msg_Performance_Time.
+    // [V2G20-433]  The SECC shall respond with ResponseCode "FAILED_ServiceSelectionInvalid" if the
+    //              EVCC provided a not previously offered ServiceID, ParameterSetID pair.
+    // [V2G20-1253] The EVCC and the SECC shall implement the message elements as defined in Table 43.
+    iso20_ServiceSelectionReqType *req = &iso20DocDec->ServiceSelectionReq;
+    iso20_ServiceSelectionResType *res = &iso20DocEnc->ServiceSelectionRes;
+
+    iso20DocEnc->ServiceSelectionRes_isUsed = 1;
+    prepare_header(&res->Header);
+
+    // Validate the selected service
+    // We offer AC = ServiceID 1 with ParameterSetID 1 (ThreePhase) or 2 (SinglePhase)
+    if (req->SelectedEnergyTransferService.ServiceID != V2G_SERVICE_ID_CHARGING ||
+        (req->SelectedEnergyTransferService.ParameterSetID != ISO20_PARAM_SET_THREE_PHASE &&
+         req->SelectedEnergyTransferService.ParameterSetID != ISO20_PARAM_SET_SINGLE_PHASE)) {
+        res->ResponseCode = iso20_responseCodeType_FAILED_ServiceSelectionInvalid;
+        iso15118.common.send_exi(Common::ExiType::Iso20);
+        return;
+    }
+
+    // Store the selected service for later use
+    selected_service_id = req->SelectedEnergyTransferService.ServiceID;
+    selected_parameter_set_id = req->SelectedEnergyTransferService.ParameterSetID;
+
+    res->ResponseCode = iso20_responseCodeType_OK;
+
+    iso15118.common.send_exi(Common::ExiType::Iso20);
+    state = ISO20State::ServiceSelection;
+}
+
+void ISO20::handle_schedule_exchange_req()
+{
+    // [V2G20-1987] After receiving the ScheduleExchangeReq, the SECC shall respond with a
+    //              ScheduleExchangeRes with EVSEProcessing set to "Finished" and ResponseCode
+    //              starting with "OK" within V2G_SECC_Msg_Performance_Time, if all parameters
+    //              are available.
+    // [V2G20-1989] (AC) After receiving the ScheduleExchangeReq, the SECC shall respond with a
+    //              ScheduleExchangeRes with EVSEProcessing set to "Finished". The next allowed
+    //              request shall be PowerDeliveryReq if ServiceName= AC or AC_BPT was selected.
+    // [V2G20-1563] If the EVCC did not provide a DepartureTime, the sum of the individual time
+    //              intervals in the PowerSchedule and PriceSchedule shall be >= 24h.
+    // [V2G20-1267] The EVCC and the SECC shall implement the message elements as defined in Table 44.
+    iso20_ScheduleExchangeReqType *req = &iso20DocDec->ScheduleExchangeReq;
+    iso20_ScheduleExchangeResType *res = &iso20DocEnc->ScheduleExchangeRes;
+
+    (void)req;  // Currently unused
+
+    iso20DocEnc->ScheduleExchangeRes_isUsed = 1;
+    prepare_header(&res->Header);
+
+    res->ResponseCode = iso20_responseCodeType_OK;
+    res->EVSEProcessing = iso20_processingType_Finished;
+    res->GoToPause_isUsed = 0;
+
+    // Use Dynamic control mode (not Scheduled)
+    // In Dynamic mode, the SECC controls charging power in real-time via EVSETargetActivePower
+    // in AC_ChargeLoopRes. No PowerSchedule or PriceSchedule is needed.
+    res->Scheduled_SEResControlMode_isUsed = 0;
+    res->Dynamic_SEResControlMode_isUsed = 1;
+
+    // All fields in Dynamic_SEResControlMode are optional
+    res->Dynamic_SEResControlMode.DepartureTime_isUsed = 0;
+    res->Dynamic_SEResControlMode.MinimumSOC_isUsed = 0;
+    res->Dynamic_SEResControlMode.TargetSOC_isUsed = 0;
+    res->Dynamic_SEResControlMode.AbsolutePriceSchedule_isUsed = 0;
+    res->Dynamic_SEResControlMode.PriceLevelSchedule_isUsed = 0;
+
+    iso15118.common.send_exi(Common::ExiType::Iso20);
+    state = ISO20State::ScheduleExchange;
+}
+
+void ISO20::handle_power_delivery_req()
+{
+    // [V2G20-1615] The EVCC shall use PowerDeliveryReq with ChargeProgress="Start" to start HLC-C
+    //              based energy transfer.
+    // [V2G20-1311] The EVCC shall use PowerDeliveryReq with ChargeProgress="Stop" to stop HLC-C
+    //              based energy transfer.
+    // [V2G20-1385] The SECC shall enter standby after receiving PowerDeliveryReq with ChargeProgress
+    //              set to "Standby" by sending PowerDeliveryRes with ResponseCode="OK".
+    // [V2G20-1386] The SECC shall exit standby after receiving PowerDeliveryReq with ChargeProgress
+    //              set to "Start", "Stop", or "Renegotiate" by sending PowerDeliveryRes with
+    //              ResponseCode="OK".
+    // [V2G20-1262] The EVCC and the SECC shall implement the message elements as defined in Table 47.
+    //
+    // PWM note: Unlike ISO 15118-2 [V2G2-866] which requires PWM=100% after PowerDeliveryRes on Stop/error,
+    // ISO 15118-20 [V2G20-1408] requires the SECC to keep 5% duty cycle from start of data link setup
+    // until end of V2G communication session. The session ends at SessionStopReq(Terminate), not at
+    // PowerDeliveryReq(Stop). So we must NOT switch to 100% PWM on Stop in ISO20.
+    iso20_PowerDeliveryReqType *req = &iso20DocDec->PowerDeliveryReq;
+    iso20_PowerDeliveryResType *res = &iso20DocEnc->PowerDeliveryRes;
+
+    iso20DocEnc->PowerDeliveryRes_isUsed = 1;
+    prepare_header(&res->Header);
+
+    res->ResponseCode = iso20_responseCodeType_OK;
+
+    // Handle different charge progress states
+    switch (req->ChargeProgress) {
+        case iso20_chargeProgressType_Start:
+            // Ensure EVSE bricklet is in ISO15118 mode with 5% PWM.
+            // [V2G20-1408] SECC shall apply CP duty cycle of 5% from start of data link setup
+            //              until end of V2G communication session.
+            // This is already set in common.cpp during SupportedAppProtocolRes, but we set it
+            // again here defensively in case the state was changed externally.
+            iso15118.set_charging_protocol(TF_EVSE_V2_CHARGING_PROTOCOL_ISO15118, 50);
+            state = ISO20State::PowerDeliveryStart;
+            break;
+
+        case iso20_chargeProgressType_Stop:
+            // EV wants to stop energy transfer. Session remains active.
+            // [V2G20-1408] Keep 5% PWM. Do NOT switch to 100% (unlike ISO2 [V2G2-866]).
+            state = ISO20State::PowerDeliveryStop;
+            break;
+
+        case iso20_chargeProgressType_Standby:
+            // EV wants to go to standby (power reduced but session active)
+            break;
+
+        case iso20_chargeProgressType_ScheduleRenegotiation:
+            // EV wants to renegotiate the schedule
+            break;
+        default:
+            break;
+    }
+
+    // Optionally provide EVSE status
+    res->EVSEStatus_isUsed = 0;  // TODO: We should probably provide some status here, maybe can be shown in ev display
+
+    iso15118.common.send_exi(Common::ExiType::Iso20);
+}
+
+void ISO20::handle_session_stop_req()
+{
+    // [V2G20-1632] After receiving the SessionStopReq, the SECC shall respond with a SessionStopRes
+    //              within V2G_SECC_Msg_Performance_Time.
+    // [V2G20-1633] After sending a SessionStopRes, the SECC shall wait at least 5s before closing
+    //              the TCP connection.
+    // [V2G20-1080] After confirming a SessionStopReq with ChargingSession="Terminate" by a
+    //              SessionStopRes with ResponseCode="OK", the SECC shall discard all session related
+    //              information (session ID, selected charge service, authorization details).
+    // [V2G20-1955] SessionStopRes shall contain ResponseCode "FAILED_NoServiceRenegotiationSupported"
+    //              if SessionStopReq with ChargingSession="ServiceRenegotiation" is received and
+    //              ServiceRenegotiationSupported was set to "False".
+    // [V2G20-1272] The EVCC and the SECC shall implement the message elements as defined in Table 51.
+    iso20_SessionStopReqType *req = &iso20DocDec->SessionStopReq;
+    iso20_SessionStopResType *res = &iso20DocEnc->SessionStopRes;
+
+    iso20DocEnc->SessionStopRes_isUsed = 1;
+    prepare_header(&res->Header);
+
+    // Handle different charging session states
+    switch (req->ChargingSession) {
+        case iso20_chargingSessionType_Terminate:
+            // EV wants to terminate the session completely
+            res->ResponseCode = iso20_responseCodeType_OK;
+            state = ISO20State::SessionStopTerminate;
+            break;
+
+        case iso20_chargingSessionType_Pause:
+            // EV wants to pause the session (can resume later)
+            res->ResponseCode = iso20_responseCodeType_OK;
+            state = ISO20State::SessionStopPause;
+            break;
+
+        case iso20_chargingSessionType_ServiceRenegotiation:
+            // [V2G20-1476] EVCC sends SessionStopReq(ChargingSession=ServiceRenegotiation)
+            // [V2G20-1969] AC flow: PowerDeliveryReq(Stop) -> SessionStopReq(ServiceRenegotiation)
+            //              -> ServiceDiscoveryReq. Session ID is preserved.
+            // [V2G20-1931] We advertised ServiceRenegotiationSupported=true, so we accept this.
+            res->ResponseCode = iso20_responseCodeType_OK;
+            // Reset state to ServiceDiscovery (state 4) so the EV can re-select services.
+            // The session ID remains valid. This is not a new session.
+            state = ISO20State::Authorization;
+            iso15118.trace("ISO20: ServiceRenegotiation requested, returning to ServiceDiscovery");
+            break;
+        default:
+            break;
+    }
+
+    // Send response
+    iso15118.common.send_exi(Common::ExiType::Iso20);
+
+    // In read_soc_only mode, switch to IEC 61851 after the session ends.
+    // The EVSE will control charging via PWM and revert to ISO 15118 on EV disconnect.
+    if (iso15118.is_read_soc_only()) {
+        iso15118.switch_to_iec_temporary();
+    }
+
+    // For Terminate and Pause, reset the session after sending response
+    if (req->ChargingSession == iso20_chargingSessionType_Terminate ||
+        req->ChargingSession == iso20_chargingSessionType_Pause) {
+        // Cancel any pending sequence timeout using the shared helper
+        cancel_sequence_timeout(next_timeout);
+
+        // [V2G20-1633] Wait at least 5s before closing TCP connection
+        // Schedule delayed socket reset to allow EV to close first
+        // Capture the current socket fd to avoid closing a new session's socket
+        // if a new connection arrives before the 5s delay expires
+        int socket_to_close = iso15118.common.get_active_socket();
+        task_scheduler.scheduleOnce([socket_to_close]() {
+            // Only close if this is still the same socket (no new session connected)
+            if (iso15118.common.get_active_socket() == socket_to_close) {
+                iso15118.common.reset_active_socket();
+            }
+        }, 5_s);
+    }
+}
+
+void ISO20::trace_header(const struct iso20_MessageHeaderType *header, const char *name)
+{
+    trace_iso("ISO20 Message (%s)", name);
+    trace_iso(" Header");
+    trace_iso("  SessionID: %02x%02x%02x%02x%02x%02x%02x%02x",
+                   header->SessionID.bytes[0], header->SessionID.bytes[1],
+                   header->SessionID.bytes[2], header->SessionID.bytes[3],
+                   header->SessionID.bytes[4], header->SessionID.bytes[5],
+                   header->SessionID.bytes[6], header->SessionID.bytes[7]);
+    trace_iso("  SessionID.bytesLen: %d", header->SessionID.bytesLen);
+    trace_iso("  TimeStamp: %llu", header->TimeStamp);
+    trace_iso("  Signature_isUsed: %d", header->Signature_isUsed);
+}
+
+// ======================================================
+// AC-specific message handlers (for payload type 0x8003)
+// ======================================================
+
+void ISO20::handle_ac_bitstream(exi_bitstream *exi)
+{
+    // Allocate AC document buffers on first use
+    if (iso20AcDocDec == nullptr) {
+        iso20AcDocDec = static_cast<struct iso20_ac_exiDocument*>(calloc_psram_or_dram(1, sizeof(struct iso20_ac_exiDocument)));
+    }
+    if (iso20AcDocEnc == nullptr) {
+        iso20AcDocEnc = static_cast<struct iso20_ac_exiDocument*>(calloc_psram_or_dram(1, sizeof(struct iso20_ac_exiDocument)));
+    }
+    memset(iso20AcDocDec, 0, sizeof(struct iso20_ac_exiDocument));
+    memset(iso20AcDocEnc, 0, sizeof(struct iso20_ac_exiDocument));
+
+    int ret = decode_iso20_ac_exiDocument(exi, iso20AcDocDec);
+    if (ret != 0) {
+        iso15118.trace("ISO20 AC: Could not decode EXI document: %d", ret);
+        return;
+    }
+
+    cancel_sequence_timeout(next_timeout);
+
+    dispatch_ac_messages();
+
+#ifdef ISO15118_TRACE_MESSAGES
+    trace_ac_request_response();
+#endif
+
+    api_state.get("state")->updateEnum(state);
+
+    // [V2G20-435] [V2G20-441] [V2G20-443] Sequence timer handling (see common messages above)
+    schedule_sequence_timeout(next_timeout, V2G_SECC_SEQUENCE_TIMEOUT, "ISO20 AC");
+}
+
+void ISO20::dispatch_ac_messages()
+{
+    auto &doc = *iso20AcDocDec;
+
+    // [V2G20-753] All AC messages require session ID validation.
+    // Note: All request types in the union have Header as their first member,
+    // so we can access it directly by casting to the header type.
+    auto *header = reinterpret_cast<const struct iso20_ac_MessageHeaderType*>(&doc.AC_ChargeParameterDiscoveryReq);
+    if (!validate_session_id(header->SessionID.bytes,
+                             ISO20_SESSION_ID_LENGTH,
+                             session_id,
+                             ISO20_SESSION_ID_LENGTH)) {
+        iso15118.trace("ISO20 AC: Session ID mismatch, sending FAILED_UnknownSession");
+        send_ac_failed_unknown_session();
+        return;
+    }
+
+    // AC-specific message dispatch (session already validated)
+    V2G_DISPATCH(doc, AC_ChargeParameterDiscoveryReq, handle_ac_charge_parameter_discovery_req);
+    V2G_DISPATCH(doc, AC_ChargeLoopReq,               handle_ac_charge_loop_req);
+}
+
+void ISO20::send_ac_failed_unknown_session()
+{
+    auto &doc = *iso20AcDocDec;
+
+    constexpr auto rc = iso20_ac_responseCodeType_FAILED_UnknownSession;
+
+    // Respond with the matching message type and populate all mandatory child fields.
+    if (doc.AC_ChargeParameterDiscoveryReq_isUsed) {
+        auto *res = &iso20AcDocEnc->AC_ChargeParameterDiscoveryRes;
+        iso20AcDocEnc->AC_ChargeParameterDiscoveryRes_isUsed = 1;
+        prepare_ac_header(&res->Header);
+        res->ResponseCode = rc;
+        res->BPT_AC_CPDResEnergyTransferMode_isUsed = 0;
+        res->AC_CPDResEnergyTransferMode_isUsed = 1;
+        auto &etm = res->AC_CPDResEnergyTransferMode;
+        etm.EVSEMaximumChargePower.Exponent = 0;
+        etm.EVSEMaximumChargePower.Value = 0;
+        etm.EVSEMinimumChargePower.Exponent = 0;
+        etm.EVSEMinimumChargePower.Value = 0;
+        etm.EVSENominalFrequency.Exponent = 0;
+        etm.EVSENominalFrequency.Value = V2G_NOMINAL_FREQUENCY_HZ;
+    } else if (doc.AC_ChargeLoopReq_isUsed) {
+        auto *res = &iso20AcDocEnc->AC_ChargeLoopRes;
+        iso20AcDocEnc->AC_ChargeLoopRes_isUsed = 1;
+        prepare_ac_header(&res->Header);
+        res->ResponseCode = rc;
+        // Provide the (required) control-mode choice. EVSETargetActivePower is
+        // mandatory in Dynamic mode; the remaining fields are optional.
+        res->Scheduled_AC_CLResControlMode_isUsed = 0;
+        res->BPT_Scheduled_AC_CLResControlMode_isUsed = 0;
+        res->BPT_Dynamic_AC_CLResControlMode_isUsed = 0;
+        res->CLResControlMode_isUsed = 0;
+        res->Dynamic_AC_CLResControlMode_isUsed = 1;
+        res->Dynamic_AC_CLResControlMode.EVSETargetActivePower.Exponent = 0;
+        res->Dynamic_AC_CLResControlMode.EVSETargetActivePower.Value = 0;
+    } else {
+        iso15118.trace("ISO20 AC: Unknown message type for FAILED_UnknownSession");
+        return;
+    }
+
+    iso15118.common.send_exi(Common::ExiType::Iso20Ac);
+}
+
+void ISO20::prepare_ac_header(struct iso20_ac_MessageHeaderType *header)
+{
+    // Copy session ID (8 bytes for ISO 20)
+    for (uint8_t i = 0; i < ISO20_SESSION_ID_LENGTH; i++) {
+        header->SessionID.bytes[i] = session_id[i];
+    }
+    header->SessionID.bytesLen = ISO20_SESSION_ID_LENGTH;
+
+    // Timestamp is Unix timestamp (seconds since epoch)
+    timeval now;
+    if (!rtc.clock_synced(&now)) {
+        now.tv_sec = 0;
+    }
+    header->TimeStamp = static_cast<uint64_t>(now.tv_sec);
+
+    // Signature not used (no Plug&Charge)
+    header->Signature_isUsed = 0;
+}
+
+void ISO20::handle_ac_charge_parameter_discovery_req()
+{
+    // [V2G20-2314] Requirements for ChargeParameterDiscoveryReq/Res apply to all energy
+    //              transfer mode specific extensions, e.g. AC_ChargeParameterDiscoveryReq/Res.
+    iso20_ac_AC_ChargeParameterDiscoveryReqType *req = &iso20AcDocDec->AC_ChargeParameterDiscoveryReq;
+    iso20_ac_AC_ChargeParameterDiscoveryResType *res = &iso20AcDocEnc->AC_ChargeParameterDiscoveryRes;
+
+    // Extract EV minimum charge power if available
+    if (req->AC_CPDReqEnergyTransferMode_isUsed) {
+
+        // [V2G20-1821] If the EV is capable of asymmetric energy transfer, it communicates
+        //              EVMaximumChargePower with phase-specific power values (_L2/_L3) in CPDReq.
+        // [V2G20-1820] If the EV only sends the base elements (sum), it is symmetric-only.
+        // [V2G20-1822] SECC shall not send _L2/_L3 unless the EV declared this capability.
+        ev_supports_asymmetric = req->AC_CPDReqEnergyTransferMode.EVMaximumChargePower_L2_isUsed
+                              || req->AC_CPDReqEnergyTransferMode.EVMaximumChargePower_L3_isUsed;
+        if (ev_supports_asymmetric) {
+            iso15118.trace("ISO20 AC: EV supports asymmetric power (per-phase control available)");
+        }
+    }
+
+    iso20AcDocEnc->AC_ChargeParameterDiscoveryRes_isUsed = 1;
+    prepare_ac_header(&res->Header);
+
+    res->ResponseCode = iso20_ac_responseCodeType_OK;
+
+    // Provide AC charge parameters (non-BPT mode)
+    res->AC_CPDResEnergyTransferMode_isUsed = 1;
+    res->BPT_AC_CPDResEnergyTransferMode_isUsed = 0;
+
+    // EVSEMaximumChargePower and EVSEMinimumChargePower from current charging parameters
+    const ChargingInformation ci = iso15118.get_charging_information();
+
+    // Compute per-phase power in milliwatts, then find the smallest exponent fitting int16_t.
+    uint32_t per_phase_power_mw = static_cast<uint32_t>(ci.current_ma) * V2G_NOMINAL_VOLTAGE_V;
+
+    if (ev_supports_asymmetric && is_selected_three_phase()) {
+        // [V2G20-1818] When _L2/_L3 are present, the base element becomes L1-specific.
+        // [V2G20-1819] Same rules apply to _L2 and _L3 as to the base element.
+        // Report per-phase max power on each phase (same value = even distribution).
+        const ScaledPower sp = encode_milliwatts(per_phase_power_mw);
+        res->AC_CPDResEnergyTransferMode.EVSEMaximumChargePower.Value = sp.value;
+        res->AC_CPDResEnergyTransferMode.EVSEMaximumChargePower.Exponent = sp.exponent;
+
+        // L2 and L3 get the same per-phase power (even distribution)
+        res->AC_CPDResEnergyTransferMode.EVSEMaximumChargePower_L2_isUsed = 1;
+        res->AC_CPDResEnergyTransferMode.EVSEMaximumChargePower_L2.Value = sp.value;
+        res->AC_CPDResEnergyTransferMode.EVSEMaximumChargePower_L2.Exponent = sp.exponent;
+        res->AC_CPDResEnergyTransferMode.EVSEMaximumChargePower_L3_isUsed = 1;
+        res->AC_CPDResEnergyTransferMode.EVSEMaximumChargePower_L3.Value = sp.value;
+        res->AC_CPDResEnergyTransferMode.EVSEMaximumChargePower_L3.Exponent = sp.exponent;
+
+        // EVSEMinimumChargePower: 0W per phase (no minimum)
+        res->AC_CPDResEnergyTransferMode.EVSEMinimumChargePower.Exponent = 0;
+        res->AC_CPDResEnergyTransferMode.EVSEMinimumChargePower.Value = 0;
+        res->AC_CPDResEnergyTransferMode.EVSEMinimumChargePower_L2_isUsed = 1;
+        res->AC_CPDResEnergyTransferMode.EVSEMinimumChargePower_L2.Exponent = 0;
+        res->AC_CPDResEnergyTransferMode.EVSEMinimumChargePower_L2.Value = 0;
+        res->AC_CPDResEnergyTransferMode.EVSEMinimumChargePower_L3_isUsed = 1;
+        res->AC_CPDResEnergyTransferMode.EVSEMinimumChargePower_L3.Exponent = 0;
+        res->AC_CPDResEnergyTransferMode.EVSEMinimumChargePower_L3.Value = 0;
+    } else {
+        // Symmetric mode: base element = sum of all phases per [V2G20-1817].
+        // Phase multiplier is determined by the selected ParameterSet (1=ThreePhase, 2=SinglePhase),
+        // NOT by get_charging_information().three_phase, the ParameterSet is the contract with the EV.
+        // [V2G20-1817] For ThreePhase, when _L2/_L3 are not present, the base element represents the
+        //              sum of all three lines. An even distribution across all three phases shall be applied.
+        // [V2G20-1815] For SinglePhase, only the base element (L1) shall be used.
+        uint32_t total_power_mw = per_phase_power_mw * (is_selected_three_phase() ? 3 : 1);
+        const ScaledPower sp = encode_milliwatts(total_power_mw);
+        res->AC_CPDResEnergyTransferMode.EVSEMaximumChargePower.Value = sp.value;
+        res->AC_CPDResEnergyTransferMode.EVSEMaximumChargePower.Exponent = sp.exponent;
+
+        // [V2G20-1822] SECC shall not send _L2, _L3 values unless the EV declared asymmetric capability.
+        res->AC_CPDResEnergyTransferMode.EVSEMaximumChargePower_L2_isUsed = 0;
+        res->AC_CPDResEnergyTransferMode.EVSEMaximumChargePower_L3_isUsed = 0;
+
+        // EVSEMinimumChargePower: 0W (no minimum)
+        res->AC_CPDResEnergyTransferMode.EVSEMinimumChargePower.Exponent = 0;
+        res->AC_CPDResEnergyTransferMode.EVSEMinimumChargePower.Value = 0;
+        res->AC_CPDResEnergyTransferMode.EVSEMinimumChargePower_L2_isUsed = 0;
+        res->AC_CPDResEnergyTransferMode.EVSEMinimumChargePower_L3_isUsed = 0;
+    }
+
+    // [V2G20-1828] MaximumPowerAsymmetry: if not present, no asymmetric limitation applies.
+    // We intentionally omit it so the SECC can set any per-phase power distribution.
+
+    // EVSENominalFrequency: 50Hz (Europe) = 50 * 10^0
+    res->AC_CPDResEnergyTransferMode.EVSENominalFrequency.Exponent = 0;
+    res->AC_CPDResEnergyTransferMode.EVSENominalFrequency.Value = V2G_NOMINAL_FREQUENCY_HZ;
+
+    // Optional fields not used
+    res->AC_CPDResEnergyTransferMode.MaximumPowerAsymmetry_isUsed = 0;
+    res->AC_CPDResEnergyTransferMode.EVSEPowerRampLimitation_isUsed = 0;
+    res->AC_CPDResEnergyTransferMode.EVSEPresentActivePower_isUsed = 0;
+    res->AC_CPDResEnergyTransferMode.EVSEPresentActivePower_L2_isUsed = 0;
+    res->AC_CPDResEnergyTransferMode.EVSEPresentActivePower_L3_isUsed = 0;
+
+    iso15118.common.send_exi(Common::ExiType::Iso20Ac);
+    state = ISO20State::ACChargeParameterDiscovery;
+}
+
+void ISO20::handle_ac_charge_loop_req()
+{
+    // [V2G20-2315] Requirements for ChargeLoopReq/Res apply to all energy transfer mode
+    //              specific extensions, e.g. AC_ChargeLoopReq/Res.
+    // [V2G20-902] The MeterInfo in ChargeLoopRes shall be the amount of energy charged
+    //             during the current service session.
+    iso20_ac_AC_ChargeLoopReqType *req = &iso20AcDocDec->AC_ChargeLoopReq;
+    iso20_ac_AC_ChargeLoopResType *res = &iso20AcDocEnc->AC_ChargeLoopRes;
+
+    if (req->DisplayParameters_isUsed) {
+        if (req->DisplayParameters.PresentSOC_isUsed) {
+            api_state.get("soc")->updateInt(req->DisplayParameters.PresentSOC);
+        }
+        if (req->DisplayParameters.BatteryEnergyCapacity_isUsed) {
+            api_state.get("energy_capacity")->updateInt(static_cast<int32_t>(physical_value_to_float(&req->DisplayParameters.BatteryEnergyCapacity)));
+        }
+    }
+
+    if (req->Dynamic_AC_CLReqControlMode_isUsed) {
+        api_state.get("active_power")->updateInt(static_cast<int32_t>(physical_value_to_float(&req->Dynamic_AC_CLReqControlMode.EVPresentActivePower)));
+    }
+
+    // Update EV data
+#if MODULE_EV_AVAILABLE()
+    if (req->DisplayParameters_isUsed) {
+        if (req->DisplayParameters.PresentSOC_isUsed) {
+            ev.set_soc(static_cast<float>(req->DisplayParameters.PresentSOC));
+        }
+        if (req->DisplayParameters.BatteryEnergyCapacity_isUsed) {
+            // Convert from rational number (value * 10^exponent) to kWh
+            // The original value is in Wh.
+            ev.session.capacity = physical_value_to_float(&req->DisplayParameters.BatteryEnergyCapacity) / 1000.0f;
+        }
+    }
+
+    if (req->Dynamic_AC_CLReqControlMode_isUsed) {
+        ev.session.power = physical_value_to_float(&req->Dynamic_AC_CLReqControlMode.EVPresentActivePower);
+    }
+
+    ev.session_updated(EVDataSource::ISO20);
+#endif
+
+    iso20AcDocEnc->AC_ChargeLoopRes_isUsed = 1;
+    prepare_ac_header(&res->Header);
+
+    res->ResponseCode = iso20_ac_responseCodeType_OK;
+
+    // In read_soc_only mode, signal the EV to terminate after the first SoC reading.
+    // [V2G20-1414] SECC sets EVSENotification to "Terminate" to request session termination.
+    // [V2G20-1416] EVCC shall stop charging within NotificationMaxDelay seconds.
+    // [V2G20-2645] EVCC shall initiate shutdown and send SessionStopReq with Terminate.
+    if (iso15118.is_read_soc_only() && soc_read) {
+        res->EVSEStatus_isUsed = 1;
+        res->EVSEStatus.NotificationMaxDelay = 0;
+        res->EVSEStatus.EVSENotification = iso20_ac_evseNotificationType_Terminate;
+    }
+    // Check if the charge manager wants a different phase mode than currently selected.
+    // If the EV supports asymmetric power, we handle this via per-phase EVSETargetActivePower
+    // below. No ServiceRenegotiation needed.
+    // If the EV does NOT support asymmetric, request ServiceRenegotiation so the EV can
+    // re-select the appropriate ParameterSet (ThreePhase vs SinglePhase).
+    // [V2G20-1964] EVCC shall initiate ServiceRenegotiation when EVSENotification=ServiceRenegotiation.
+    else if (!ev_supports_asymmetric && iso15118.get_charging_information().three_phase != is_selected_three_phase()) {
+        res->EVSEStatus_isUsed = 1;
+        res->EVSEStatus.NotificationMaxDelay = 10;  // EV must initiate renegotiation within 10 seconds
+        res->EVSEStatus.EVSENotification = iso20_ac_evseNotificationType_ServiceRenegotiation;
+    } else {
+        // EVSE status not provided
+        res->EVSEStatus_isUsed = 0;
+
+        // Track first SoC reading in read_soc_only mode
+        if (iso15118.is_read_soc_only()) {
+            soc_read = true;
+        }
+    }
+
+    // Metering info not provided (even if requested)
+    res->MeterInfo_isUsed = 0;
+
+    // Receipt not provided
+    res->Receipt_isUsed = 0;
+
+    // Target frequency not provided
+    res->EVSETargetFrequency_isUsed = 0;
+
+    // Control mode response: Use Dynamic mode.
+    // [V2G20-1825] The EV shall adjust its energy transfer behavior to the new setpoints
+    // as fast as technically feasible.
+    res->Scheduled_AC_CLResControlMode_isUsed = 0;
+    res->Dynamic_AC_CLResControlMode_isUsed = 1;
+    res->BPT_Scheduled_AC_CLResControlMode_isUsed = 0;
+    res->BPT_Dynamic_AC_CLResControlMode_isUsed = 0;
+    res->CLResControlMode_isUsed = 0;
+
+    // EVSETargetActivePower is MANDATORY in dynamic mode. This is the primary power control mechanism.
+    // [V2G20-1823] EVSETargetActivePower shall always be based on EVSENominalVoltage.
+    const ChargingInformation ci = iso15118.get_charging_information();
+
+    if (ev_supports_asymmetric && is_selected_three_phase()) {
+        // Asymmetric per-phase power control path.
+        // [V2G20-1818] When _L2/_L3 are present, the base element becomes L1-specific (not a sum).
+        // [V2G20-1825] The EV shall adjust to new setpoints as fast as technically feasible.
+        // This allows dynamic switching between 1-phase and 3-phase without ServiceRenegotiation.
+
+        // L1 always gets the per-phase power
+        uint32_t l1_power_mw = static_cast<uint32_t>(ci.current_ma) * V2G_NOMINAL_VOLTAGE_V;
+        const ScaledPower l1 = encode_milliwatts(l1_power_mw);
+        res->Dynamic_AC_CLResControlMode.EVSETargetActivePower.Value = l1.value;
+        res->Dynamic_AC_CLResControlMode.EVSETargetActivePower.Exponent = l1.exponent;
+
+        // L2 and L3: same as L1 when charge manager wants 3-phase, zero when it wants 1-phase.
+        // [V2G20-1819] Same rules apply to _L2/_L3 as to the base element.
+        uint32_t l23_power_mw = ci.three_phase ? l1_power_mw : 0;
+        const ScaledPower l23 = encode_milliwatts(l23_power_mw);
+        res->Dynamic_AC_CLResControlMode.EVSETargetActivePower_L2_isUsed = 1;
+        res->Dynamic_AC_CLResControlMode.EVSETargetActivePower_L2.Value = l23.value;
+        res->Dynamic_AC_CLResControlMode.EVSETargetActivePower_L2.Exponent = l23.exponent;
+        res->Dynamic_AC_CLResControlMode.EVSETargetActivePower_L3_isUsed = 1;
+        res->Dynamic_AC_CLResControlMode.EVSETargetActivePower_L3.Value = l23.value;
+        res->Dynamic_AC_CLResControlMode.EVSETargetActivePower_L3.Exponent = l23.exponent;
+    } else {
+        // Symmetric power control path.
+        // [V2G20-1817] For ThreePhase without _L2/_L3, base element = total power summed across
+        //              all three lines. The EV shall apply an even distribution across all phases.
+        // [V2G20-1815] For SinglePhase, base element = power on L1 only.
+        // [V2G20-1822] SECC shall not send _L2/_L3 unless the EV declared asymmetric capability.
+        uint32_t power_mw = static_cast<uint32_t>(ci.current_ma) * V2G_NOMINAL_VOLTAGE_V * (is_selected_three_phase() ? 3 : 1);
+        const ScaledPower sp = encode_milliwatts(power_mw);
+        res->Dynamic_AC_CLResControlMode.EVSETargetActivePower.Value = sp.value;
+        res->Dynamic_AC_CLResControlMode.EVSETargetActivePower.Exponent = sp.exponent;
+
+        res->Dynamic_AC_CLResControlMode.EVSETargetActivePower_L2_isUsed = 0;
+        res->Dynamic_AC_CLResControlMode.EVSETargetActivePower_L3_isUsed = 0;
+    }
+
+    // Reactive power control not used
+    res->Dynamic_AC_CLResControlMode.EVSETargetReactivePower_isUsed = 0;
+    res->Dynamic_AC_CLResControlMode.EVSETargetReactivePower_L2_isUsed = 0;
+    res->Dynamic_AC_CLResControlMode.EVSETargetReactivePower_L3_isUsed = 0;
+
+    // Present active power not provided (we don't have metering at this level)
+    res->Dynamic_AC_CLResControlMode.EVSEPresentActivePower_isUsed = 0;
+    res->Dynamic_AC_CLResControlMode.EVSEPresentActivePower_L2_isUsed = 0;
+    res->Dynamic_AC_CLResControlMode.EVSEPresentActivePower_L3_isUsed = 0;
+
+    // Inherited Dynamic_CLResControlMode fields (all optional)
+    res->Dynamic_AC_CLResControlMode.DepartureTime_isUsed = 0;
+    res->Dynamic_AC_CLResControlMode.MinimumSOC_isUsed = 0;
+    res->Dynamic_AC_CLResControlMode.TargetSOC_isUsed = 0;
+    res->Dynamic_AC_CLResControlMode.AckMaxDelay_isUsed = 0;
+
+    iso15118.common.send_exi(Common::ExiType::Iso20Ac);
+    state = ISO20State::ACChargeLoop;
+}
+
+// =============================
+// Trace functions for debugging
+// =============================
+
+void ISO20::trace_request_response()
+{
+    // === REQUEST MESSAGES ===
+
+    if (iso20DocDec->SessionSetupReq_isUsed) {
+        iso20_SessionSetupReqType *req = &iso20DocDec->SessionSetupReq;
+
+        trace_header(&req->Header, "SessionSetupReq");
+        trace_iso(" Body");
+        trace_iso("  SessionSetupReq");
+        trace_iso("   EVCCID: %.*s", req->EVCCID.charactersLen, req->EVCCID.characters);
+        trace_iso("   EVCCID.charactersLen: %d", req->EVCCID.charactersLen);
+    }
+
+    if (iso20DocDec->AuthorizationSetupReq_isUsed) {
+        iso20_AuthorizationSetupReqType *req = &iso20DocDec->AuthorizationSetupReq;
+
+        trace_header(&req->Header, "AuthorizationSetupReq");
+        trace_iso(" Body");
+        trace_iso("  AuthorizationSetupReq (empty body)");
+    }
+
+    if (iso20DocDec->AuthorizationReq_isUsed) {
+        iso20_AuthorizationReqType *req = &iso20DocDec->AuthorizationReq;
+
+        trace_header(&req->Header, "AuthorizationReq");
+        trace_iso(" Body");
+        trace_iso("  AuthorizationReq");
+        trace_iso("   SelectedAuthorizationService: %d", req->SelectedAuthorizationService);
+        trace_iso("   EIM_AReqAuthorizationMode_isUsed: %d", req->EIM_AReqAuthorizationMode_isUsed);
+        trace_iso("   PnC_AReqAuthorizationMode_isUsed: %d", req->PnC_AReqAuthorizationMode_isUsed);
+    }
+
+    if (iso20DocDec->ServiceDiscoveryReq_isUsed) {
+        iso20_ServiceDiscoveryReqType *req = &iso20DocDec->ServiceDiscoveryReq;
+
+        trace_header(&req->Header, "ServiceDiscoveryReq");
+        trace_iso(" Body");
+        trace_iso("  ServiceDiscoveryReq");
+        trace_iso("   SupportedServiceIDs_isUsed: %d", req->SupportedServiceIDs_isUsed);
+        if (req->SupportedServiceIDs_isUsed) {
+            for (int i = 0; i < req->SupportedServiceIDs.ServiceID.arrayLen; i++) {
+                trace_iso("   SupportedServiceIDs.ServiceID[%d]: %d", i, req->SupportedServiceIDs.ServiceID.array[i]);
+            }
+        }
+    }
+
+    if (iso20DocDec->ServiceDetailReq_isUsed) {
+        iso20_ServiceDetailReqType *req = &iso20DocDec->ServiceDetailReq;
+
+        trace_header(&req->Header, "ServiceDetailReq");
+        trace_iso(" Body");
+        trace_iso("  ServiceDetailReq");
+        trace_iso("   ServiceID: %d", req->ServiceID);
+    }
+
+    if (iso20DocDec->ServiceSelectionReq_isUsed) {
+        iso20_ServiceSelectionReqType *req = &iso20DocDec->ServiceSelectionReq;
+
+        trace_header(&req->Header, "ServiceSelectionReq");
+        trace_iso(" Body");
+        trace_iso("  ServiceSelectionReq");
+        trace_iso("   SelectedEnergyTransferService.ServiceID: %d", req->SelectedEnergyTransferService.ServiceID);
+        trace_iso("   SelectedEnergyTransferService.ParameterSetID: %d", req->SelectedEnergyTransferService.ParameterSetID);
+        trace_iso("   SelectedVASList_isUsed: %d", req->SelectedVASList_isUsed);
+        if (req->SelectedVASList_isUsed) {
+            for (int i = 0; i < req->SelectedVASList.SelectedService.arrayLen; i++) {
+                trace_iso("   SelectedVASList.SelectedService[%d].ServiceID: %d", i, req->SelectedVASList.SelectedService.array[i].ServiceID);
+                trace_iso("   SelectedVASList.SelectedService[%d].ParameterSetID: %d", i, req->SelectedVASList.SelectedService.array[i].ParameterSetID);
+            }
+        }
+    }
+
+    if (iso20DocDec->ScheduleExchangeReq_isUsed) {
+        iso20_ScheduleExchangeReqType *req = &iso20DocDec->ScheduleExchangeReq;
+
+        trace_header(&req->Header, "ScheduleExchangeReq");
+        trace_iso(" Body");
+        trace_iso("  ScheduleExchangeReq");
+        trace_iso("   MaximumSupportingPoints: %d", req->MaximumSupportingPoints);
+        trace_iso("   Dynamic_SEReqControlMode_isUsed: %d", req->Dynamic_SEReqControlMode_isUsed);
+        trace_iso("   Scheduled_SEReqControlMode_isUsed: %d", req->Scheduled_SEReqControlMode_isUsed);
+        if (req->Scheduled_SEReqControlMode_isUsed) {
+            trace_iso("    Scheduled_SEReqControlMode");
+            trace_iso("     DepartureTime_isUsed: %d", req->Scheduled_SEReqControlMode.DepartureTime_isUsed);
+            if (req->Scheduled_SEReqControlMode.DepartureTime_isUsed) {
+                trace_iso("     DepartureTime: %lu", static_cast<unsigned long>(req->Scheduled_SEReqControlMode.DepartureTime));
+            }
+            trace_iso("     EVTargetEnergyRequest_isUsed: %d", req->Scheduled_SEReqControlMode.EVTargetEnergyRequest_isUsed);
+            if (req->Scheduled_SEReqControlMode.EVTargetEnergyRequest_isUsed) {
+                trace_iso("     EVTargetEnergyRequest: %d * 10^%d", req->Scheduled_SEReqControlMode.EVTargetEnergyRequest.Value, req->Scheduled_SEReqControlMode.EVTargetEnergyRequest.Exponent);
+            }
+            trace_iso("     EVMaximumEnergyRequest_isUsed: %d", req->Scheduled_SEReqControlMode.EVMaximumEnergyRequest_isUsed);
+            if (req->Scheduled_SEReqControlMode.EVMaximumEnergyRequest_isUsed) {
+                trace_iso("     EVMaximumEnergyRequest: %d * 10^%d", req->Scheduled_SEReqControlMode.EVMaximumEnergyRequest.Value, req->Scheduled_SEReqControlMode.EVMaximumEnergyRequest.Exponent);
+            }
+            trace_iso("     EVMinimumEnergyRequest_isUsed: %d", req->Scheduled_SEReqControlMode.EVMinimumEnergyRequest_isUsed);
+            if (req->Scheduled_SEReqControlMode.EVMinimumEnergyRequest_isUsed) {
+                trace_iso("     EVMinimumEnergyRequest: %d * 10^%d", req->Scheduled_SEReqControlMode.EVMinimumEnergyRequest.Value, req->Scheduled_SEReqControlMode.EVMinimumEnergyRequest.Exponent);
+            }
+            trace_iso("     EVEnergyOffer_isUsed: %d", req->Scheduled_SEReqControlMode.EVEnergyOffer_isUsed);
+        }
+    }
+
+    if (iso20DocDec->PowerDeliveryReq_isUsed) {
+        iso20_PowerDeliveryReqType *req = &iso20DocDec->PowerDeliveryReq;
+
+        trace_header(&req->Header, "PowerDeliveryReq");
+        trace_iso(" Body");
+        trace_iso("  PowerDeliveryReq");
+        trace_iso("   EVProcessing: %d", req->EVProcessing);
+        trace_iso("   ChargeProgress: %d", req->ChargeProgress);
+        trace_iso("   EVPowerProfile_isUsed: %d", req->EVPowerProfile_isUsed);
+        if (req->EVPowerProfile_isUsed) {
+            trace_iso("    EVPowerProfile");
+            trace_iso("     TimeAnchor: %llu", req->EVPowerProfile.TimeAnchor);
+            for (int i = 0; i < req->EVPowerProfile.EVPowerProfileEntries.EVPowerProfileEntry.arrayLen; i++) {
+                trace_iso("     EVPowerProfileEntry[%d]", i);
+                trace_iso("      Duration: %lu", static_cast<unsigned long>(req->EVPowerProfile.EVPowerProfileEntries.EVPowerProfileEntry.array[i].Duration));
+                trace_iso("      Power: %d * 10^%d",
+                               req->EVPowerProfile.EVPowerProfileEntries.EVPowerProfileEntry.array[i].Power.Value,
+                               req->EVPowerProfile.EVPowerProfileEntries.EVPowerProfileEntry.array[i].Power.Exponent);
+            }
+            trace_iso("     Dynamic_EVPPTControlMode_isUsed: %d", req->EVPowerProfile.Dynamic_EVPPTControlMode_isUsed);
+            trace_iso("     Scheduled_EVPPTControlMode_isUsed: %d", req->EVPowerProfile.Scheduled_EVPPTControlMode_isUsed);
+            if (req->EVPowerProfile.Scheduled_EVPPTControlMode_isUsed) {
+                trace_iso("      SelectedScheduleTupleID: %lu", static_cast<unsigned long>(req->EVPowerProfile.Scheduled_EVPPTControlMode.SelectedScheduleTupleID));
+                trace_iso("      PowerToleranceAcceptance_isUsed: %d", req->EVPowerProfile.Scheduled_EVPPTControlMode.PowerToleranceAcceptance_isUsed);
+            }
+        }
+        trace_iso("   BPT_ChannelSelection_isUsed: %d", req->BPT_ChannelSelection_isUsed);
+    }
+
+    if (iso20DocDec->SessionStopReq_isUsed) {
+        iso20_SessionStopReqType *req = &iso20DocDec->SessionStopReq;
+
+        trace_header(&req->Header, "SessionStopReq");
+        trace_iso(" Body");
+        trace_iso("  SessionStopReq");
+        trace_iso("   ChargingSession: %d", req->ChargingSession);
+        trace_iso("   EVTerminationCode_isUsed: %d", req->EVTerminationCode_isUsed);
+        if (req->EVTerminationCode_isUsed) {
+            trace_iso("   EVTerminationCode: %.*s", req->EVTerminationCode.charactersLen, req->EVTerminationCode.characters);
+        }
+        trace_iso("   EVTerminationExplanation_isUsed: %d", req->EVTerminationExplanation_isUsed);
+        if (req->EVTerminationExplanation_isUsed) {
+            trace_iso("   EVTerminationExplanation: %.*s", req->EVTerminationExplanation.charactersLen, req->EVTerminationExplanation.characters);
+        }
+    }
+
+    // === RESPONSE MESSAGES ===
+
+    if (iso20DocEnc->SessionSetupRes_isUsed) {
+        iso20_SessionSetupResType *res = &iso20DocEnc->SessionSetupRes;
+
+        trace_header(&res->Header, "SessionSetupRes");
+        trace_iso(" Body");
+        trace_iso("  SessionSetupRes");
+        trace_iso("   ResponseCode: %d", res->ResponseCode);
+        trace_iso("   EVSEID: %.*s", res->EVSEID.charactersLen, res->EVSEID.characters);
+        trace_iso("   EVSEID.charactersLen: %d", res->EVSEID.charactersLen);
+    }
+
+    if (iso20DocEnc->AuthorizationSetupRes_isUsed) {
+        iso20_AuthorizationSetupResType *res = &iso20DocEnc->AuthorizationSetupRes;
+
+        trace_header(&res->Header, "AuthorizationSetupRes");
+        trace_iso(" Body");
+        trace_iso("  AuthorizationSetupRes");
+        trace_iso("   ResponseCode: %d", res->ResponseCode);
+        for (int i = 0; i < res->AuthorizationServices.arrayLen; i++) {
+            trace_iso("   AuthorizationServices[%d]: %d", i, res->AuthorizationServices.array[i]);
+        }
+        trace_iso("   CertificateInstallationService: %d", res->CertificateInstallationService);
+        trace_iso("   EIM_ASResAuthorizationMode_isUsed: %d", res->EIM_ASResAuthorizationMode_isUsed);
+        trace_iso("   PnC_ASResAuthorizationMode_isUsed: %d", res->PnC_ASResAuthorizationMode_isUsed);
+    }
+
+    if (iso20DocEnc->AuthorizationRes_isUsed) {
+        iso20_AuthorizationResType *res = &iso20DocEnc->AuthorizationRes;
+
+        trace_header(&res->Header, "AuthorizationRes");
+        trace_iso(" Body");
+        trace_iso("  AuthorizationRes");
+        trace_iso("   ResponseCode: %d", res->ResponseCode);
+        trace_iso("   EVSEProcessing: %d", res->EVSEProcessing);
+    }
+
+    if (iso20DocEnc->ServiceDiscoveryRes_isUsed) {
+        iso20_ServiceDiscoveryResType *res = &iso20DocEnc->ServiceDiscoveryRes;
+
+        trace_header(&res->Header, "ServiceDiscoveryRes");
+        trace_iso(" Body");
+        trace_iso("  ServiceDiscoveryRes");
+        trace_iso("   ResponseCode: %d", res->ResponseCode);
+        trace_iso("   ServiceRenegotiationSupported: %d", res->ServiceRenegotiationSupported);
+        trace_iso("   EnergyTransferServiceList");
+        for (int i = 0; i < res->EnergyTransferServiceList.Service.arrayLen; i++) {
+            trace_iso("    Service[%d].ServiceID: %d", i, res->EnergyTransferServiceList.Service.array[i].ServiceID);
+            trace_iso("    Service[%d].FreeService: %d", i, res->EnergyTransferServiceList.Service.array[i].FreeService);
+        }
+        trace_iso("   VASList_isUsed: %d", res->VASList_isUsed);
+        if (res->VASList_isUsed) {
+            for (int i = 0; i < res->VASList.Service.arrayLen; i++) {
+                trace_iso("    VASList.Service[%d].ServiceID: %d", i, res->VASList.Service.array[i].ServiceID);
+                trace_iso("    VASList.Service[%d].FreeService: %d", i, res->VASList.Service.array[i].FreeService);
+            }
+        }
+    }
+
+    if (iso20DocEnc->ServiceDetailRes_isUsed) {
+        iso20_ServiceDetailResType *res = &iso20DocEnc->ServiceDetailRes;
+
+        trace_header(&res->Header, "ServiceDetailRes");
+        trace_iso(" Body");
+        trace_iso("  ServiceDetailRes");
+        trace_iso("   ResponseCode: %d", res->ResponseCode);
+        trace_iso("   ServiceID: %d", res->ServiceID);
+        trace_iso("   ServiceParameterList");
+        for (int i = 0; i < res->ServiceParameterList.ParameterSet.arrayLen; i++) {
+            trace_iso("    ParameterSet[%d].ParameterSetID: %d", i, res->ServiceParameterList.ParameterSet.array[i].ParameterSetID);
+            for (int j = 0; j < res->ServiceParameterList.ParameterSet.array[i].Parameter.arrayLen; j++) {
+                trace_iso("     Parameter[%d].Name: %.*s", j,
+                               res->ServiceParameterList.ParameterSet.array[i].Parameter.array[j].Name.charactersLen,
+                               res->ServiceParameterList.ParameterSet.array[i].Parameter.array[j].Name.characters);
+                if (res->ServiceParameterList.ParameterSet.array[i].Parameter.array[j].intValue_isUsed) {
+                    trace_iso("     Parameter[%d].intValue: %ld", j, static_cast<long>(res->ServiceParameterList.ParameterSet.array[i].Parameter.array[j].intValue));
+                }
+                if (res->ServiceParameterList.ParameterSet.array[i].Parameter.array[j].boolValue_isUsed) {
+                    trace_iso("     Parameter[%d].boolValue: %d", j, res->ServiceParameterList.ParameterSet.array[i].Parameter.array[j].boolValue);
+                }
+                if (res->ServiceParameterList.ParameterSet.array[i].Parameter.array[j].finiteString_isUsed) {
+                    trace_iso("     Parameter[%d].finiteString: %.*s", j,
+                                   res->ServiceParameterList.ParameterSet.array[i].Parameter.array[j].finiteString.charactersLen,
+                                   res->ServiceParameterList.ParameterSet.array[i].Parameter.array[j].finiteString.characters);
+                }
+            }
+        }
+    }
+
+    if (iso20DocEnc->ServiceSelectionRes_isUsed) {
+        iso20_ServiceSelectionResType *res = &iso20DocEnc->ServiceSelectionRes;
+
+        trace_header(&res->Header, "ServiceSelectionRes");
+        trace_iso(" Body");
+        trace_iso("  ServiceSelectionRes");
+        trace_iso("   ResponseCode: %d", res->ResponseCode);
+    }
+
+    if (iso20DocEnc->ScheduleExchangeRes_isUsed) {
+        iso20_ScheduleExchangeResType *res = &iso20DocEnc->ScheduleExchangeRes;
+
+        trace_header(&res->Header, "ScheduleExchangeRes");
+        trace_iso(" Body");
+        trace_iso("  ScheduleExchangeRes");
+        trace_iso("   ResponseCode: %d", res->ResponseCode);
+        trace_iso("   EVSEProcessing: %d", res->EVSEProcessing);
+        trace_iso("   GoToPause_isUsed: %d", res->GoToPause_isUsed);
+        if (res->GoToPause_isUsed) {
+            trace_iso("   GoToPause: %d", res->GoToPause);
+        }
+        trace_iso("   Dynamic_SEResControlMode_isUsed: %d", res->Dynamic_SEResControlMode_isUsed);
+        trace_iso("   Scheduled_SEResControlMode_isUsed: %d", res->Scheduled_SEResControlMode_isUsed);
+        if (res->Scheduled_SEResControlMode_isUsed) {
+            trace_iso("    Scheduled_SEResControlMode");
+            for (int i = 0; i < res->Scheduled_SEResControlMode.ScheduleTuple.arrayLen; i++) {
+                trace_iso("     ScheduleTuple[%d]", i);
+                trace_iso("      ScheduleTupleID: %lu", static_cast<unsigned long>(res->Scheduled_SEResControlMode.ScheduleTuple.array[i].ScheduleTupleID));
+                trace_iso("      ChargingSchedule.PowerSchedule.TimeAnchor: %llu", res->Scheduled_SEResControlMode.ScheduleTuple.array[i].ChargingSchedule.PowerSchedule.TimeAnchor);
+                for (int j = 0; j < res->Scheduled_SEResControlMode.ScheduleTuple.array[i].ChargingSchedule.PowerSchedule.PowerScheduleEntries.PowerScheduleEntry.arrayLen; j++) {
+                    trace_iso("       PowerScheduleEntry[%d].Duration: %lu", j,
+                                   static_cast<unsigned long>(res->Scheduled_SEResControlMode.ScheduleTuple.array[i].ChargingSchedule.PowerSchedule.PowerScheduleEntries.PowerScheduleEntry.array[j].Duration));
+                    trace_iso("       PowerScheduleEntry[%d].Power: %d * 10^%d", j,
+                                   res->Scheduled_SEResControlMode.ScheduleTuple.array[i].ChargingSchedule.PowerSchedule.PowerScheduleEntries.PowerScheduleEntry.array[j].Power.Value,
+                                   res->Scheduled_SEResControlMode.ScheduleTuple.array[i].ChargingSchedule.PowerSchedule.PowerScheduleEntries.PowerScheduleEntry.array[j].Power.Exponent);
+                }
+                trace_iso("      AbsolutePriceSchedule_isUsed: %d", res->Scheduled_SEResControlMode.ScheduleTuple.array[i].ChargingSchedule.AbsolutePriceSchedule_isUsed);
+                if (res->Scheduled_SEResControlMode.ScheduleTuple.array[i].ChargingSchedule.AbsolutePriceSchedule_isUsed) {
+                    trace_iso("      AbsolutePriceSchedule.TimeAnchor: %llu", res->Scheduled_SEResControlMode.ScheduleTuple.array[i].ChargingSchedule.AbsolutePriceSchedule.TimeAnchor);
+                    trace_iso("      AbsolutePriceSchedule.PriceScheduleID: %lu", static_cast<unsigned long>(res->Scheduled_SEResControlMode.ScheduleTuple.array[i].ChargingSchedule.AbsolutePriceSchedule.PriceScheduleID));
+                    trace_iso("      AbsolutePriceSchedule.Currency: %.*s",
+                                   res->Scheduled_SEResControlMode.ScheduleTuple.array[i].ChargingSchedule.AbsolutePriceSchedule.Currency.charactersLen,
+                                   res->Scheduled_SEResControlMode.ScheduleTuple.array[i].ChargingSchedule.AbsolutePriceSchedule.Currency.characters);
+                    trace_iso("      AbsolutePriceSchedule.Language: %.*s",
+                                   res->Scheduled_SEResControlMode.ScheduleTuple.array[i].ChargingSchedule.AbsolutePriceSchedule.Language.charactersLen,
+                                   res->Scheduled_SEResControlMode.ScheduleTuple.array[i].ChargingSchedule.AbsolutePriceSchedule.Language.characters);
+                    trace_iso("      AbsolutePriceSchedule.PriceAlgorithm: %.*s",
+                                   res->Scheduled_SEResControlMode.ScheduleTuple.array[i].ChargingSchedule.AbsolutePriceSchedule.PriceAlgorithm.charactersLen,
+                                   res->Scheduled_SEResControlMode.ScheduleTuple.array[i].ChargingSchedule.AbsolutePriceSchedule.PriceAlgorithm.characters);
+                }
+            }
+        }
+    }
+
+    if (iso20DocEnc->PowerDeliveryRes_isUsed) {
+        iso20_PowerDeliveryResType *res = &iso20DocEnc->PowerDeliveryRes;
+
+        trace_header(&res->Header, "PowerDeliveryRes");
+        trace_iso(" Body");
+        trace_iso("  PowerDeliveryRes");
+        trace_iso("   ResponseCode: %d", res->ResponseCode);
+        trace_iso("   EVSEStatus_isUsed: %d", res->EVSEStatus_isUsed);
+        if (res->EVSEStatus_isUsed) {
+            trace_iso("   EVSEStatus.NotificationMaxDelay: %d", res->EVSEStatus.NotificationMaxDelay);
+            trace_iso("   EVSEStatus.EVSENotification: %d", res->EVSEStatus.EVSENotification);
+        }
+    }
+
+    if (iso20DocEnc->SessionStopRes_isUsed) {
+        iso20_SessionStopResType *res = &iso20DocEnc->SessionStopRes;
+
+        trace_header(&res->Header, "SessionStopRes");
+        trace_iso(" Body");
+        trace_iso("  SessionStopRes");
+        trace_iso("   ResponseCode: %d", res->ResponseCode);
+    }
+}
+
+void ISO20::trace_ac_request_response()
+{
+    // === AC REQUEST MESSAGES ===
+
+    if (iso20AcDocDec->AC_ChargeParameterDiscoveryReq_isUsed) {
+        iso20_ac_AC_ChargeParameterDiscoveryReqType *req = &iso20AcDocDec->AC_ChargeParameterDiscoveryReq;
+
+        // Cast AC header to common header type for tracing (compatible layout)
+        trace_header(reinterpret_cast<const struct iso20_MessageHeaderType *>(&req->Header), "AC_ChargeParameterDiscoveryReq");
+        trace_iso(" Body");
+        trace_iso("  AC_ChargeParameterDiscoveryReq");
+        trace_iso("   AC_CPDReqEnergyTransferMode_isUsed: %d", req->AC_CPDReqEnergyTransferMode_isUsed);
+        if (req->AC_CPDReqEnergyTransferMode_isUsed) {
+            trace_iso("    AC_CPDReqEnergyTransferMode");
+            trace_iso("     EVMaximumChargePower: %d * 10^%d",
+                           req->AC_CPDReqEnergyTransferMode.EVMaximumChargePower.Value,
+                           req->AC_CPDReqEnergyTransferMode.EVMaximumChargePower.Exponent);
+            trace_iso("     EVMaximumChargePower_L2_isUsed: %d", req->AC_CPDReqEnergyTransferMode.EVMaximumChargePower_L2_isUsed);
+            trace_iso("     EVMaximumChargePower_L3_isUsed: %d", req->AC_CPDReqEnergyTransferMode.EVMaximumChargePower_L3_isUsed);
+            trace_iso("     EVMinimumChargePower: %d * 10^%d",
+                           req->AC_CPDReqEnergyTransferMode.EVMinimumChargePower.Value,
+                           req->AC_CPDReqEnergyTransferMode.EVMinimumChargePower.Exponent);
+            trace_iso("     EVMinimumChargePower_L2_isUsed: %d", req->AC_CPDReqEnergyTransferMode.EVMinimumChargePower_L2_isUsed);
+            trace_iso("     EVMinimumChargePower_L3_isUsed: %d", req->AC_CPDReqEnergyTransferMode.EVMinimumChargePower_L3_isUsed);
+        }
+        trace_iso("   BPT_AC_CPDReqEnergyTransferMode_isUsed: %d", req->BPT_AC_CPDReqEnergyTransferMode_isUsed);
+    }
+
+    if (iso20AcDocDec->AC_ChargeLoopReq_isUsed) {
+        iso20_ac_AC_ChargeLoopReqType *req = &iso20AcDocDec->AC_ChargeLoopReq;
+
+        trace_header(reinterpret_cast<const struct iso20_MessageHeaderType *>(&req->Header), "AC_ChargeLoopReq");
+        trace_iso(" Body");
+        trace_iso("  AC_ChargeLoopReq");
+        trace_iso("   MeterInfoRequested: %d", req->MeterInfoRequested);
+        trace_iso("   DisplayParameters_isUsed: %d", req->DisplayParameters_isUsed);
+        if (req->DisplayParameters_isUsed) {
+            trace_iso("    DisplayParameters");
+            trace_iso("     PresentSOC_isUsed: %d", req->DisplayParameters.PresentSOC_isUsed);
+            if (req->DisplayParameters.PresentSOC_isUsed) {
+                trace_iso("     PresentSOC: %d", req->DisplayParameters.PresentSOC);
+            }
+            trace_iso("     MinimumSOC_isUsed: %d", req->DisplayParameters.MinimumSOC_isUsed);
+            if (req->DisplayParameters.MinimumSOC_isUsed) {
+                trace_iso("     MinimumSOC: %d", req->DisplayParameters.MinimumSOC);
+            }
+            trace_iso("     TargetSOC_isUsed: %d", req->DisplayParameters.TargetSOC_isUsed);
+            if (req->DisplayParameters.TargetSOC_isUsed) {
+                trace_iso("     TargetSOC: %d", req->DisplayParameters.TargetSOC);
+            }
+            trace_iso("     MaximumSOC_isUsed: %d", req->DisplayParameters.MaximumSOC_isUsed);
+            if (req->DisplayParameters.MaximumSOC_isUsed) {
+                trace_iso("     MaximumSOC: %d", req->DisplayParameters.MaximumSOC);
+            }
+            trace_iso("     RemainingTimeToMinimumSOC_isUsed: %d", req->DisplayParameters.RemainingTimeToMinimumSOC_isUsed);
+            if (req->DisplayParameters.RemainingTimeToMinimumSOC_isUsed) {
+                trace_iso("     RemainingTimeToMinimumSOC: %lu", static_cast<unsigned long>(req->DisplayParameters.RemainingTimeToMinimumSOC));
+            }
+            trace_iso("     RemainingTimeToTargetSOC_isUsed: %d", req->DisplayParameters.RemainingTimeToTargetSOC_isUsed);
+            if (req->DisplayParameters.RemainingTimeToTargetSOC_isUsed) {
+                trace_iso("     RemainingTimeToTargetSOC: %lu", static_cast<unsigned long>(req->DisplayParameters.RemainingTimeToTargetSOC));
+            }
+            trace_iso("     RemainingTimeToMaximumSOC_isUsed: %d", req->DisplayParameters.RemainingTimeToMaximumSOC_isUsed);
+            if (req->DisplayParameters.RemainingTimeToMaximumSOC_isUsed) {
+                trace_iso("     RemainingTimeToMaximumSOC: %lu", static_cast<unsigned long>(req->DisplayParameters.RemainingTimeToMaximumSOC));
+            }
+            trace_iso("     ChargingComplete_isUsed: %d", req->DisplayParameters.ChargingComplete_isUsed);
+            if (req->DisplayParameters.ChargingComplete_isUsed) {
+                trace_iso("     ChargingComplete: %d", req->DisplayParameters.ChargingComplete);
+            }
+            trace_iso("     BatteryEnergyCapacity_isUsed: %d", req->DisplayParameters.BatteryEnergyCapacity_isUsed);
+            if (req->DisplayParameters.BatteryEnergyCapacity_isUsed) {
+                trace_iso("     BatteryEnergyCapacity: %d * 10^%d",
+                               req->DisplayParameters.BatteryEnergyCapacity.Value,
+                               req->DisplayParameters.BatteryEnergyCapacity.Exponent);
+            }
+            trace_iso("     InletHot_isUsed: %d", req->DisplayParameters.InletHot_isUsed);
+            if (req->DisplayParameters.InletHot_isUsed) {
+                trace_iso("     InletHot: %d", req->DisplayParameters.InletHot);
+            }
+        }
+        trace_iso("   CLReqControlMode_isUsed: %d", req->CLReqControlMode_isUsed);
+        trace_iso("   Dynamic_AC_CLReqControlMode_isUsed: %d", req->Dynamic_AC_CLReqControlMode_isUsed);
+        trace_iso("   Scheduled_AC_CLReqControlMode_isUsed: %d", req->Scheduled_AC_CLReqControlMode_isUsed);
+        if (req->Scheduled_AC_CLReqControlMode_isUsed) {
+            trace_iso("    Scheduled_AC_CLReqControlMode");
+            trace_iso("     EVPresentActivePower: %d * 10^%d",
+                           req->Scheduled_AC_CLReqControlMode.EVPresentActivePower.Value,
+                           req->Scheduled_AC_CLReqControlMode.EVPresentActivePower.Exponent);
+            trace_iso("     EVPresentActivePower_L2_isUsed: %d", req->Scheduled_AC_CLReqControlMode.EVPresentActivePower_L2_isUsed);
+            trace_iso("     EVPresentActivePower_L3_isUsed: %d", req->Scheduled_AC_CLReqControlMode.EVPresentActivePower_L3_isUsed);
+            trace_iso("     EVTargetEnergyRequest_isUsed: %d", req->Scheduled_AC_CLReqControlMode.EVTargetEnergyRequest_isUsed);
+            trace_iso("     EVMaximumEnergyRequest_isUsed: %d", req->Scheduled_AC_CLReqControlMode.EVMaximumEnergyRequest_isUsed);
+            trace_iso("     EVMinimumEnergyRequest_isUsed: %d", req->Scheduled_AC_CLReqControlMode.EVMinimumEnergyRequest_isUsed);
+            trace_iso("     EVMaximumChargePower_isUsed: %d", req->Scheduled_AC_CLReqControlMode.EVMaximumChargePower_isUsed);
+            trace_iso("     EVMinimumChargePower_isUsed: %d", req->Scheduled_AC_CLReqControlMode.EVMinimumChargePower_isUsed);
+            trace_iso("     EVPresentReactivePower_isUsed: %d", req->Scheduled_AC_CLReqControlMode.EVPresentReactivePower_isUsed);
+        }
+    }
+
+    // === AC RESPONSE MESSAGES ===
+
+    if (iso20AcDocEnc->AC_ChargeParameterDiscoveryRes_isUsed) {
+        iso20_ac_AC_ChargeParameterDiscoveryResType *res = &iso20AcDocEnc->AC_ChargeParameterDiscoveryRes;
+
+        trace_header(reinterpret_cast<const struct iso20_MessageHeaderType *>(&res->Header), "AC_ChargeParameterDiscoveryRes");
+        trace_iso(" Body");
+        trace_iso("  AC_ChargeParameterDiscoveryRes");
+        trace_iso("   ResponseCode: %d", res->ResponseCode);
+        trace_iso("   AC_CPDResEnergyTransferMode_isUsed: %d", res->AC_CPDResEnergyTransferMode_isUsed);
+        if (res->AC_CPDResEnergyTransferMode_isUsed) {
+            trace_iso("    AC_CPDResEnergyTransferMode");
+            trace_iso("     EVSEMaximumChargePower: %d * 10^%d",
+                           res->AC_CPDResEnergyTransferMode.EVSEMaximumChargePower.Value,
+                           res->AC_CPDResEnergyTransferMode.EVSEMaximumChargePower.Exponent);
+            trace_iso("     EVSEMaximumChargePower_L2_isUsed: %d", res->AC_CPDResEnergyTransferMode.EVSEMaximumChargePower_L2_isUsed);
+            trace_iso("     EVSEMaximumChargePower_L3_isUsed: %d", res->AC_CPDResEnergyTransferMode.EVSEMaximumChargePower_L3_isUsed);
+            trace_iso("     EVSEMinimumChargePower: %d * 10^%d",
+                           res->AC_CPDResEnergyTransferMode.EVSEMinimumChargePower.Value,
+                           res->AC_CPDResEnergyTransferMode.EVSEMinimumChargePower.Exponent);
+            trace_iso("     EVSEMinimumChargePower_L2_isUsed: %d", res->AC_CPDResEnergyTransferMode.EVSEMinimumChargePower_L2_isUsed);
+            trace_iso("     EVSEMinimumChargePower_L3_isUsed: %d", res->AC_CPDResEnergyTransferMode.EVSEMinimumChargePower_L3_isUsed);
+            trace_iso("     EVSENominalFrequency: %d * 10^%d",
+                           res->AC_CPDResEnergyTransferMode.EVSENominalFrequency.Value,
+                           res->AC_CPDResEnergyTransferMode.EVSENominalFrequency.Exponent);
+            trace_iso("     MaximumPowerAsymmetry_isUsed: %d", res->AC_CPDResEnergyTransferMode.MaximumPowerAsymmetry_isUsed);
+            trace_iso("     EVSEPowerRampLimitation_isUsed: %d", res->AC_CPDResEnergyTransferMode.EVSEPowerRampLimitation_isUsed);
+            trace_iso("     EVSEPresentActivePower_isUsed: %d", res->AC_CPDResEnergyTransferMode.EVSEPresentActivePower_isUsed);
+        }
+        trace_iso("   BPT_AC_CPDResEnergyTransferMode_isUsed: %d", res->BPT_AC_CPDResEnergyTransferMode_isUsed);
+    }
+
+    if (iso20AcDocEnc->AC_ChargeLoopRes_isUsed) {
+        iso20_ac_AC_ChargeLoopResType *res = &iso20AcDocEnc->AC_ChargeLoopRes;
+
+        trace_header(reinterpret_cast<const struct iso20_MessageHeaderType *>(&res->Header), "AC_ChargeLoopRes");
+        trace_iso(" Body");
+        trace_iso("  AC_ChargeLoopRes");
+        trace_iso("   ResponseCode: %d", res->ResponseCode);
+        trace_iso("   EVSEStatus_isUsed: %d", res->EVSEStatus_isUsed);
+        if (res->EVSEStatus_isUsed) {
+            trace_iso("    EVSEStatus");
+            trace_iso("     NotificationMaxDelay: %d", res->EVSEStatus.NotificationMaxDelay);
+            trace_iso("     EVSENotification: %d", res->EVSEStatus.EVSENotification);
+        }
+        trace_iso("   MeterInfo_isUsed: %d", res->MeterInfo_isUsed);
+        trace_iso("   Receipt_isUsed: %d", res->Receipt_isUsed);
+        trace_iso("   EVSETargetFrequency_isUsed: %d", res->EVSETargetFrequency_isUsed);
+        trace_iso("   CLResControlMode_isUsed: %d", res->CLResControlMode_isUsed);
+        trace_iso("   Dynamic_AC_CLResControlMode_isUsed: %d", res->Dynamic_AC_CLResControlMode_isUsed);
+        trace_iso("   Scheduled_AC_CLResControlMode_isUsed: %d", res->Scheduled_AC_CLResControlMode_isUsed);
+        if (res->Scheduled_AC_CLResControlMode_isUsed) {
+            trace_iso("    Scheduled_AC_CLResControlMode");
+            trace_iso("     EVSETargetActivePower_isUsed: %d", res->Scheduled_AC_CLResControlMode.EVSETargetActivePower_isUsed);
+            trace_iso("     EVSETargetActivePower_L2_isUsed: %d", res->Scheduled_AC_CLResControlMode.EVSETargetActivePower_L2_isUsed);
+            trace_iso("     EVSETargetActivePower_L3_isUsed: %d", res->Scheduled_AC_CLResControlMode.EVSETargetActivePower_L3_isUsed);
+            trace_iso("     EVSETargetReactivePower_isUsed: %d", res->Scheduled_AC_CLResControlMode.EVSETargetReactivePower_isUsed);
+            trace_iso("     EVSETargetReactivePower_L2_isUsed: %d", res->Scheduled_AC_CLResControlMode.EVSETargetReactivePower_L2_isUsed);
+            trace_iso("     EVSETargetReactivePower_L3_isUsed: %d", res->Scheduled_AC_CLResControlMode.EVSETargetReactivePower_L3_isUsed);
+            trace_iso("     EVSEPresentActivePower_isUsed: %d", res->Scheduled_AC_CLResControlMode.EVSEPresentActivePower_isUsed);
+            if (res->Scheduled_AC_CLResControlMode.EVSEPresentActivePower_isUsed) {
+                trace_iso("     EVSEPresentActivePower: %d * 10^%d",
+                               res->Scheduled_AC_CLResControlMode.EVSEPresentActivePower.Value,
+                               res->Scheduled_AC_CLResControlMode.EVSEPresentActivePower.Exponent);
+            }
+            trace_iso("     EVSEPresentActivePower_L2_isUsed: %d", res->Scheduled_AC_CLResControlMode.EVSEPresentActivePower_L2_isUsed);
+            trace_iso("     EVSEPresentActivePower_L3_isUsed: %d", res->Scheduled_AC_CLResControlMode.EVSEPresentActivePower_L3_isUsed);
+        }
+    }
+}

@@ -1,0 +1,48 @@
+export interface config {
+    sgr_blocking_type: number;
+    sgr_extended_type: number;
+    min_hold_time: number;
+    meter_slot_grid_power: number;
+    control_period: number;
+    enable_heating_curve: boolean;
+    enable_daytime_extension: boolean;
+    extended_logging: boolean;
+    yield_forecast: boolean;
+    yield_forecast_threshold: number;
+    extended: boolean;
+    extended_hours: number;
+    extended_hours_warm: number;
+    extended_hours_cold: number;
+    blocking: boolean;
+    blocking_hours: number;
+    blocking_hours_warm: number;
+    blocking_hours_cold: number;
+    pv_excess_control: boolean;
+    pv_excess_control_threshold: number;
+    p14enwg: boolean;
+    p14enwg_input: number;
+    p14enwg_type: number;
+}
+
+export interface state {
+    automation_override: boolean;
+    sgr_blocking: boolean;
+    sgr_extended: boolean;
+    p14enwg: boolean;
+    next_update: number;
+    enabled: boolean;
+}
+
+export interface plan {
+    cheap: boolean[];
+    expensive: boolean[];
+}
+
+export interface reset_holding_time {}
+
+export interface sgr_blocking_override {
+    override_until: number;
+}
+
+export type toggle_sgr_blocking = {};
+export type toggle_sgr_extended = {};

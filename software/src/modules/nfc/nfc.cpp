@@ -1,0 +1,584 @@
+/* esp32-firmware
+ * Copyright (C) 2020-2021 Erik Fleckstein <erik@tinkerforge.com>
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, write to the
+ * Free Software Foundation, Inc., 59 Temple Place - Suite 330,
+ * Boston, MA 02111-1307, USA.
+ */
+
+#include "nfc.h"
+
+#include "event_log_prefix.h"
+#include "generated/module_dependencies.h"
+#include "bindings/errors.h"
+#include "tools/hexdump.h"
+
+#include <gcc_warnings.h>
+
+#if defined(BOARD_HAS_PSRAM)
+#define MAX_AUTHORIZED_TAGS 32
+#else
+#define MAX_AUTHORIZED_TAGS 16
+#endif
+
+#define DETECTION_THRESHOLD_MS 2000
+
+static bool operator==(const NFC::tag_t& a, const NFC::tag_t& b) {
+    return a.type == b.type && a.id_length == b.id_length && memcmp(a.id_bytes, b.id_bytes, a.id_length) == 0;
+}
+
+static const char *lookup = "0123456789ABCDEF";
+
+static void id_to_string(char str[NFC_TAG_ID_STRING_LENGTH + 1], const NFC::tag_t *tag) {
+    if (tag->id_length == 0) {
+        str[0] = '\0';
+        return;
+    }
+
+    for (size_t i = 0; i < static_cast<size_t>(tag->id_length); i++) {
+        const uint8_t b = tag->id_bytes[i];
+        *str++ = lookup[b >> 4];
+        *str++ = lookup[b & 0xF];
+        *str++ = ':';
+    }
+
+    *--str = '\0'; // Overwrite trailing colon
+}
+
+static void id_to_string_without_separator(char str[NFC_TAG_ID_STRING_WITHOUT_SEPARATOR_LENGTH + 1], const NFC::tag_t *tag) {
+    for (size_t i = 0; i < static_cast<size_t>(tag->id_length); i++) {
+        const uint8_t b = tag->id_bytes[i];
+        *str++ = lookup[b >> 4];
+        *str++ = lookup[b & 0xF];
+    }
+
+    *str = '\0';
+}
+
+static uint8_t hex_digit_to_byte(char digit)
+{
+    if (digit >= '0' && digit <= '9')
+        return digit - '0';
+
+    digit |= 0x60;
+    if (digit >= 'a' && digit <= 'f')
+        return digit - 'a' + 10;
+
+    return 0xFF;
+}
+
+static uint8_t string_to_id(uint8_t buf[NFC_TAG_ID_LENGTH], const char *str, size_t str_len = std::numeric_limits<size_t>::max()) {
+    if (str_len == std::numeric_limits<size_t>::max())
+        str_len = strnlen(str, NFC_TAG_ID_STRING_LENGTH);
+
+    const uint8_t bytes = static_cast<uint8_t>((str_len + 1) / 3);
+
+    for (uint8_t b = 0; b < bytes; ++b) {
+        buf[b] = hex_digit_to_byte(str[b * 3]) << 4 | hex_digit_to_byte(str[b * 3 + 1]);
+    }
+    return bytes;
+}
+
+void NFC::pre_setup()
+{
+    seen_tags = Config::Tuple(TAG_LIST_LENGTH, Config::Object({
+        {"tag_type",  Config::Uint8(0)},
+        {"tag_id",    Config::Str("", 0, NFC_TAG_ID_STRING_LENGTH)},
+        {"last_seen", Config::Uint32(0)}
+    }));
+
+    config_authorized_tags_prototype = Config::Object({
+        {"user_id", Config::Uint8(0)},
+        {"tag_type", Config::Uint8(0, 6)},
+        {"tag_id", Config::Str("", 0, NFC_TAG_ID_STRING_LENGTH)}
+    });
+
+    config = ConfigRoot{Config::Object({
+        {"authorized_tags", Config::Array(
+            {},
+            &config_authorized_tags_prototype,
+            0, MAX_AUTHORIZED_TAGS,
+            Config::type_id<Config::ConfObject>())
+        },
+        {"deadtime_post_start", Config::Uint32(30)}
+    }), [this](Config &cfg, ConfigSource source) -> String {
+        Config *tags = static_cast<Config *>(cfg.get("authorized_tags"));
+        auto tags_count = tags->count();
+
+        // Check tag_id format
+        for (size_t tag = 0; tag < tags_count; ++tag) {
+            String id_copy = tags->get(tag)->get("tag_id")->asString();
+            id_copy.toUpperCase();
+            tags->get(tag)->get("tag_id")->updateString(id_copy);
+
+            if (id_copy.length() != 0 && id_copy.length() % 3 != 2)
+                return "Tag ID has unexpected length. Expected format is uppercase hex bytes separated by colons. For example \"01:23:AB:3D\".";
+
+            for (size_t i = 0; i < id_copy.length(); ++i) {
+                char c = id_copy.charAt(i);
+                if ((i % 3 != 2) && ((c >= '0' && c <= '9') || (c >= 'A' && c <= 'F')))
+                    continue;
+                if (i % 3 == 2 && c == ':')
+                    continue;
+                return "Tag ID contains unexpected character. Expected format is uppercase hex bytes separated by colons. For example \"01:23:AB:3D\".";
+            }
+        }
+
+        // Add more validation above this block!
+        if (source == ConfigSource::File) {
+            // The validation below was missing in old firmwares.
+            // To make sure a config that is stored in the ESP's flash
+            // can be loaded on start-up, fix the mappings instead of
+            // returning an error.
+            bool update_file = false;
+            for (size_t tag = 0; tag < tags_count; ++tag) {
+                uint8_t user_id = tags->get(tag)->get("user_id")->asUint8();
+                if (!users.is_user_configured(user_id)) {
+                    logger.printfln("Fixing NFC tag %s referencing a deleted user.", tags->get(tag)->get("tag_id")->asEphemeralCStr());
+                    tags->get(tag)->get("user_id")->updateUint(0);
+                    update_file = true;
+                }
+            }
+            if (update_file)
+                API::writeConfig("nfc/config", &cfg);
+
+        } else {
+            // Check user_id_mappings
+            for (size_t tag = 0; tag < tags_count; ++tag) {
+                uint8_t user_id = tags->get(tag)->get("user_id")->asUint8();
+                if (!users.is_user_configured(user_id))
+                    return String("Unknown user with ID ") + static_cast<int>(user_id) + ".";
+            }
+
+            // Check for duplicated tag_id+type entries
+            for (size_t tag = 0; tag < tags_count; ++tag) {
+                const String &tag_id = tags->get(tag)->get("tag_id")->asString();
+                auto tag_type = tags->get(tag)->get("tag_type")->asUint8();
+                for (size_t tag2 = tag + 1; tag2 < tags_count; ++tag2) {
+                    const String &tag2_id = tags->get(tag2)->get("tag_id")->asString();
+                    auto tag2_type = tags->get(tag2)->get("tag_type")->asUint8();
+
+                    if (tag_id == tag2_id && tag_type == tag2_type) {
+                        return "Tag ID " + tags->get(tag)->get("tag_id")->asString() + " is used multiple times with same tag type.";
+                    }
+                }
+            }
+        }
+
+        task_scheduler.scheduleOnce([this](){this->setup_auth_tags();});
+        return "";
+    }};
+
+    inject_tag = ConfigRoot{Config::Object({
+        {"tag_type", Config::Uint8(0, 6)},
+        {"tag_id", Config::Str("", 0, NFC_TAG_ID_STRING_LENGTH)}
+    }), [this](Config &cfg, ConfigSource source) -> String {
+        String id_copy = cfg.get("tag_id")->asString();
+        id_copy.toUpperCase();
+        cfg.get("tag_id")->updateString(id_copy);
+
+        if (id_copy.length() != 0 && id_copy.length() % 3 != 2)
+            return "Tag ID has unexpected length. Expected format is uppercase hex bytes separated by colons. For example \"01:23:AB:3D\".";
+
+        for (size_t i = 0; i < id_copy.length(); ++i) {
+            char c = id_copy.charAt(i);
+            if ((i % 3 != 2) && ((c >= '0' && c <= '9') || (c >= 'A' && c <= 'F')))
+                continue;
+            if (i % 3 == 2 && c == ':')
+                continue;
+            return "Tag ID contains unexpected character. Expected format is uppercase hex bytes separated by colons. For example \"01:23:AB:3D\".";
+        }
+
+        return "";
+    }};
+
+#if MODULE_AUTOMATION_AVAILABLE()
+    automation.register_trigger(
+        AutomationTriggerID::NFC,
+        Config::Object({
+            {"tag_type", Config::Uint8(0, 6)},
+            {"tag_id", Config::Str("", 0, NFC_TAG_ID_STRING_LENGTH)},
+            // Index into the charge manager's charger list, or -1 to match tags seen by any charger.
+            {"charger", Config::Int8(-1)}
+        })
+    );
+
+    automation.register_action(
+        AutomationActionID::NFCInjectTag,
+        Config::Object({
+            {"tag_type", Config::Uint8(0, 6)},
+            {"tag_id", Config::Str("", 0, NFC_TAG_ID_STRING_LENGTH)},
+            {"action", Config::Uint8(0, 2)}
+        }),
+        [this](const Config *cfg) {
+            inject_tag.get("tag_type")->updateUint(cfg->get("tag_type")->asUint8());
+            inject_tag.get("tag_id")->updateString(cfg->get("tag_id")->asString());
+            last_tag_injection = now_us();
+            tag_injection_action = cfg->get("action")->asUint8();
+        }
+    );
+#endif
+
+    auth_info = Config::Object({
+        {"tag_type", Config::Uint8(0)},
+        {"tag_id", Config::Str("", 0, NFC_TAG_ID_STRING_LENGTH)}
+    });
+}
+
+void NFC::register_backend(INfcBackend *_backend)
+{
+    if (_backend == nullptr)
+        return;
+
+    backend = _backend;
+
+#if MODULE_IO_SCHEDULER_AVAILABLE()
+    io_scheduler.driveUncancelable(
+        nullptr,
+        [this]() { this->backend->check_state(); },
+        nullptr,
+        5_min, 5_min);
+#else
+    task_scheduler.scheduleUncancelable([this]() {
+        this->backend->check_state();
+    }, 5_min, 5_min);
+#endif
+}
+
+int16_t NFC::get_user_id(const tag_t &tag)
+{
+    // NFC does not know about the anonymous user (that has ID 0)
+    // return -1 instead if this tag was not found or it was found
+    // but not assigned to any user.
+    for (uint8_t i = 0; i < auth_tag_count; ++i) {
+        const auto &auth_tag = auth_tags[i];
+
+        if (auth_tag.tag == tag)
+            return auth_tag.user_id == 0 ? -1 : auth_tag.user_id;
+    }
+    return -1;
+}
+
+void NFC::remove_user(uint8_t user_id)
+{
+    Config *tags = static_cast<Config *>(config.get("authorized_tags"));
+
+    bool changed = false;
+    for (size_t i = tags->count(); i-- > 0;) {
+        if (tags->get(i)->get("user_id")->asUint8() == user_id) {
+            tags->remove(i);
+            changed = true;
+        }
+    }
+
+    if (changed) {
+        API::writeConfig("nfc/config", &config);
+    }
+}
+
+void NFC::tag_seen(tag_info_t *info, bool injected)
+{
+#if MODULE_AUTOMATION_AVAILABLE()
+    automation_trigger_data_t data;
+    data.tag = &info->tag;
+#if MODULE_CHARGE_MANAGER_AVAILABLE()
+    data.charger_index = charge_manager.get_charger_state_index(charge_manager.find_charger_state(esp32_common.get_uid_num()));
+#else
+    data.charger_index = -1;
+#endif
+    automation.trigger(AutomationTriggerID::NFC, &data, this);
+#endif
+
+#if MODULE_CHARGE_AUTHORIZATION_AVAILABLE()
+    int16_t user_id = get_user_id(info->tag);
+
+    auth_info.get("tag_type")->updateUint(info->tag.type);
+
+    char buf[NFC_TAG_ID_STRING_LENGTH + 1];
+    id_to_string(buf, &info->tag);
+    auth_info.get("tag_id")->updateString(buf);
+
+    charge_authorization.notify_auth(
+        user_id,
+        millis_t{info->last_seen},
+        injected ? CMAuthType::InjectedNFC : CMAuthType::NFC,
+#if MODULE_EVSE_COMMON_AVAILABLE()
+        injected ? tag_injection_action : TRIGGER_CHARGE_ANY,
+#else
+        0,
+#endif
+        auth_info.value);
+#endif
+}
+
+void NFC::remote_tag_seen(uint8_t tag_type, const uint8_t *tag_id, uint8_t tag_id_length, int8_t charger_index)
+{
+#if MODULE_AUTOMATION_AVAILABLE()
+    tag_t tag;
+    tag.type = tag_type;
+    tag.id_length = std::min(tag_id_length, static_cast<uint8_t>(NFC_TAG_ID_LENGTH));
+    memcpy(tag.id_bytes, tag_id, tag.id_length);
+
+    automation_trigger_data_t data;
+    data.tag = &tag;
+    data.charger_index = charger_index;
+
+    automation.trigger(AutomationTriggerID::NFC, &data, this);
+#else
+    (void)tag_type;
+    (void)tag_id;
+    (void)tag_id_length;
+    (void)charger_index;
+#endif
+}
+
+void NFC::fetch_seen_tags()
+{
+    for (uint8_t i = 0; i < TAG_LIST_LENGTH - 1; ++i) {
+        if (!backend || !backend->get_tag_id(i, &new_tags[i].tag.type, new_tags[i].tag.id_bytes, &new_tags[i].tag.id_length, &new_tags[i].last_seen)) {
+            continue;
+        }
+    }
+}
+
+void NFC::update_seen_tags()
+{
+    // The NFC bricklet removes tags after 24h. Do the same with injected tags.
+    if (last_tag_injection == 0_us || deadline_elapsed(last_tag_injection + 24_h)) {
+        last_tag_injection = 0_us;
+        new_tags[TAG_LIST_LENGTH - 1].tag.type = 0;
+        new_tags[TAG_LIST_LENGTH - 1].tag.id_length = 0;
+        new_tags[TAG_LIST_LENGTH - 1].last_seen = 0;
+    } else {
+        const auto &str = inject_tag.get("tag_id")->asString();
+        new_tags[TAG_LIST_LENGTH - 1].tag.type = inject_tag.get("tag_type")->asUint8();
+        new_tags[TAG_LIST_LENGTH - 1].tag.id_length = string_to_id(new_tags[TAG_LIST_LENGTH - 1].tag.id_bytes, str.c_str(), str.length());
+        new_tags[TAG_LIST_LENGTH - 1].last_seen = now_us().to<millis_t>().as<uint32_t>() - last_tag_injection.to<millis_t>().as<uint32_t>();
+    }
+
+    // update state
+    for (size_t i = 0; i < TAG_LIST_LENGTH; ++i) {
+        Config *seen_tag_state = static_cast<Config *>(seen_tags.get(i));
+        tag_info_t *new_tag = new_tags + i;
+
+        seen_tag_state->get("last_seen")->updateUint(new_tag->last_seen);
+        seen_tag_state->get("tag_type")->updateUint(new_tag->tag.type);
+        char buf[NFC_TAG_ID_STRING_LENGTH + 1];
+        id_to_string(buf, &new_tag->tag);
+        seen_tag_state->get("tag_id")->updateString(buf);
+    }
+
+    bool new_seen_tags[TAG_LIST_LENGTH];
+    memset(new_seen_tags, 0, sizeof(new_seen_tags));
+
+    // compare new list with old
+    for (int new_idx = 0; new_idx < TAG_LIST_LENGTH; ++new_idx) {
+        if (new_tags[new_idx].last_seen == 0)
+            continue;
+
+        // Don't stop searching after the first old tag with a matching ID.
+        // There could be another entry (typically the injected one) with a lower last_seen value.
+        int min_old_idx = -1;
+        for (int old_idx = 0; old_idx < TAG_LIST_LENGTH; ++old_idx) {
+            if (old_tags[old_idx].last_seen == 0)
+                continue;
+
+            if (old_tags[old_idx].tag != new_tags[new_idx].tag)
+                continue;
+
+            if (min_old_idx == -1 ||
+                old_tags[min_old_idx].last_seen > old_tags[old_idx].last_seen)
+                min_old_idx = old_idx;
+        }
+
+        if (min_old_idx == -1) {
+            // This tag is in the new list but not in the old.
+            // We don't care about the detection threshold here,
+            // because this will probably only happen if this
+            // task slowed down because something else blocked
+            // for more than one second.
+            new_seen_tags[new_idx] = true;
+            continue;
+        }
+
+        bool old_seen = old_tags[min_old_idx].last_seen < DETECTION_THRESHOLD_MS;
+        bool new_seen = new_tags[new_idx].last_seen < DETECTION_THRESHOLD_MS;
+
+        if (!old_seen && new_seen) {
+            // This tag was in the old list as well,
+            // but with a last_seen value over the detection threshold.
+            // -> The tag was seen, then removed and then seen again.
+            // If old_seen was also true, this would be a tag that
+            // is detected continously, which only counts as one detection.
+            new_seen_tags[new_idx] = true;
+            continue;
+        }
+    }
+
+    tag_info_t *tmp = old_tags;
+    old_tags = new_tags;
+    new_tags = tmp;
+
+    // Tag lists are already swapped. Read old_tags here.
+    for (size_t i = 0; i < TAG_LIST_LENGTH; ++i)
+        if (new_seen_tags[i])
+            tag_seen(&old_tags[i], i == TAG_LIST_LENGTH - 1);
+}
+
+
+void NFC::setup_auth_tags()
+{
+    const Config *auth_tags_cfg = static_cast<Config *>(config.get("authorized_tags"));
+
+    // Allways set deadtime, even if there are not tags configured, this is used for autocharge too (ev mac instead of nfc tag).
+    this->deadtime_post_start = seconds_t{config.get("deadtime_post_start")->asUint32()};
+
+    const size_t new_count = auth_tags_cfg->count();
+    const bool auth_tag_count_changed = auth_tag_count != new_count;
+
+    auth_tag_count = new_count;
+    if (auth_tag_count == 0) {
+        auth_tags = nullptr;
+        return;
+    }
+
+    if (auth_tag_count_changed) {
+        auth_tags.reset(); // Avoid concurrent allocations
+        auth_tags = heap_alloc_array<auth_tag_t>(auth_tag_count);
+    }
+
+    for (size_t i = 0; i < auth_tag_count; ++i) {
+        const auto tag = auth_tags_cfg->get(i);
+        auth_tag_t *auth_tag = auth_tags.get() + i;
+
+        auth_tag->tag.type = tag->get("tag_type")->asUint8();
+        auth_tag->user_id  = tag->get("user_id" )->asUint8();
+
+        const String &id = tag->get("tag_id")->asString();
+        auth_tag->tag.id_length = string_to_id(auth_tag->tag.id_bytes, id.c_str(), id.length());
+    }
+}
+
+void NFC::setup()
+{
+    if (!api.restorePersistentConfig("nfc/config", &config)) {
+        setup_auth_tags(); // If restoring the config failed, setup_auth_tags was not called.
+    }
+
+    old_tags = static_cast<decltype(old_tags)>(calloc_dram(TAG_LIST_LENGTH, sizeof(*old_tags)));
+    new_tags = static_cast<decltype(old_tags)>(calloc_dram(TAG_LIST_LENGTH, sizeof(*new_tags)));
+
+#if MODULE_IO_SCHEDULER_AVAILABLE()
+    io_scheduler.driveUncancelable(
+        nullptr,
+        [this]() { this->fetch_seen_tags(); },
+        [this]() { this->update_seen_tags(); },
+        0_ms, 300_ms);
+#else
+    task_scheduler.scheduleUncancelable([this]() {
+        this->fetch_seen_tags();
+        this->update_seen_tags();
+    }, 300_ms);
+#endif
+
+    initialized = true;
+}
+
+void NFC::register_urls()
+{
+    api.addState("nfc/seen_tags", &seen_tags, {}, {"tag_id", "tag_type"});
+    api.addPersistentConfig("nfc/config", &config, {}, {"tag_id", "tag_type"});
+
+#if MODULE_EVSE_COMMON_AVAILABLE()
+    api.addCommand("nfc/inject_tag", &inject_tag, {"tag_id", "tag_type"}, [this](Language /*language*/, String &/*errmsg*/) {
+        last_tag_injection = now_us();
+        tag_injection_action = TRIGGER_CHARGE_ANY;
+    }, true);
+
+    api.addCommand("nfc/inject_tag_start", &inject_tag, {"tag_id", "tag_type"}, [this](Language /*language*/, String &/*errmsg*/) {
+        last_tag_injection = now_us();
+        tag_injection_action = TRIGGER_CHARGE_START;
+    }, true);
+
+    api.addCommand("nfc/inject_tag_stop", &inject_tag, {"tag_id", "tag_type"}, [this](Language /*language*/, String &/*errmsg*/) {
+        last_tag_injection = now_us();
+        tag_injection_action = TRIGGER_CHARGE_STOP;
+    }, true);
+#endif
+}
+
+bool NFC::get_last_tag_seen(tag_info_t *info, char id_with_separator[NFC_TAG_ID_STRING_LENGTH + 1], char id_without_separator[NFC_TAG_ID_STRING_WITHOUT_SEPARATOR_LENGTH + 1]) {
+    const auto &seen_tag = old_tags[0];
+    const auto &injected_tag = old_tags[TAG_LIST_LENGTH - 1];
+    const tag_info_t *tag = nullptr;
+
+    // Injected tag wins if it was seen
+    // and either there is no "normal" seen tag
+    //     or it was seen before (i.e. a longer time ago than) the injected one.
+    if (injected_tag.last_seen > 0 && (seen_tag.last_seen == 0 || seen_tag.last_seen > injected_tag.last_seen))
+        tag = &injected_tag;
+    else if (seen_tag.last_seen > 0) // "normal" seen tag wins otherwise if there is one
+        tag = &seen_tag;
+
+    // No tag seen
+    if (tag == nullptr) {
+        return false;
+    }
+
+    if (info != nullptr) {
+        *info = *tag;
+    }
+
+    if (id_with_separator != nullptr) {
+        id_to_string(id_with_separator, &tag->tag);
+    }
+
+    if (id_without_separator != nullptr) {
+        id_to_string_without_separator(id_without_separator, &tag->tag);
+    }
+
+    return true;
+}
+
+#if MODULE_AUTOMATION_AVAILABLE()
+bool NFC::has_triggered(const Config *conf, void *data)
+{
+    const Config *cfg = static_cast<const Config *>(conf->get());
+    const automation_trigger_data_t *trigger_data = static_cast<automation_trigger_data_t *>(data);
+
+    if (conf->getTag<AutomationTriggerID>() != AutomationTriggerID::NFC) {
+        return false;
+    }
+
+    const int8_t rule_charger = cfg->get("charger")->asInt8();
+    if ((rule_charger != -1) && (rule_charger != trigger_data->charger_index)) {
+        return false;
+    }
+
+    if (cfg->get("tag_type")->asUint8() != trigger_data->tag->type) {
+        return false;
+    }
+
+    const String &rule_tag_id_str = cfg->get("tag_id")->asString();
+
+    if (rule_tag_id_str.length() != static_cast<size_t>(trigger_data->tag->id_length) * 3 - 1) {
+        return false;
+    }
+
+    char tag_id_str[NFC_TAG_ID_STRING_LENGTH + 1];
+    id_to_string(tag_id_str, trigger_data->tag);
+
+    return rule_tag_id_str == tag_id_str;
+}
+#endif

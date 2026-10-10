@@ -1,0 +1,15 @@
+.eco-fixed-size {
+    min-width: 110px;
+}
+
+.eco-chart {
+    position: relative;
+    aspect-ratio: 2;
+}
+
+@include media-breakpoint-up(md) {
+    .eco-chart {
+        position: relative;
+        aspect-ratio: 4;
+    }
+}

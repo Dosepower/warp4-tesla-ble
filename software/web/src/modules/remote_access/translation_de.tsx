@@ -1,0 +1,64 @@
+/** @jsxImportSource preact */
+import { h } from "preact";
+import { __ } from "../../ts/translation";
+let x = {
+    "remote_access": {
+        "status": {
+            "remote_access": "Fernzugriff",
+            "label_muted": /*SFN*/ (since: string) => `seit ${since}`/*NF*/,
+            "since_start": "seit Neustart",
+            "connected": "Verbunden zum Server",
+            "connected_to_clients": /*SFN*/ (clients: number) => `${clients} Client${clients == 1 ? "" : "s"} verbunden` /*NF*/,
+            "disconnected": "Getrennt",
+            "ntp_not_synced": "Zeitsynchronisation deaktiviert",
+            "ntp_not_synced_text": "Der Fernzugriff benötigt die Zeitsynchronisation für die ordnungsgemäße Funktion. Bitte die Zeitsynchronisation in den Systemzeit-Einstellungen aktivieren."
+        },
+        "navbar": {
+            "remote_access": "Fernzugriff"
+        },
+        "content": {
+            "remote_access": "Fernzugriff",
+            "email": "E-Mail-Adresse",
+            "password": "Passwort",
+            "relay_host": "Relay-Server-Hostname oder -IP-Adresse",
+            "relay_host_muted": "Um einen anderen Relay-Server zu verwenden müssen alle Accounts entfernt werden",
+            "relay_port": "Relay-Server-Port",
+            "enable": "Fernzugriff aktiviert",
+            "enable_desc": /*FFN*/ (host: string) => <>Für den Fernzugriff wird ein <a href={`https://${host}/`}>{host}</a>-Account benötigt.</> /*NF*/,
+            "cert": "TLS-Zertifikat",
+            "not_used": "Eingebettetes Zertifikatsbundle",
+            "status_modal_header": "Registrierung wird durchgeführt",
+            "advanced_settings": "Experteneinstellungen",
+            "prepare_login": "Bereite Login vor",
+            "logging_in": "Logge Account ein",
+            "prepare_encryption": "Bereite Verschlüsselung vor",
+            "registration": <>Registriere {__("device")}</>,
+            "login_failed": "Login Fehlgeschlagen:",
+            "wrong_credentials": "Account-Name oder Passwort falsch",
+            "add_user": "Account hinzufügen",
+            "user": "Accounts",
+            "user_add_message": /*SFN*/ (have: number, max: number) => `${have} von ${max} Accounts konfiguriert`/*NF*/,
+            "note": "Notiz",
+            "note_muted": /*FFN*/(host: string) => <>wird auf <a href={`https://${host}/`} target="_blank">{host}</a> angezeigt; optional</>/*NF*/,
+            "user_exists": "Account wurde bereits hinzugefügt",
+            "token_corrupted": "Autorisierungstoken beschädigt. Bitte entfernen und neu hinzufügen.",
+            "auth_token": "Autorisierungstoken",
+            "auth_token_help": /*FFN*/(host: string, port: number) => <>Autorisierungstoken des Accounts, der hinzugefügt werden soll, hier einfügen. Das Token kann unter <a href={`https://${host}${port === 443 ? '' : ':' + port}/tokens`} target="_blank">{host}{port === 443 ? '' : ':' + port}</a> erstellt werden.</> /*NF*/,
+            "auth_method": "Autorisierungsmethode",
+            "ping": "Ping",
+            "start_ping": "Ping starten",
+            "stop_ping": "Ping stoppen",
+            "start_ping_failed": "Ping starten fehlgeschlagen",
+            "stop_ping_failed": "Ping stoppen fehlgeschlagen",
+            "packets_sent": "Gesendete Pakete",
+            "packets_received": "Empfangene Pakete",
+            "time_elapsed": "Verstrichene Zeit",
+            "mtu": "MTU",
+            "mtu_desc": "maximale (innere) Paketgröße im WireGuard-Tunnel"
+        },
+        "script": {
+            "save_failed": "Speichern der Fernzugriffs-Einstellungen fehlgeschlagen.",
+            "http_client_error_10": <>Relay-Server kann nicht erreicht werden. Verfügt {__("the_device")} über eine Internetverbindung? Ist der Relay-Server korrekt konfiguriert?</>
+        }
+    }
+}

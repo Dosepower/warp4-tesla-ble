@@ -1,0 +1,409 @@
+/* esp32-firmware
+ * Copyright (C) 2023 Matthias Bolte <matthias@tinkerforge.com>
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, write to the
+ * Free Software Foundation, Inc., 59 Temple Place - Suite 330,
+ * Boston, MA 02111-1307, USA.
+ */
+
+import { __ } from "../translation";
+import { h, Component, Fragment, ComponentChild, ComponentChildren } from "preact";
+import { Card, Button, Collapse } from "react-bootstrap";
+import { Plus, Edit3, Trash2, ChevronRight } from "react-feather";
+import { FormRow } from "./form_row";
+import { ItemModal } from "./item_modal";
+import * as util from "../../ts/util";
+
+export interface TableRow {
+    key?: string;
+    columnValues: ComponentChild[];
+    extraFieldName?: string;
+    extraValue?: ComponentChild;
+    extraKey?: string;
+    extraMode?: "dynamic"|"static";  // dynamic: show toogle button (default), static: always show
+    extraWrapper?: (value: ComponentChild) => ComponentChild;
+    extraFieldWrapper?: (value: ComponentChild) => ComponentChild;
+    fieldNames?: string[];
+    fieldValues?: ComponentChild[];
+    fieldWithBox?: boolean[];
+    editTitle?: string;
+    onEditShow?: () => Promise<void>;
+    onEditGetChildren?: () => ComponentChildren;
+    onEditCheck?: () => Promise<boolean>;
+    onEditSubmit?: () => Promise<void>;
+    onEditHide?: () => Promise<void>;
+    editAdditionalFooterButtons?: ComponentChildren;
+    onRemoveClick?: () => Promise<boolean>; // return true if row was actually removed, return false otherwise
+    hideRemoveButton?: boolean;
+    onEditStart?: never;
+    onEditCommit?: never;
+    onEditAbort?: never;
+    onEditImport?: (json: string) => Promise<void>;
+    onEditExport?: () => Promise<string>;
+    editExportBasename?: string;
+    indicator?: string;
+}
+
+export interface TableProps {
+    columnNames: string[];
+    rows: TableRow[];
+    addEnabled?: boolean;
+    addMessage?: ComponentChildren;
+    addTitle?: string;
+    onAddShow?: () => Promise<void>;
+    onAddGetChildren?: () => ComponentChildren;
+    onAddCheck?: () => Promise<boolean>;
+    onAddSubmit?: () => Promise<void>;
+    onAddHide?: () => Promise<void>;
+    addAdditionalFooterButtons?: ComponentChildren;
+    hideSubmitButton?: boolean;
+    tableTill?: "xs" | "sm" | "md" | "lg" | "xl";
+    nestingDepth?: number;
+    onAddStart?: never;
+    onAddCommit?: never;
+    onAddAbort?: never;
+    invalid?: boolean;
+    invalidFeedback?: string;
+    onAddImport?: (json: string) => Promise<void>;
+    onAddExport?: () => Promise<string>;
+    addExportBasename?: string;
+}
+
+interface TableState {
+    showAddModal: boolean;
+    showEditModal: number;
+    showRowExtra: boolean[/*row_index*/];
+}
+
+const value_or_else = (value: ComponentChild, replacement: ComponentChild): ComponentChild => {
+    if (util.hasValue(value)) {
+        return value;
+    }
+
+    return replacement;
+};
+
+export class Table extends Component<TableProps, TableState> {
+    constructor() {
+        super();
+
+        this.state = {
+            showAddModal: false,
+            showEditModal: null,
+            showRowExtra: [],
+        } as any;
+    }
+
+    get_card_fields(row: TableRow) {
+        let names = (util.hasValue(row.fieldNames) ? row.fieldNames : this.props.columnNames).slice(1);
+        let values = (util.hasValue(row.fieldValues) ? row.fieldValues : row.columnValues).slice(1);
+
+        while (values.length > 0 && !util.hasValue(values[values.length - 1])) {
+            names.pop();
+            values.pop();
+        }
+
+        return names.map((name, i) => name ?
+            <FormRow label={name}>
+                {!util.hasValue(row.fieldWithBox) || row.fieldWithBox[i + 1] ?
+                    <span class="form-control" style="height: unset;">{value_or_else(values[i], <>&nbsp;</>)}</span>
+                    : <>{values[i]}</>}
+            </FormRow>
+            : (value_or_else(values[i], undefined)));
+    }
+
+    render(props: TableProps, state: TableState) {
+        const show_button_column = props.onAddShow || props.rows.some(row => !row.hideRemoveButton || row.onEditShow);
+
+        return (
+            <>
+                <Card className={`d-none d-${props.tableTill ? props.tableTill : 'sm'}-block` + (props.invalid ? " border-danger" : "")}><Card.Body style="padding: 0; overflow-x: auto;">
+                <table class="table" style="font-size: 1rem; margin-bottom: 0;">
+                    {props.columnNames.filter((name) => name.length > 0).length > 0 ?
+                        <thead>
+                            <tr>
+                                <th class="p-0"></th>
+                                {props.columnNames.map((columnName) => (
+                                    <th scope="col" style="vertical-align: middle;">{columnName}</th>
+                                ))}
+                                {show_button_column ? <th scope="col">
+                                    <Button size="sm" disabled style="visibility: hidden;">
+                                        <Trash2/>
+                                    </Button>
+                                </th> : undefined}
+                            </tr>
+                        </thead>
+                        : undefined}
+                    <tbody>
+                        {props.rows.map((row, i) => <>
+                            <tr key={row.key}>
+                                <td class="p-0" style={(row.indicator !== undefined ? `min-width: 5px; background-color: var(--bs-${row.indicator});` : "") + (row.extraValue ? " border-bottom: none;" : "")}></td>
+                                {row.columnValues.map((value, k) => (
+                                    <td class={row.extraValue ? "pb-0" : ""} style={"word-wrap: break-word; vertical-align: middle;" + (i == 0 ? " border-top: none;" : "") + (row.extraValue ? " border-bottom: none;" : "")}>
+                                        {row.extraValue && row.extraMode != "static" && k == 0 ?
+                                            <span class="row gx-2 align-items-center"><span class="col-auto"><Button size="sm"
+                                                onClick={() => {
+                                                    let showRowExtra = state.showRowExtra.concat();
+                                                    showRowExtra[i] = !showRowExtra[i];
+                                                    this.setState({showRowExtra: showRowExtra});
+                                                }}>
+                                                <ChevronRight {...{class: state.showRowExtra[i] ? "rotated-chevron" : "unrotated-chevron"} as any}/>
+                                                </Button></span><span class="col">{value}</span></span> : value}
+                                    </td>
+                                ))}
+                                {show_button_column ?
+                                <td class={row.extraValue ? "pb-0" : ""} style={"width: 1%; white-space: nowrap; vertical-align: middle;" + (i == 0 ? " border-top: none;" : "") + (row.extraValue ? " border-bottom: none;" : "")}>
+                                    <Button variant="primary"
+                                            size="sm"
+                                            className="me-2"
+                                            onClick={async () => {
+                                                await row.onEditShow();
+                                                this.setState({showEditModal: i});
+                                            }}
+                                            disabled={!row.onEditShow}
+                                            hidden={!row.onEditShow}>
+                                        <Edit3/>
+                                    </Button>
+                                    <Button variant="danger"
+                                            size="sm"
+                                            onClick={async () => {
+                                                if (await row.onRemoveClick()) {
+                                                    let showRowExtra = state.showRowExtra.concat();
+                                                    showRowExtra.splice(i, 1);
+                                                    this.setState({showRowExtra: showRowExtra});
+                                                }
+                                            }}
+                                            disabled={!row.onRemoveClick}
+                                            hidden={row.hideRemoveButton}>
+                                        <Trash2/>
+                                    </Button>
+                                </td>
+                                : undefined}
+                            </tr>
+                            {row.extraValue ?
+                                <tr key={row.extraKey} class="table-extra-value">
+                                    <td class="p-0"></td>
+                                    <td colSpan={props.columnNames.length + 1} class="pt-0" style="border-top: none;">
+                                        <Collapse in={state.showRowExtra[i] || row.extraMode == "static"}>
+                                            <div>
+                                                {row.extraWrapper
+                                                    ? row.extraWrapper(row.extraValue)
+                                                    :  <Card className="mt-2"><Card.Body className="p-2 pb-0">{row.extraValue}</Card.Body></Card>}
+                                            </div>
+                                        </Collapse>
+                                    </td>
+                                </tr>
+                                : undefined}
+                        </>)}
+                        {props.onAddShow || props.addMessage ?
+                        <tr>
+                            <td class="p-0"></td>
+                            <td colSpan={props.columnNames.length} style={"vertical-align: middle; width: 100%;" + (props.rows.length == 0 ? " border-top: none;" : "")}>
+                                {props.addMessage}
+                            </td>
+                            {show_button_column ?
+                                <td style={"text-align: right; vertical-align: middle;" + (props.rows.length == 0 ? " border-top: none;" : "")}>
+                                {props.onAddShow ?
+                                    <Button variant="primary"
+                                            size="sm"
+                                            onClick={async () => {
+                                                await props.onAddShow();
+                                                this.setState({showAddModal: true});
+                                            }}
+                                            disabled={!props.addEnabled}>
+                                        <Plus/>
+                                    </Button>
+                                    : undefined}
+                                </td>
+                            : undefined}
+                        </tr>
+                        : undefined}
+                    </tbody>
+                </table>
+                </Card.Body></Card>
+
+                <div class={`d-block d-${props.tableTill ? props.tableTill : 'sm'}-none table-card-mode`}>
+                    {props.rows.map((row, i) => {
+                        let card_fields = this.get_card_fields(row);
+                        let needs_body = card_fields.length > 0 || (row.extraValue && (state.showRowExtra[i] || row.extraMode == "static"));
+
+                        return <><Card className="mb-2">
+                        <div class={"card-header d-flex justify-content-between align-items-center p-2" + (row.indicator !== undefined ? " input-indicator input-indicator-" + row.indicator : "")} style={needs_body ? "" : "border-bottom: 0;"}>
+                            <h5 class="text-break" style="margin-bottom: 0;">
+                                {row.extraValue && row.extraMode != "static" ?
+                                    <span class="row gx-2 align-items-center">
+                                        <span class="col-auto"><Button size="sm"
+                                            onClick={() => {
+                                                let showRowExtra = state.showRowExtra.concat();
+                                                showRowExtra[i] = !showRowExtra[i];
+                                                this.setState({showRowExtra: showRowExtra});
+                                            }}>
+                                            <ChevronRight {...{class: state.showRowExtra[i] ? "rotated-chevron" : "unrotated-chevron"} as any}/>
+                                            </Button>
+                                        </span>
+                                        <span class="col">{util.hasValue(row.fieldValues) ? row.fieldValues[0] : row.columnValues[0]}</span>
+                                    </span>
+                                    : util.hasValue(row.fieldValues) ? row.fieldValues[0] : row.columnValues[0]}
+                            </h5>
+                            <div style="white-space: nowrap; vertical-align: middle;">
+                                <Button variant="primary"
+                                        size="sm"
+                                        className="ms-2"
+                                        onClick={async () => {
+                                            await row.onEditShow();
+                                            this.setState({showEditModal: i});
+                                        }}
+                                        disabled={!row.onEditShow}
+                                        hidden={!row.onEditShow}>
+                                    <Edit3/>
+                                </Button>
+                                <Button variant="danger"
+                                        size="sm"
+                                        className="ms-2"
+                                        onClick={async () => {
+                                            if (await row.onRemoveClick()) {
+                                                let showRowExtra = state.showRowExtra.concat();
+                                                showRowExtra.splice(i, 1);
+                                                this.setState({showRowExtra: showRowExtra});
+                                            }
+                                        }}
+                                        disabled={!row.onRemoveClick}
+                                        hidden={row.hideRemoveButton}>
+                                    <Trash2/>
+                                </Button>
+                            </div>
+                        </div>
+                        {needs_body ?
+                            <Card.Body className="p-2 pb-0" style="font-size: 1rem;">
+                                {card_fields}
+                                {row.extraValue ?
+                                    <Collapse in={state.showRowExtra[i] || row.extraMode == "static"}>
+                                        <div>
+                                            {row.extraFieldName ?
+                                                <FormRow label={row.extraFieldName}>
+                                                    <>{row.extraFieldWrapper
+                                                        ? row.extraFieldWrapper(row.extraValue)
+                                                        : <Card><Card.Body className="p-2 pb-0">{row.extraValue}</Card.Body></Card>}</>
+                                                </FormRow>
+                                                : <>{row.extraFieldWrapper
+                                                    ? row.extraFieldWrapper(row.extraValue)
+                                                    : <Card className="mb-2"><Card.Body className="p-2 pb-0">{row.extraValue}</Card.Body></Card>}</>}
+                                        </div>
+                                    </Collapse>
+                                    : undefined}
+                            </Card.Body>
+                            : undefined}
+                        </Card></>
+                    })}
+                    {props.onAddShow ?
+                    <Card className={"mb-0" + (props.invalid ? " border-danger" : "")}>
+                        <div class="card-body d-flex justify-content-between align-items-center p-2">
+                            <div class="text-break" style="font-size: 1rem;">{props.addMessage}</div>
+                            <div style="white-space: nowrap; vertical-align: middle;">
+                            <Button variant="primary"
+                                    size="sm"
+                                    className="ms-2"
+                                    onClick={async () => {
+                                        await props.onAddShow();
+                                        this.setState({showAddModal: true});
+                                    }}
+                                    disabled={!props.addEnabled}>
+                                <Plus/>
+                            </Button>
+                            </div>
+                        </div>
+                    </Card>
+                    : undefined}
+                </div>
+                {props.invalid ? <div class="text-danger mt-1 mb-0">{props.invalidFeedback}</div> : undefined}
+
+                <ItemModal
+                    onCheck={async () => {
+                        if (props.onAddCheck) {
+                            return await props.onAddCheck();
+                        }
+
+                        return true;
+                    }}
+                    onSubmit={async () => {
+                        if (props.onAddSubmit) {
+                            await props.onAddSubmit();
+                        }
+                    }}
+                    onHide={async () => {
+                        this.setState({showAddModal: false}, async () => {
+                            if (props.onAddHide) {
+                                await props.onAddHide();
+                            }
+                        });
+                    }}
+                    onImport={props.onAddImport ? async (json: string) => {await props.onAddImport(json);} : undefined}
+                    onExport={props.onAddExport ? async () => {return await props.onAddExport();} : undefined}
+                    show={state.showAddModal}
+                    no_variant="secondary"
+                    yes_variant={props.hideSubmitButton ? undefined : "primary"}
+                    title={props.addTitle}
+                    no_text={__("component.table.abort")}
+                    yes_text={props.hideSubmitButton ? undefined : __("component.table.add")}
+                    additionalFooterButtons={props.addAdditionalFooterButtons}
+                    export_basename={props.addExportBasename}
+                    backdropClassName={props.nestingDepth === undefined ? undefined : ("modal-backdrop-" + props.nestingDepth)}
+                    className={props.nestingDepth === undefined ? undefined : ("modal-" + props.nestingDepth)}
+                    size={props.nestingDepth === undefined ? "xl" : {0: "xl", 1: "lg", 2: "md", 3: "sm"}[props.nestingDepth] as 'xl' | 'lg' | 'sm'} >{/* "md" doesn't exist, but is just the normal size, the cast make it ignore "md"*/}
+                    {state.showAddModal && props.onAddGetChildren ?
+                        props.onAddGetChildren()
+                        : undefined}
+                </ItemModal>
+
+                <ItemModal
+                    onCheck={async () => {
+                        if (props.rows[state.showEditModal].onEditCheck) {
+                            return await props.rows[state.showEditModal].onEditCheck();
+                        }
+
+                        return true;
+                    }}
+                    onSubmit={async () => {
+                        if (props.rows[state.showEditModal].onEditSubmit) {
+                            await props.rows[state.showEditModal].onEditSubmit();
+                        }
+                    }}
+                    onHide={async () => {
+                        this.setState({showEditModal: null}, async () => {
+                            if (props.rows[state.showEditModal].onEditHide) {
+                                await props.rows[state.showEditModal].onEditHide();
+                            }
+                        });
+                    }}
+                    onImport={util.hasValue(props.rows[state.showEditModal]) && props.rows[state.showEditModal].onEditImport ? async (json: string) => {await props.rows[state.showEditModal].onEditImport(json);} : undefined}
+                    onExport={util.hasValue(props.rows[state.showEditModal]) && props.rows[state.showEditModal].onEditExport ? async () => {return await props.rows[state.showEditModal].onEditExport();} : undefined}
+                    show={state.showEditModal !== null}
+                    no_variant="secondary"
+                    yes_variant="primary"
+                    title={state.showEditModal !== null ? props.rows[state.showEditModal].editTitle : ''}
+                    no_text={__("component.table.abort")}
+                    yes_text={__("component.table.apply")}
+                    additionalFooterButtons={state.showEditModal !== null ? props.rows[state.showEditModal].editAdditionalFooterButtons : undefined}
+                    export_basename={util.hasValue(props.rows[state.showEditModal]) && props.rows[state.showEditModal].editExportBasename}
+                    backdropClassName={props.nestingDepth === undefined ? undefined : ("modal-backdrop-" + props.nestingDepth)}
+                    className={props.nestingDepth === undefined ? undefined : ("modal-" + props.nestingDepth)}
+                    size={props.nestingDepth === undefined ? "xl" : {0: "xl", 1: "lg", 2: "md", 3: "sm"}[props.nestingDepth] as 'xl' | 'lg' | 'sm'} >{/* "md" doesn't exist, but is just the normal size, the cast make it ignore "md"*/}
+                    {state.showEditModal !== null && props.rows[state.showEditModal].onEditGetChildren ?
+                        props.rows[state.showEditModal].onEditGetChildren()
+                        : undefined}
+                </ItemModal>
+            </>
+        );
+    }
+}

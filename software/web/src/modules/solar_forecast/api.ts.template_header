@@ -1,0 +1,15 @@
+export interface config {
+    enable: boolean;
+    source: number;
+    api_url: string;
+    cert_id: number;
+}
+
+export interface state {
+    wh_today: number;
+    wh_today_remaining: number;
+    wh_tomorrow: number;
+    rate_limit: number;
+    rate_remaining: number;
+    next_api_call: number;
+}

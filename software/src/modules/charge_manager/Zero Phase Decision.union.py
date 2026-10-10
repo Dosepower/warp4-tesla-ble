@@ -1,0 +1,27 @@
+import tinkerforge_util as tfutil
+tfutil.create_parent_module(__file__, 'software')
+from software.util import *
+
+spec = Union("Zero Phase Decision", 20, require_stable_api=False, variants=[
+    Variant('None'),
+    Variant('Yes Waiting For Rotation', [
+        Member('Next Rotation', Types.Uptime)
+    ]),
+    Variant('Yes Not Active'),
+    Variant('Yes Rotated For B1'),
+    Variant('Yes Rotated For Higher Prio'),
+    Variant('Yes Phase Overload', [
+        Member('Overload mA', Types.S32),
+        Member('Phase', Types.U8)
+    ]),
+    Variant('Yes PV Excess Overload', [
+        Member('Overload mA', Types.S32),
+    ]),
+    Variant('No Cloud Filter Blocks Until', [
+        Member('Timestamp', Types.Uptime),
+        Member('Max PV mA', Types.S32),
+    ]),
+    Variant('No Hysteresis Blocks Until', [
+        Member('Timestamp', Types.Uptime)
+    ]),
+])

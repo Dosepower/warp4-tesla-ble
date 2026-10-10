@@ -1,0 +1,1750 @@
+/* esp32-firmware
+ * Copyright (C) 2020-2021 Erik Fleckstein <erik@tinkerforge.com>
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, write to the
+ * Free Software Foundation, Inc., 59 Temple Place - Suite 330,
+ * Boston, MA 02111-1307, USA.
+ */
+
+#include "wifi.h"
+
+#include "generated/module_dependencies.h"
+
+#include <WiFi.h>
+#include <esp_wifi.h>
+#include <esp_eap_client.h>
+#include <TFJson.h>
+#include <lwip/inet.h>
+#include <lwip/tcpip.h>
+
+#include "event_log_prefix.h"
+#include "build.h"
+#include "options.h"
+#include "tools/printf.h"
+#include "tools/net.h"
+#include "tools/string_builder.h"
+
+#include "gcc_warnings.h"
+
+// result line: {"ssid":"%s","bssid":"%s","rssi":%d,"channel":%d,"encryption":%d}
+// worst case length ~140
+#define MAX_SCAN_RESULT_LENGTH 145
+
+#if !MODULE_CERTS_AVAILABLE()
+#define MAX_CERT_ID -1
+#endif
+
+void Wifi::pre_setup()
+{
+    ip6_prototype = Config::Object({
+        {"addr",  Config::Str("", 3, INET6_ADDRSTRLEN - 1)},
+        {"flags", Config::Uint16(0)},
+    });
+
+    ap_config = ConfigRoot{Config::Object({
+        {"enable_ap", Config::Bool(true)},
+        {"ap_fallback_only", Config::Bool(false)},
+        {"ssid", Config::Str("", 0, 32)},
+        {"hide_ssid", Config::Bool(false)},
+        {"passphrase", Config::Str("", 8, 64)}, // Blank passphrase will be replaced with default passphrase in setup. | FIXME: check if there are only ASCII characters or hex digits (for PSK) here.
+        {"channel", Config::Uint(0, 0, 13)},
+        {"ip",      Config::Str("10.0.0.1",      7, 15)},
+        {"gateway", Config::Str("0.0.0.0",       7, 15)},
+        {"subnet",  Config::Str("255.255.255.0", 7, 15)},
+    }), [this](Config &update, ConfigSource source) -> String {
+        IPAddress ip_addr, subnet_mask, gateway_addr;
+        if (!ip_addr.fromString(update.get("ip")->asUnsafeCStr()))
+            return "Failed to parse \"ip\": Expected format is dotted decimal, e.g. 10.0.0.1";
+
+        if (!gateway_addr.fromString(update.get("gateway")->asUnsafeCStr()))
+            return "Failed to parse \"gateway\": Expected format is dotted decimal, e.g. 10.0.0.1";
+
+        if (!subnet_mask.fromString(update.get("subnet")->asUnsafeCStr()))
+            return "Failed to parse \"subnet\": Expected format is dotted decimal, e.g. 255.255.255.0";
+
+        if (!is_valid_subnet_mask(subnet_mask))
+            return "Invalid subnet mask passed: Expected format is 255.255.255.0";
+
+        uint8_t cidr = WiFiGenericClass::calculateSubnetCIDR(subnet_mask);
+        if (cidr < 24 || cidr > 30)
+            return "Invalid subnet mask passed: Subnet mask must be at least /30 and not bigger than /24.";
+
+        if (is_in_subnet(ip_addr, subnet_mask, IPAddress(127,0,0,1)))
+            return "Invalid IP or subnet mask passed: This configuration would route localhost (127.0.0.1) to the WiFi AP.";
+
+        if (gateway_addr != IPAddress(0,0,0,0) && !is_in_subnet(ip_addr, subnet_mask, gateway_addr))
+            return "Invalid IP, subnet mask, or gateway passed: IP and gateway are not in the same network according to the subnet mask.";
+
+        if (!update.get("enable_ap")->asBool()) {
+            bool other = sta_config.get("enable_sta")->asBool();
+#if MODULE_ETHERNET_AVAILABLE()
+            other = other || ethernet.is_enabled_in_config();
+            if (!other) {
+                return "Cannot disable WiFi AP: No other network interface is enabled. Enable WiFi STA or Ethernet first.";
+            }
+#else
+            if (!other) {
+                return "Cannot disable WiFi AP: No other network interface is enabled. Enable WiFi STA first.";
+            }
+#endif
+        }
+
+        if (source != ConfigSource::File) {
+            const bool is_reenabled = (runtime_ap != nullptr) && update.get("enable_ap")->asBool()        &&
+                (update.get("enable_ap")->asBool()        != ap_config.get("enable_ap")->asBool())        &&
+                (update.get("ap_fallback_only")->asBool() == ap_config.get("ap_fallback_only")->asBool()) &&
+                (update.get("ssid")->asString()           == ap_config.get("ssid")->asString())           &&
+                (update.get("hide_ssid")->asBool()        == ap_config.get("hide_ssid")->asBool())        &&
+                (update.get("passphrase")->asString()     == ap_config.get("passphrase")->asString())     &&
+                (update.get("channel")->asUint()          == ap_config.get("channel")->asUint())          &&
+                (update.get("ip")->asString()             == ap_config.get("ip")->asString())             &&
+                (update.get("gateway")->asString()        == ap_config.get("gateway")->asString())        &&
+                (update.get("subnet")->asString()         == ap_config.get("subnet")->asString());
+
+            if (is_reenabled) {
+                task_scheduler.scheduleOnce([this]() {
+                    task_scheduler.cancel(ap_revert_countdown_task_id);
+                    state.get("ap_disable_countdown")->updateUint(0);
+                });
+            } else {
+                task_scheduler.scheduleOnce([this]() {
+                    this->apply_ap_config();
+                });
+            }
+        }
+
+        return "";
+    }};
+    state = Config::Object({
+        {"connection_state", Config::Enum(WifiState::NotConfigured)},
+        {"connection_start", Config::Uptime()},
+        {"connection_end", Config::Uptime()},
+        {"ap_state", Config::Uint8(0)},
+        {"ap_bssid", Config::Str("", 0, 17)},
+        {"ap_sta_count", Config::Uint8(0)},
+        {"sta_mac", Config::Str("", 0, 17)},
+        {"sta_ip",     Config::Str("0.0.0.0", 7, 15)},
+        {"sta_subnet", Config::Str("0.0.0.0", 7, 15)},
+        {"sta_ip6",    Config::Array({}, &ip6_prototype, 0, CONFIG_LWIP_IPV6_NUM_ADDRESSES)},
+        {"sta_rssi", Config::Int8(-127)},
+        {"sta_bssid", Config::Str("", 0, 17)},
+        {"sta_disconnect_reason", Config::Enum(WifiDisconnectReason::None)},
+        {"ap_disable_countdown", Config::Uint8(0)},
+        {"sta_disable_countdown", Config::Uint8(0)}
+    });
+
+    eap_config_prototypes[0] = {EapConfigID::None, *Config::Null()};
+
+    // Max len of identity is currently limited by arduino.
+    eap_config_prototypes[1] = {EapConfigID::TLS, Config::Object({
+        {"ca_cert_id", Config::Int(-1, -1, MAX_CERT_ID)},
+        {"identity", Config::Str("", 0, 64)},
+        {"client_cert_id", Config::Int(-1, -1, MAX_CERT_ID)},
+        {"client_key_id", Config::Int(-1, -1, MAX_CERT_ID)}
+    })};
+
+    eap_config_prototypes[2] = {EapConfigID::PEAP_TTLS, Config::Object({
+        {"ca_cert_id", Config::Int(-1, -1, MAX_CERT_ID)},
+        {"identity", Config::Str("", 0, 64)},
+        {"username", Config::Str("", 0, 64)},
+        {"password", Config::Str("", 0, 64)},
+        {"client_cert_id", Config::Int(-1, -1, MAX_CERT_ID)},
+        {"client_key_id", Config::Int(-1, -1, MAX_CERT_ID)}
+    })};
+
+    sta_config = ConfigRoot{Config::Object({
+        {"enable_sta", Config::Bool(false)},
+        {"ssid", Config::Str("", 0, 32)},
+        {"bssid", Config::Tuple(6, Config::Uint8(0))},
+        {"bssid_lock", Config::Bool(false)},
+        {"enable_11b", Config::Bool(false)},
+        {"passphrase", Config::Str("", 0, 64)},
+        {"ip",      Config::Str("0.0.0.0", 7, 15)},
+        {"gateway", Config::Str("0.0.0.0", 7, 15)},
+        {"subnet",  Config::Str("0.0.0.0", 7, 15)},
+        {"dns",     Config::Str("0.0.0.0", 7, 15)},
+        {"dns2",    Config::Str("0.0.0.0", 7, 15)},
+        {"enable_ipv6", Config::Bool(false)},
+        {"ip6",     Config::Array({}, &ip6_prototype, 0, MAX_STATIC_IPV6_ADDRESSES)},
+        //{"dns6",    Config::Str("::", 2, INET6_ADDRSTRLEN - 1)},
+        {"wpa_eap_config", Config::Union<EapConfigID>(
+            *Config::Null(),
+            EapConfigID::None,
+            eap_config_prototypes,
+            ARRAY_SIZE(eap_config_prototypes)
+        )},
+    }), [this](Config &update, ConfigSource source) -> String {
+        const String &phrase = update.get("passphrase")->asString();
+        if (phrase.length() > 0 && phrase.length() < 8)
+            return "Passphrase too short. Must be at least 8 characters, or zero if open network.";
+        // Fixme: Check if only hex if exactly 64 bytes long: then it's a PSK instead of a passphrase.
+
+        IPAddress ip_addr, subnet_mask, gateway_addr, unused;
+
+        if (!ip_addr.fromString(update.get("ip")->asUnsafeCStr()))
+            return "Failed to parse \"ip\": Expected format is dotted decimal, e.g. 10.0.0.1";
+
+        if (!gateway_addr.fromString(update.get("gateway")->asUnsafeCStr()))
+            return "Failed to parse \"gateway\": Expected format is dotted decimal, e.g. 10.0.0.1";
+
+        if (!subnet_mask.fromString(update.get("subnet")->asUnsafeCStr()))
+            return "Failed to parse \"subnet\": Expected format is dotted decimal, e.g. 255.255.255.0";
+
+        if (!is_valid_subnet_mask(subnet_mask))
+            return "Invalid subnet mask passed: Expected format is 255.255.255.0";
+
+        if (ip_addr != IPAddress(0,0,0,0) && is_in_subnet(ip_addr, subnet_mask, IPAddress(127,0,0,1)))
+            return "Invalid IP or subnet mask passed: This configuration would route localhost (127.0.0.1) to the WiFi STA interface.";
+
+        if (gateway_addr != IPAddress(0,0,0,0) && !is_in_subnet(ip_addr, subnet_mask, gateway_addr))
+            return "Invalid IP, subnet mask, or gateway passed: IP and gateway are not in the same network according to the subnet mask.";
+
+        if (!unused.fromString(update.get("dns")->asUnsafeCStr()))
+            return "Failed to parse \"dns\": Expected format is dotted decimal, e.g. 10.0.0.1";
+
+        if (!unused.fromString(update.get("dns2")->asUnsafeCStr()))
+            return "Failed to parse \"dns2\": Expected format is dotted decimal, e.g. 10.0.0.1";
+
+        if (update.get("wpa_eap_config")->getTag<EapConfigID>() == EapConfigID::PEAP_TTLS) {
+            int client_cert_id = update.get("wpa_eap_config")->get()->get("client_cert_id")->asInt();
+            int client_key_id  = update.get("wpa_eap_config")->get()->get("client_key_id")->asInt();
+
+            if ((client_cert_id != -1 && client_key_id == -1) || (client_cert_id == -1 && client_key_id != -1)) {
+                return "Must provide both, a client certificate and a client key";
+            }
+        }
+
+        if (update.get("wpa_eap_config")->getTag<EapConfigID>() == EapConfigID::TLS) {
+            int client_cert_id = update.get("wpa_eap_config")->get()->get("client_cert_id")->asInt();
+            int client_key_id  = update.get("wpa_eap_config")->get()->get("client_key_id")->asInt();
+
+            if (client_cert_id == -1) {
+                return "Must provide a client certificate";
+            }
+
+            if (client_key_id == -1) {
+                return "Must provide a client key";
+            }
+        }
+
+        if (!update.get("enable_sta")->asBool()) {
+            bool other = ap_config.get("enable_ap")->asBool();
+#if MODULE_ETHERNET_AVAILABLE()
+            other = other || ethernet.is_enabled_in_config();
+            if (!other) {
+                return "Cannot disable WiFi STA: No other network interface is enabled. Enable WiFi AP or Ethernet first.";
+            }
+#else
+            if (!other) {
+                return "Cannot disable WiFi STA: No other network interface is enabled. Enable WiFi AP first.";
+            }
+#endif
+        }
+
+        if (source != ConfigSource::File) {
+            bool is_reenabled = (runtime_sta != nullptr) && update.get("enable_sta")->asBool()       &&
+                (update.get("enable_sta")->asBool()   != sta_config.get("enable_sta")->asBool())     &&
+                (update.get("ssid")->asString()       == sta_config.get("ssid")->asString())         &&
+                (update.get("bssid_lock")->asBool()   == sta_config.get("bssid_lock")->asBool())     &&
+                (update.get("enable_11b")->asBool()   == sta_config.get("enable_11b")->asBool())     &&
+                (update.get("passphrase")->asString() == sta_config.get("passphrase")->asString())   &&
+                (update.get("ip")->asString()         == sta_config.get("ip")->asString())           &&
+                (update.get("gateway")->asString()    == sta_config.get("gateway")->asString())      &&
+                (update.get("subnet")->asString()     == sta_config.get("subnet")->asString())       &&
+                (update.get("dns")->asString()        == sta_config.get("dns")->asString())          &&
+                (update.get("dns2")->asString()       == sta_config.get("dns2")->asString())         &&
+                (update.get("enable_ipv6")->asBool()  == sta_config.get("enable_ipv6")->asBool());
+
+            if (is_reenabled) {
+                const Config *update_ip6 = static_cast<const Config *>(update.get("ip6"));
+                const Config *config_ip6 = static_cast<const Config *>(sta_config.get("ip6"));
+                const size_t update_ip6_count = update_ip6->count();
+                const size_t config_ip6_count = config_ip6->count();
+
+                if (update_ip6_count != config_ip6_count) {
+                    is_reenabled = false;
+                } else {
+                    for (size_t i = 0; i < update_ip6_count; i++) {
+                        const Config *update_ip6_elem = static_cast<const Config *>(update_ip6->get(i));
+                        const Config *config_ip6_elem = static_cast<const Config *>(config_ip6->get(i));
+
+                        if (update_ip6_elem->get("addr" )->asString() != config_ip6_elem->get("addr" )->asString() ||
+                            update_ip6_elem->get("flags")->asUint16() != config_ip6_elem->get("flags")->asUint16()) {
+
+                            is_reenabled = false;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if (is_reenabled) {
+                task_scheduler.scheduleOnce([this]() {
+                    task_scheduler.cancel(sta_revert_countdown_task_id);
+                    state.get("sta_disable_countdown")->updateUint(0);
+                });
+            } else {
+                task_scheduler.scheduleOnce([this]() {
+                    this->apply_sta_config();
+                }, 1_s);
+            }
+        }
+
+        return "";
+    }};
+}
+
+static float rssi_to_weight(int rssi)
+{
+    return powf(2, static_cast<float>(128 + rssi) / 10);
+}
+
+static void apply_weight(float *channels, int channel, float weight)
+{
+    for (int i = std::max(1, channel - 2); i <= std::min(13, channel + 2); ++i) {
+        if (i == channel - 2 || i == channel + 2)
+            channels[i] += weight / 2;
+        else
+            channels[i] += weight;
+    }
+}
+
+void Wifi::apply_soft_ap_config_and_start()
+{
+    // We don't want apply_soft_ap_config_and_start
+    // to be called over and over from the fallback AP task
+    // if we are still scanning for a channel.
+    runtime_ap->soft_ap_running = true;
+
+    if (runtime_ap->channel == 0) {
+        if (runtime_ap->scan_start_time_s == 0) {
+            logger.printfln("Starting scan to select unoccupied channel for soft AP");
+            WiFi.scanDelete();
+            WiFi.scanNetworks(true, true);
+            runtime_ap->scan_start_time_s = std::max(now_us().to<seconds_t>().as<uint32_t>(), 1ul);
+            task_scheduler.scheduleOnce([this]() {
+                this->apply_soft_ap_config_and_start();
+            }, 500_ms);
+            return;
+        } else { // Scan already started
+            int16_t network_count = WiFi.scanComplete();
+
+            if (network_count == WIFI_SCAN_RUNNING && !deadline_elapsed(seconds_t{runtime_ap->scan_start_time_s + 10})) {
+                task_scheduler.scheduleOnce([this]() {
+                    this->apply_soft_ap_config_and_start();
+                }, 500_ms);
+                return;
+            }
+
+            runtime_ap->scan_start_time_s = 0;
+
+            if (network_count >= 0) { // Scan finished successfully
+                float channels[14] = {0}; // Don't use 0, channels are one-based.
+                float channels_smeared[14] = {0}; // Don't use 0, channels are one-based.
+                for (int16_t i = 0; i < network_count; ++i) {
+                    const wifi_ap_record_t *info = static_cast<decltype(info)>(WiFi.getScanInfoByIndex(i));
+
+                    int channel = info->primary;
+                    float weight = rssi_to_weight(info->rssi);
+                    apply_weight(channels, channel, weight);
+
+                    if (info->second == WIFI_SECOND_CHAN_ABOVE) {
+                        apply_weight(channels, channel + 4, weight);
+                    } else if (info->second == WIFI_SECOND_CHAN_BELOW) {
+                        apply_weight(channels, channel - 4, weight);
+                    }
+                }
+
+                memcpy(channels_smeared, channels, ARRAY_SIZE(channels_smeared));
+
+                for (int i = 1; i <= 13; ++i) {
+                    if (i > 1)
+                        channels_smeared[i] += channels[i - 1];
+                    if (i < 13)
+                        channels_smeared[i] += channels[i + 1];
+                }
+
+                uint32_t min = 1;
+                for (uint32_t i = 1; i <= 13; ++i) {
+                    if (channels_smeared[i] < channels_smeared[min])
+                        min = i;
+                }
+                logger.printfln("Selecting channel %lu for soft AP", min);
+                runtime_ap->channel = min & 0xF;
+
+                // Discard internal data of found WiFis so that it doesn't permanently occupy about 1K of RAM.
+                // If the user started a scan, the results have already been sent via WS.
+                WiFi.scanDelete();
+            }
+
+            // If channel_to_use is still 0, either a timeout occurred or the scan failed.
+            if (runtime_ap->channel == 0) {
+                runtime_ap->channel = ((esp_random() % 4) * 4 + 1) & 0xF;
+                logger.printfln("Channel selection scan timeout elapsed! Randomly selected channel %hhu", runtime_ap->channel);
+            }
+        }
+    }
+
+    // Convert addresses before enableAP in order to keep the time between enableAP and softAPConfig as short as possible.
+    const IPAddress ip{runtime_ap->ip_ssid_passphrase};
+    const IPAddress subnet{tf_ip4addr_cidr2mask(runtime_ap->subnet_cidr).addr};
+
+    // AP must be enabled before the bandwidth can be set.
+    if (!WiFi.enableAP(true)) {
+        logger.printfln("AP enable failed");
+        return;
+    }
+
+    if (!WiFi.AP.waitStatusBits(ESP_NETIF_STARTED_BIT, 1000)) {
+        logger.printfln("AP netif not started after 1s. Expect problems.");
+    }
+
+    // We don't need the additional speed of HT40 and it only causes more errors.
+    // Must be set directly after enabling the interface because it might clobber some other settings.
+    esp_err_t err = esp_wifi_set_bandwidth(WIFI_IF_AP, WIFI_BW_HT20);
+    if (err != ESP_OK) {
+        logger.printfln("Setting HT20 for AP failed: %s (%i)", esp_err_to_name(err), err);
+    }
+
+    WiFi.AP.create(runtime_ap->ip_ssid_passphrase + runtime_ap->ssid_offset,
+                   runtime_ap->ip_ssid_passphrase + runtime_ap->passphrase_offset,
+                   runtime_ap->channel,
+                   runtime_ap->hide_ssid);
+
+    if (!WiFi.softAPConfig(ip, {runtime_ap->gateway.addr}, subnet)) {
+        logger.printfln("softAPConfig failed");
+    }
+
+    WiFi.setSleep(false);
+
+    uint8_t bssid[6];
+    if (WiFi.AP.macAddress(bssid) != nullptr) {
+        char bssid_str[18];
+        const size_t bssid_strlen = snprintf_u(bssid_str, sizeof(bssid_str), "%02X:%02X:%02X:%02X:%02X:%02X", bssid[0], bssid[1], bssid[2], bssid[3], bssid[4], bssid[5]);
+
+        state.get("ap_bssid")->updateString(String{bssid_str, bssid_strlen});
+    }
+
+    logger.printfln("Soft AP started");
+}
+
+void Wifi::apply_ap_config(bool defer_start)
+{
+    const bool want_enabled = ap_config.get("enable_ap")->asBool();
+
+    if (want_enabled) {
+        const String &ip   = ap_config.get("ip"        )->asString();
+        const String &ssid = ap_config.get("ssid"      )->asString();
+        const String &pass = ap_config.get("passphrase")->asString();
+
+        const size_t ip_len_term   = ip.length()   + 1;
+        const size_t ssid_len_term = ssid.length() + 1;
+        const size_t pass_len_term = pass.length() + 1;
+
+        auto *new_runtime = static_cast<ap_runtime *>(malloc_psram_or_dram(offsetof(struct ap_runtime, ip_ssid_passphrase) + ip_len_term + ssid_len_term + pass_len_term));
+
+        if (!new_runtime) {
+            logger.printfln("Failed to allocate memory for WiFi AP runtime data");
+            return;
+        }
+
+        ip4addr_aton(ap_config.get("gateway")->asUnsafeCStr(), &new_runtime->gateway);
+
+        ip4_addr_t subnet;
+        ip4addr_aton(ap_config.get("subnet")->asUnsafeCStr(), &subnet);
+        new_runtime->subnet_cidr = tf_ip4addr_mask2cidr(subnet);
+
+        new_runtime->ap_fallback_only = ap_config.get("ap_fallback_only")->asBool();
+        new_runtime->hide_ssid        = ap_config.get("hide_ssid"       )->asBool();
+        new_runtime->channel          = ap_config.get("channel"         )->asUint() & 0xF;
+
+        memcpy(new_runtime->ip_ssid_passphrase, ip.c_str(), ip_len_term);
+
+        new_runtime->ssid_offset = static_cast<uint8_t>(ip_len_term);
+        memcpy(new_runtime->ip_ssid_passphrase + new_runtime->ssid_offset, ssid.c_str(), ssid_len_term);
+
+        new_runtime->passphrase_offset = static_cast<uint8_t>(new_runtime->ssid_offset + ssid_len_term);
+        memcpy(new_runtime->ip_ssid_passphrase + new_runtime->passphrase_offset, pass.c_str(), pass_len_term);
+
+        new_runtime->soft_ap_running   = false;
+        new_runtime->scan_start_time_s = 0;
+        new_runtime->stop_soft_ap_runs = 0;
+
+        const bool was_disabled = (runtime_ap == nullptr);
+
+        if (runtime_ap && runtime_ap->soft_ap_running) {
+            WiFi.softAPdisconnect(true);
+        }
+
+        // Cancel any pending auto-revert since AP is being (re-)enabled.
+        task_scheduler.cancel(ap_revert_countdown_task_id);
+        state.get("ap_disable_countdown")->updateUint(0);
+
+        free(runtime_ap);
+        runtime_ap = new_runtime;
+
+        if (!defer_start) {
+            if (!runtime_ap->ap_fallback_only) {
+                apply_soft_ap_config_and_start();
+            } else {
+                // In fallback mode the periodic task (already scheduled in setup()) will
+                // start the AP when needed. Mark it as not running so the task picks it up.
+                runtime_ap->soft_ap_running = false;
+            }
+
+            // If the AP was previously disabled (no runtime_ap at boot),
+            // the ap_state update task and event handlers were never set up.
+            if (was_disabled) {
+                register_ap_event_handlers();
+                task_scheduler.scheduleUncancelable([this]() {
+                    state.get("ap_state")->updateUint(get_ap_state());
+                }, 5_s, 5_s);
+            }
+        }
+    } else if (!defer_start && runtime_ap) {
+        // Enabled -> Disabled: Requires reboot.
+        logger.printfln("WiFi AP disabled in config. Reboot required to take effect. Auto-revert in 4 minutes.");
+        state.get("ap_disable_countdown")->updateUint(4 * 60);
+        task_scheduler.cancel(ap_revert_countdown_task_id);
+
+        ap_revert_countdown_task_id = task_scheduler.scheduleWithFixedDelay([this]() {
+            uint8_t remaining = state.get("ap_disable_countdown")->asUint8();
+            if (remaining <= 1) {
+                logger.printfln("No reboot within 4 minutes. Auto-reverting WiFi AP config to enabled.");
+                state.get("ap_disable_countdown")->updateUint(0);
+                task_scheduler.cancel(ap_revert_countdown_task_id);
+                ap_config.get("enable_ap")->updateBool(true);
+                API::writeConfig("wifi/ap_config", &ap_config);
+                return;
+            }
+            state.get("ap_disable_countdown")->updateUint(remaining - 1);
+        }, 1_s);
+    }
+
+    // Update state immediately to reduce UI latency changing AP config
+    state.get("ap_state")->updateUint(get_ap_state());
+}
+
+void Wifi::apply_sta_config(bool defer_start)
+{
+    const bool want_enabled = sta_config.get("enable_sta")->asBool();
+
+    if (want_enabled) {
+        const String &ssid = sta_config.get("ssid"      )->asString();
+        const String &pass = sta_config.get("passphrase")->asString();
+
+        const size_t ssid_len_term = ssid.length() + 1;
+        const size_t pass_len_term = pass.length() + 1;
+
+        auto *new_runtime = static_cast<sta_runtime *>(malloc_psram_or_dram(offsetof(struct sta_runtime, ssid_passphrase) + ssid_len_term + pass_len_term));
+
+        if (!new_runtime) {
+            logger.printfln("Failed to allocate memory for WiFi STA runtime data");
+            return;
+        }
+
+        ip4addr_aton(sta_config.get("ip"     )->asUnsafeCStr(), &new_runtime->ip     );
+        ip4addr_aton(sta_config.get("gateway")->asUnsafeCStr(), &new_runtime->gateway);
+        ip4addr_aton(sta_config.get("dns"    )->asUnsafeCStr(), &new_runtime->dns    );
+        ip4addr_aton(sta_config.get("dns2"   )->asUnsafeCStr(), &new_runtime->dns2   );
+
+        ip4_addr_t subnet;
+        ip4addr_aton(sta_config.get("subnet" )->asUnsafeCStr(), &subnet);
+        new_runtime->subnet_cidr = tf_ip4addr_mask2cidr(subnet) & 0x1F;
+
+        new_runtime->enable_11b = sta_config.get("enable_11b")->asBool();
+        new_runtime->bssid_lock = sta_config.get("bssid_lock")->asBool();
+
+        auto bssid_config = sta_config.get("bssid");
+        uint8_t *bssid = new_runtime->bssid;
+        for (size_t i = 0; i < ARRAY_SIZE(new_runtime->bssid); i++) {
+            bssid[i] = bssid_config->get(i)->asUint8();
+        }
+
+        memcpy(new_runtime->ssid_passphrase, ssid.c_str(), ssid_len_term);
+
+        new_runtime->passphrase_offset = static_cast<uint8_t>(ssid_len_term);
+        memcpy(new_runtime->ssid_passphrase + new_runtime->passphrase_offset, pass.c_str(), pass_len_term);
+
+        new_runtime->last_connected = 0_us;
+        new_runtime->connect_tries    = 0;
+        new_runtime->was_connected    = runtime_sta != nullptr && runtime_sta->was_connected;
+
+        auto eap_union = const_cast<const ConfigRoot *>(&sta_config)->get("wpa_eap_config");
+        const EapConfigID eap_config_id = eap_union->getTag<EapConfigID>();
+
+        if (eap_config_id == EapConfigID::None) {
+            new_runtime->runtime_eap = nullptr;
+        } else {
+            auto eap_config = eap_union->get();
+
+            const String &eap_identity_tmp = eap_config->get("identity")->asString();
+                  String  eap_identity;
+
+            if (eap_config_id == EapConfigID::TLS && eap_identity_tmp.isEmpty()) {
+                eap_identity = "anonymous";
+            } else {
+                eap_identity = eap_identity_tmp;
+            }
+
+            const String *eap_username;
+            const String *eap_password;
+
+            const size_t eap_identity_len_term = eap_identity.length() + 1;
+                  size_t eap_username_len_term;
+                  size_t eap_password_len_term;
+
+            if (eap_config_id == EapConfigID::PEAP_TTLS) {
+                eap_username = &eap_config->get("username")->asString();
+                eap_password = &eap_config->get("password")->asString();
+
+                eap_username_len_term = eap_username->length() + 1;
+                eap_password_len_term = eap_password->length() + 1;
+            } else {
+                eap_username = nullptr;
+                eap_password = nullptr;
+
+                eap_username_len_term = 0;
+                eap_password_len_term = 0;
+            }
+
+            eap_runtime *eap = static_cast<decltype(eap)>(malloc_psram_or_dram(offsetof(struct eap_runtime, identity_credentials) + eap_identity_len_term + eap_username_len_term + eap_password_len_term));
+            new_runtime->runtime_eap = eap;
+
+            if (!eap) {
+                logger.printfln("Failed to allocate memory for WiFi STA EAP runtime data");
+            } else {
+                memset(eap, 0, offsetof(struct eap_runtime, identity_credentials));
+
+#if MODULE_CERTS_AVAILABLE()
+                const int32_t ca_cert_id     = eap_config->get("ca_cert_id"    )->asInt();
+                const int32_t client_cert_id = eap_config->get("client_cert_id")->asInt();
+                const int32_t client_key_id  = eap_config->get("client_key_id" )->asInt();
+
+                if (ca_cert_id     >= 0) eap->ca_cert     = certs.get_cert(static_cast<uint8_t>(ca_cert_id),     nullptr);
+                if (client_cert_id >= 0) eap->client_cert = certs.get_cert(static_cast<uint8_t>(client_cert_id), nullptr);
+                if (client_key_id  >= 0) eap->client_key  = certs.get_cert(static_cast<uint8_t>(client_key_id),  nullptr);
+#endif
+
+                eap->eap_config_id = static_cast<uint8_t>(eap_config_id);
+
+                memcpy(eap->identity_credentials, eap_identity.c_str(), eap_identity_len_term);
+
+                if (!eap_username) {
+                    eap->username_offset = static_cast<uint8_t>(eap_identity_len_term - 1); // Point to identity string's null byte.
+                } else {
+                    eap->username_offset = static_cast<uint8_t>(eap_identity_len_term);
+                    memcpy(eap->identity_credentials + eap->username_offset, eap_username->c_str(), eap_username_len_term);
+                }
+
+                if (!eap_password) {
+                    eap->password_offset = static_cast<uint8_t>(eap_identity_len_term - 1); // Point to identity string's null byte.
+                } else {
+                    eap->password_offset = static_cast<uint8_t>(eap_identity_len_term + eap_username_len_term);
+                    memcpy(eap->identity_credentials + eap->password_offset, eap_password->c_str(), eap_password_len_term);
+                }
+            }
+        }
+
+        apply_ipv6_sta_config(new_runtime);
+
+        const bool was_disabled = (runtime_sta == nullptr);
+
+        // Cancel any pending auto-revert since STA is being (re-)enabled.
+        task_scheduler.cancel(sta_revert_countdown_task_id);
+        state.get("sta_disable_countdown")->updateUint(0);
+
+        // Free old runtime
+        if (runtime_sta) {
+            if (runtime_sta->runtime_eap) {
+                runtime_sta->runtime_eap->~eap_runtime();
+                free(runtime_sta->runtime_eap);
+            }
+            free(runtime_sta);
+        }
+        runtime_sta = new_runtime;
+
+        if (!defer_start) {
+            if (was_disabled) {
+                // Disabled -> Enabled: Register event handlers and start connection.
+                register_sta_event_handlers();
+                start_sta_connection();
+            } else {
+                // Already enabled: Disconnect and reconnect with new config.
+                WiFi.disconnect(false, true);
+                apply_sta_config_and_connect();
+            }
+
+            // If the STA was previously disabled (no runtime_sta at boot),
+            // the connection_state update task was never scheduled.
+            if (was_disabled) {
+                task_scheduler.scheduleUncancelable([this]() {
+                    state.get("connection_state")->updateEnum(get_connection_state());
+                }, 1_s);
+            }
+        }
+    } else if (!defer_start && runtime_sta) {
+        // Enabled -> Disabled: Requires reboot.
+        logger.printfln("WiFi STA disabled in config. Reboot required to take effect. Auto-revert in 4 minutes.");
+        state.get("sta_disable_countdown")->updateUint(4 * 60);
+        task_scheduler.cancel(sta_revert_countdown_task_id);
+
+        sta_revert_countdown_task_id = task_scheduler.scheduleWithFixedDelay([this]() {
+            uint8_t remaining = state.get("sta_disable_countdown")->asUint8();
+            if (remaining <= 1) {
+                logger.printfln("No reboot within 4 minutes. Auto-reverting WiFi STA config to enabled.");
+                state.get("sta_disable_countdown")->updateUint(0);
+                task_scheduler.cancel(sta_revert_countdown_task_id);
+                sta_config.get("enable_sta")->updateBool(true);
+                API::writeConfig("wifi/sta_config", &sta_config);
+                return;
+            }
+            state.get("sta_disable_countdown")->updateUint(remaining - 1);
+        }, 1_s);
+    }
+}
+
+void Wifi::register_ap_event_handlers()
+{
+    WiFi.onEvent([this](arduino_event_id_t event, arduino_event_info_t info) {
+            logger.printfln("STA with MAC address %02X:%02X:%02X:%02X:%02X:%02X connected to AP",
+                            info.wifi_ap_staconnected.mac[0],
+                            info.wifi_ap_staconnected.mac[1],
+                            info.wifi_ap_staconnected.mac[2],
+                            info.wifi_ap_staconnected.mac[3],
+                            info.wifi_ap_staconnected.mac[4],
+                            info.wifi_ap_staconnected.mac[5]);
+
+            task_scheduler.scheduleOnce([this]() {
+                auto ap_sta_count = state.get("ap_sta_count");
+                ap_sta_count->updateUint(ap_sta_count->asUint() + 1);
+            });
+
+        },
+        ARDUINO_EVENT_WIFI_AP_STACONNECTED);
+
+    WiFi.onEvent([this](arduino_event_id_t event, arduino_event_info_t info) {
+            logger.printfln("STA with MAC address %02X:%02X:%02X:%02X:%02X:%02X disconnected from AP",
+                            info.wifi_ap_staconnected.mac[0],
+                            info.wifi_ap_staconnected.mac[1],
+                            info.wifi_ap_staconnected.mac[2],
+                            info.wifi_ap_staconnected.mac[3],
+                            info.wifi_ap_staconnected.mac[4],
+                            info.wifi_ap_staconnected.mac[5]);
+
+            task_scheduler.scheduleOnce([this]() {
+                auto ap_sta_count = state.get("ap_sta_count");
+                uint32_t ap_sta_count_value = ap_sta_count->asUint();
+
+                if (ap_sta_count_value == 0) {
+                    logger.printfln("Unexpected disconnect from AP, STA count was already zero");
+                }
+                else {
+                    ap_sta_count->updateUint(ap_sta_count_value - 1);
+                }
+            });
+        },
+        ARDUINO_EVENT_WIFI_AP_STADISCONNECTED);
+}
+
+#define DEFAULT_REASON_STRING(X) case X: return "Unknown reason (" #X ")";
+
+static const char *reason2str(uint8_t reason)
+{
+    switch (reason) {
+        case WIFI_REASON_NO_AP_FOUND:
+            return "Access point not found. Is the reception too poor or the SSID incorrect?";
+        case WIFI_REASON_AUTH_FAIL:
+            return "Authentication failed. Is the passphrase correct?";
+        case WIFI_REASON_ASSOC_FAIL:
+            return "Association failed";
+        case WIFI_REASON_HANDSHAKE_TIMEOUT:
+        case WIFI_REASON_BEACON_TIMEOUT:
+            return "Reception too poor";
+
+        case WIFI_REASON_ASSOC_TOOMANY:
+            return "Too many stations: access point full";
+        case WIFI_REASON_NOT_AUTHED:
+            return "Remote disconnect";
+        case WIFI_REASON_ASSOC_LEAVE:
+            return "Local disconnect";
+
+        DEFAULT_REASON_STRING(WIFI_REASON_UNSPECIFIED)
+        DEFAULT_REASON_STRING(WIFI_REASON_AUTH_EXPIRE)
+        DEFAULT_REASON_STRING(WIFI_REASON_AUTH_LEAVE)
+        DEFAULT_REASON_STRING(WIFI_REASON_ASSOC_EXPIRE)
+        DEFAULT_REASON_STRING(WIFI_REASON_NOT_ASSOCED)
+        DEFAULT_REASON_STRING(WIFI_REASON_ASSOC_NOT_AUTHED)
+        DEFAULT_REASON_STRING(WIFI_REASON_DISASSOC_PWRCAP_BAD)
+        DEFAULT_REASON_STRING(WIFI_REASON_DISASSOC_SUPCHAN_BAD)
+        DEFAULT_REASON_STRING(WIFI_REASON_BSS_TRANSITION_DISASSOC)
+        DEFAULT_REASON_STRING(WIFI_REASON_IE_INVALID)
+        DEFAULT_REASON_STRING(WIFI_REASON_MIC_FAILURE)
+        DEFAULT_REASON_STRING(WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT)
+        DEFAULT_REASON_STRING(WIFI_REASON_GROUP_KEY_UPDATE_TIMEOUT)
+        DEFAULT_REASON_STRING(WIFI_REASON_IE_IN_4WAY_DIFFERS)
+        DEFAULT_REASON_STRING(WIFI_REASON_GROUP_CIPHER_INVALID)
+        DEFAULT_REASON_STRING(WIFI_REASON_PAIRWISE_CIPHER_INVALID)
+        DEFAULT_REASON_STRING(WIFI_REASON_AKMP_INVALID)
+        DEFAULT_REASON_STRING(WIFI_REASON_UNSUPP_RSN_IE_VERSION)
+        DEFAULT_REASON_STRING(WIFI_REASON_INVALID_RSN_IE_CAP)
+        DEFAULT_REASON_STRING(WIFI_REASON_802_1X_AUTH_FAILED)
+        DEFAULT_REASON_STRING(WIFI_REASON_CIPHER_SUITE_REJECTED)
+
+        DEFAULT_REASON_STRING(WIFI_REASON_INVALID_PMKID)
+
+        DEFAULT_REASON_STRING(WIFI_REASON_CONNECTION_FAIL)
+        DEFAULT_REASON_STRING(WIFI_REASON_AP_TSF_RESET)
+        DEFAULT_REASON_STRING(WIFI_REASON_ROAMING)
+
+        default:
+            return "Unknown reason";
+    }
+}
+
+static WifiDisconnectReason reason_code_to_enum(uint8_t reason_code)
+{
+    switch (reason_code) {
+        case 0: // Special: overridden to 0 when no DHCP IP received
+            return WifiDisconnectReason::NoDHCP;
+        case WIFI_REASON_NO_AP_FOUND:
+            return WifiDisconnectReason::NoAPFound;
+        case WIFI_REASON_AUTH_FAIL:
+        case WIFI_REASON_802_1X_AUTH_FAILED:
+        case WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT:
+        case WIFI_REASON_GROUP_KEY_UPDATE_TIMEOUT:
+            return WifiDisconnectReason::AuthError;
+        case WIFI_REASON_ASSOC_TOOMANY:
+            return WifiDisconnectReason::APFull;
+        case WIFI_REASON_HANDSHAKE_TIMEOUT:
+        case WIFI_REASON_BEACON_TIMEOUT:
+            return WifiDisconnectReason::PoorReception;
+        case WIFI_REASON_ASSOC_LEAVE:
+        case WIFI_REASON_STA_LEAVING:
+            return WifiDisconnectReason::ByRequest;
+        default:
+            return WifiDisconnectReason::GenericError;
+    }
+}
+
+void Wifi::register_sta_event_handlers()
+{
+    WiFi.onEvent([this](arduino_event_id_t /*event*/, arduino_event_info_t info) {
+            uint8_t reason_code = info.wifi_sta_disconnected.reason;
+            const char *reason = reason2str(reason_code);
+            if (!this->runtime_sta->was_connected) {
+                logger.printfln("Failed to connect to WiFi: %s (%u)", reason, reason_code);
+            } else {
+                struct closure_t {
+                    aligned_storage<Task> task_buf;
+                    micros_t now;
+                };
+
+                closure_t *closure = new closure_t;
+
+                closure->now = now_us();
+                const uint32_t connected_for_s = (closure->now - runtime_sta->last_connected).to<seconds_t>().as<uint32_t>();
+
+                if (reason_code == WIFI_REASON_ASSOC_LEAVE && this->runtime_sta->ip.addr == 0 && connected_for_s < 30) {
+                    String last_ip{};
+
+                    // Discarding the result is fine: last_ip will stay an empty string.
+                    (void)task_scheduler.await([this, &last_ip](){
+                        last_ip = state.get("sta_ip")->asString();
+                    });
+
+                    if (last_ip == "0.0.0.0") {
+                        reason = "No IP received via DHCP";
+                        reason_code = 0;
+                    }
+                }
+
+                logger.printfln("Disconnected from WiFi: %s (%u). Was connected for %lu seconds.", reason, reason_code, connected_for_s);
+
+                // Transfer ownership, will free the whole closure.
+                task_scheduler.scheduleOnceNoAlloc(&closure->task_buf, true, [this, closure]() {
+                    state.get("connection_end")->updateUptime(closure->now);
+                });
+            }
+
+            // Always disable IPv6 when disconnected. Will be re-enabled if needed.
+            WiFi.STA.enableIPv6(false);
+
+            WifiDisconnectReason disconnect_reason = reason_code_to_enum(reason_code);
+
+            task_scheduler.scheduleOnce([this, disconnect_reason](){
+                state.get("sta_ip")->updateString("0.0.0.0");
+                state.get("sta_subnet")->updateString("0.0.0.0");
+                state.get("sta_ip6")->removeAll();
+                state.get("sta_bssid")->updateString("");
+                state.get("sta_disconnect_reason")->updateEnum(disconnect_reason);
+            });
+
+            this->runtime_sta->was_connected = false;
+        },
+        ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
+
+    WiFi.onEvent([this](arduino_event_id_t /*event*/, arduino_event_info_t /*info*/) {
+            apply_ipv6_to_interface();
+
+            struct closure_t {
+                aligned_storage<Task> task_buf;
+                micros_t now;
+                char bssid_str[18];
+            };
+
+            closure_t *closure = new closure_t;
+
+            wifi_ap_record_t wifi_info;
+
+            if (esp_wifi_sta_get_ap_info(&wifi_info) != ESP_OK) {
+                logger.printfln("Connected to WiFi");
+                closure->bssid_str[0] = 0;
+            } else {
+                char buf[128];
+                StringWriter sw(buf, ARRAY_SIZE(buf));
+
+                if (wifi_info.phy_11a)       sw.puts("a+");
+                if (wifi_info.phy_11b)       sw.puts("b+");
+                if (wifi_info.phy_11g)       sw.puts("g+");
+                if (wifi_info.phy_11n)       sw.puts("n+");
+                if (wifi_info.phy_11ac)      sw.puts("ac+");
+                if (wifi_info.phy_11ax)      sw.puts("ax+");
+                sw.setLength(sw.getLength() - 1); // Remove trailing plus or space if no mode was added.
+
+                sw.printf(" ch.%hhu", wifi_info.primary);
+
+                if      (wifi_info.bandwidth == WIFI_BW_HT20)   sw.puts(" HT20");
+                else if (wifi_info.bandwidth == WIFI_BW_HT40)   sw.puts(" HT40");
+                else if (wifi_info.bandwidth == WIFI_BW80)      sw.puts(" VHT80");
+                else if (wifi_info.bandwidth == WIFI_BW160)     sw.puts(" VHT160");
+                else if (wifi_info.bandwidth == WIFI_BW80_BW80) sw.puts(" VHT80+80");
+
+                if (wifi_info.phy_lr)        sw.puts(" lr");
+                if (wifi_info.wps)           sw.puts(" WPS");
+                if (wifi_info.ftm_responder) sw.puts(" FTMr");
+                if (wifi_info.ftm_initiator) sw.puts(" FTMi");
+
+                sw.puts(" [");
+                if (wifi_info.country.cc[0] != '\0') {
+                    sw.printf("%-2.2s", wifi_info.country.cc);
+                }
+                const char oix = wifi_info.country.cc[2];
+                switch(oix) {
+                    case '\0':
+                        break;
+                    case ' ':
+                    case 'O':
+                    case 'I':
+                    case 'X':
+                        sw.putc(oix);
+                        break;
+                    default:
+                        sw.printf("%u", oix);
+                }
+
+                snprintf(closure->bssid_str, std::size(closure->bssid_str), "%02hhX:%02hhX:%02hhX:%02hhX:%02hhX:%02hhX", wifi_info.bssid[0], wifi_info.bssid[1], wifi_info.bssid[2], wifi_info.bssid[3], wifi_info.bssid[4], wifi_info.bssid[5]);
+
+                sw.printf("] %hhidBm, BSSID %.8s:XX:XX:XX", wifi_info.rssi, closure->bssid_str);
+
+                logger.printfln("Connected to WiFi: %s", buf);
+            }
+
+            this->runtime_sta->was_connected = true;
+
+            closure->now = now_us();
+            this->runtime_sta->last_connected = closure->now;
+
+            // Transfer ownership, will free the whole closure.
+            task_scheduler.scheduleOnceNoAlloc(&closure->task_buf, true, [this, closure]() {
+                state.get("sta_bssid")->updateString(closure->bssid_str);
+                state.get("connection_start")->updateUptime(closure->now);
+                state.get("sta_disconnect_reason")->updateEnum(WifiDisconnectReason::None);
+            });
+        },
+        ARDUINO_EVENT_WIFI_STA_CONNECTED);
+
+    WiFi.onEvent([this](arduino_event_id_t /*event*/, arduino_event_info_t info) {
+            // Sometimes the ARDUINO_EVENT_WIFI_STA_CONNECTED is not fired.
+            // Instead we get the ARDUINO_EVENT_WIFI_STA_GOT_IP twice?
+            // Make sure that the state is set to connected here,
+            // or else MQTT will never attempt to connect.
+            this->runtime_sta->was_connected = true;
+
+            struct closure_t {
+                aligned_storage<Task> task_buf;
+                uint32_t subnet;
+                char ip_str[INET_ADDRSTRLEN];
+            };
+
+            closure_t *closure = new closure_t;
+
+            const esp_netif_ip_info_t &ip_info = info.got_ip.ip_info;
+            tf_ip4addr_ntoa(&ip_info.ip, closure->ip_str, ARRAY_SIZE(closure->ip_str));
+            char gw_str[INET_ADDRSTRLEN];
+            tf_ip4addr_ntoa(&ip_info.gw, gw_str, ARRAY_SIZE(gw_str));
+            closure->subnet = ip_info.netmask.addr;
+
+            logger.printfln("Got IP address: %s/%hhu, GW %s", closure->ip_str, tf_ip4addr_mask2cidr(ip4_addr_t{closure->subnet}), gw_str);
+
+            const auto gateway = ip_info.gw.addr;
+
+            tcpip_callback([](void *param) {
+                WiFi.STA.setRoutePrio(reinterpret_cast<int>(param)); // Prefer WiFi over Ethernet, which has priority 50, only if a gateway is configured.
+                esp_netif_set_default_netif(NULL); // trigger immediate re-selection of default interface
+            }, reinterpret_cast<void *>(gateway == 0 ? 40 : 100));
+
+            // Transfer ownership, will free the whole closure.
+            task_scheduler.scheduleOnceNoAlloc(&closure->task_buf, true, [this, closure]() {
+                char subnet_str[INET_ADDRSTRLEN];
+                tf_ip4addr_ntoa(&closure->subnet, subnet_str, ARRAY_SIZE(subnet_str));
+
+                state.get("sta_ip")->updateString(closure->ip_str);
+                state.get("sta_subnet")->updateString(subnet_str);
+            });
+        },
+        ARDUINO_EVENT_WIFI_STA_GOT_IP);
+
+    WiFi.onEvent([this](arduino_event_id_t /*event*/, arduino_event_info_t info) {
+            struct closure_t {
+                aligned_storage<Task> task_buf;
+                esp_ip6_addr_t ip6;
+            };
+
+            closure_t *closure = new closure_t;
+
+            memcpy(&closure->ip6, &info.got_ip6.ip6_info.ip, sizeof(closure->ip6));
+
+            // Transfer ownership, will free the whole closure.
+            task_scheduler.scheduleOnceNoAlloc(&closure->task_buf, true, [this, closure]() {
+                const esp_ip6_addr_t *ip6 = &closure->ip6;
+
+                char ip6_str[INET6_ADDRSTRLEN];
+                tf_ip6addr_ntoa(ip6, ip6_str, std::size(ip6_str));
+
+                const esp_ip6_addr_type_t type = esp_netif_ip6_get_addr_type(const_cast<esp_ip6_addr_t *>(ip6)); // const_cast is safe because the called function will only read the input.
+
+                uint16_t type_flags = 0;
+                const char *type_msg;
+
+                switch (type) {
+                    case ESP_IP6_ADDR_IS_GLOBAL: {
+                        type_flags |= IPV6_ADDR_FLAG_GLOBAL;
+                        type_msg = "global";
+                        break;
+                    }
+                    case ESP_IP6_ADDR_IS_LINK_LOCAL: {
+                        type_flags |= IPV6_ADDR_FLAG_LINK_LOCAL;
+                        type_msg = "link-local";
+                        break;
+                    }
+                    case ESP_IP6_ADDR_IS_SITE_LOCAL: {
+                        type_flags |= IPV6_ADDR_FLAG_SITE_LOCAL;
+                        type_msg = "site local";
+                        break;
+                    }
+                    case ESP_IP6_ADDR_IS_UNIQUE_LOCAL: {
+                        type_flags |= IPV6_ADDR_FLAG_UNIQUE_LOCAL;
+                        type_msg = "unique local";
+                        break;
+                    }
+                    case ESP_IP6_ADDR_IS_IPV4_MAPPED_IPV6:
+                        type_flags |= IPV6_ADDR_FLAG_IPV4_MAPPED_IPV6;
+                        type_msg = "IPv4-mapped";
+                        break;
+                    case ESP_IP6_ADDR_IS_UNKNOWN:
+                    default: {
+                        type_msg = "unknown";
+                    }
+                }
+
+                Config *state_ip6 = static_cast<Config *>(this->state.get("sta_ip6"));
+                Config *entry;
+                Config *addr;
+
+                const size_t state_addr_count = state_ip6->count();
+                for (size_t i = 0; i < state_addr_count; i++) {
+                    entry = static_cast<Config *>(state_ip6->get(i));
+                    addr  = static_cast<Config *>(entry->get("addr"));
+                    if (addr->asString() == ip6_str) {
+                        const uint16_t flags = entry->get("flags")->asUint16();
+
+                        if ((flags & IPV6_ADDR_FLAG_STATIC) == 0) {
+                            logger.printfln("Received duplicate %s IPv6 address: %s", type_msg, ip6_str);
+                        }
+
+                        return;
+                    }
+                }
+
+                const char *static_msg = "";
+
+                for (size_t i = 0; i < runtime_sta->ip6_address_count; i++) {
+                    const esp_ip6_addr_t *static_ip6 = &(runtime_sta->ip6[i].addr);
+
+                    if (memcmp(&static_ip6->addr, ip6->addr, sizeof(static_ip6->addr)) == 0) {
+                        type_flags |= IPV6_ADDR_FLAG_STATIC;
+                        static_msg = "static ";
+                        break;
+                    }
+                }
+
+                logger.printfln("Got %s%s IPv6 address: %s", static_msg, type_msg, ip6_str);
+
+                if (state_addr_count >= CONFIG_LWIP_IPV6_NUM_ADDRESSES) {
+                    logger.printfln("Can't add new IPv6 address to state: array full (%zu)", state_addr_count);
+                    return;
+                }
+
+                entry = static_cast<Config *>(state_ip6->add());
+
+                entry->get("addr" )->updateString(ip6_str);
+                entry->get("flags")->updateUint(type_flags);
+            });
+        },
+        ARDUINO_EVENT_WIFI_STA_GOT_IP6);
+
+    WiFi.onEvent([this](arduino_event_id_t /*event*/, arduino_event_info_t /*info*/) {
+            if(!this->runtime_sta->was_connected)
+                return;
+
+            this->runtime_sta->was_connected = false;
+
+            logger.printfln("Lost IP. Forcing disconnect and reconnect of WiFi");
+            WiFi.disconnect(false, true);
+
+            task_scheduler.scheduleOnce([this](){
+                state.get("sta_ip")->updateString("0.0.0.0");
+                state.get("sta_subnet")->updateString("0.0.0.0");
+                state.get("sta_ip6")->removeAll();
+                state.get("sta_bssid")->updateString("");
+            });
+        },
+        ARDUINO_EVENT_WIFI_STA_LOST_IP);
+}
+
+bool Wifi::apply_sta_config_and_connect()
+{
+    if (get_connection_state() == WifiState::Connected) {
+        return false;
+    }
+
+    WiFi.persistent(false);
+    WiFi.setAutoReconnect(false);
+    WiFi.disconnect(false, true);
+    WiFi.setScanMethod(WIFI_ALL_CHANNEL_SCAN);
+
+    if (runtime_sta->ip.addr == 0) {
+        WiFi.STA.config(static_cast<uint32_t>(0), static_cast<uint32_t>(0), static_cast<uint32_t>(0));
+    } else {
+        const ip4_addr_t subnet = tf_ip4addr_cidr2mask(runtime_sta->subnet_cidr);
+
+        WiFi.STA.config({runtime_sta->ip.addr},
+                        {runtime_sta->gateway.addr},
+                        {subnet.addr},
+                        {runtime_sta->dns.addr},
+                        {runtime_sta->dns2.addr});
+    }
+
+    const char *ssid = runtime_sta->ssid_passphrase;
+    const uint8_t *bssid;
+
+    if (runtime_sta->bssid_lock) {
+        bssid = runtime_sta->bssid;
+        logger.printfln("Connecting to WiFi, BSSID lock enabled");
+    } else {
+        bssid = nullptr;
+        logger.printfln("Connecting to WiFi");
+    }
+
+    const EapConfigID eap_config_id = runtime_sta->runtime_eap ? static_cast<EapConfigID>(runtime_sta->runtime_eap->eap_config_id) : EapConfigID::None;
+
+    switch (eap_config_id) {
+        case EapConfigID::None: {
+            const char *sta_passphrase = runtime_sta->ssid_passphrase + runtime_sta->passphrase_offset;
+            WiFi.setMinSecurity(WIFI_AUTH_WPA_WPA2_PSK);
+            WiFi.STA.connect(ssid, sta_passphrase, 0, bssid, true);
+            break;
+        }
+        case EapConfigID::TLS: {
+            const eap_runtime *eap = runtime_sta->runtime_eap;
+            WiFi.setMinSecurity(WIFI_AUTH_WPA2_ENTERPRISE);
+            WiFi.STA.connect(ssid,
+                    wpa2_auth_method_t::WPA2_AUTH_TLS,
+                    eap->identity_credentials,
+                    nullptr, // no username
+                    nullptr, // no password
+                    reinterpret_cast<const char *>(eap->ca_cert.get()),
+                    reinterpret_cast<const char *>(eap->client_cert.get()),
+                    reinterpret_cast<const char *>(eap->client_key.get()),
+                    -1, // ttls_phase2_type
+                    0,  // auto-channel
+                    bssid,
+                    true); // connect
+            break;
+        }
+        /**
+         * The auth method can be hardcoded here because arduino is not controlling the actual method and we need to
+         * set the username and password.
+         * The user cert and key are unused because using them breaks it atm.
+        */
+        case EapConfigID::PEAP_TTLS: {
+            const eap_runtime *eap = runtime_sta->runtime_eap;
+            WiFi.setMinSecurity(WIFI_AUTH_WPA2_ENTERPRISE);
+            WiFi.STA.connect(ssid,
+                    wpa2_auth_method_t::WPA2_AUTH_PEAP,
+                    eap->identity_credentials,
+                    eap->identity_credentials + eap->username_offset,
+                    eap->identity_credentials + eap->password_offset,
+                    reinterpret_cast<const char *>(eap->ca_cert.get()),
+                    nullptr, // user cert
+                    nullptr, // user key
+                    -1, // ttls_phase2_type
+                    0,  // auto-channel
+                    bssid,
+                    true); // connect
+            break;
+        }
+        default:
+            esp_system_abort("Invalid eap_config_id");
+    }
+    WiFi.setSleep(false);
+    return true;
+}
+
+void Wifi::start_sta_connection()
+{
+    task_scheduler.scheduleUncancelable([this]() {
+        int rssi = -127;
+        esp_wifi_sta_get_rssi(&rssi); // Ignore failure, rssi is still -127.
+        state.get("sta_rssi")->updateInt(rssi);
+
+        if (runtime_sta->connect_tries < 3 || runtime_sta->connect_tries % 3 == 2) {
+            if (!apply_sta_config_and_connect()) {
+                runtime_sta->connect_tries = 0; // Couldn't connect because STA is already connected.
+            }
+        }
+        runtime_sta->connect_tries++;
+    }, 10_s, 10_s);
+
+    if (!apply_sta_config_and_connect()) {
+        logger.printfln("Couldn't apply STA config and connect initially");
+    }
+}
+
+void Wifi::setup()
+{
+    initialized = true;
+
+    if (!api.restorePersistentConfig("wifi/sta_config", &sta_config, API::SavedDefaultConfig::Keep)) {
+#ifdef DEFAULT_WIFI_STA_ENABLE
+        sta_config.get("enable_sta")->updateBool(DEFAULT_WIFI_STA_ENABLE);
+#endif
+#ifdef DEFAULT_WIFI_STA_SSID
+        sta_config.get("ssid")->updateString(String(DEFAULT_WIFI_STA_SSID));
+#endif
+#ifdef DEFAULT_WIFI_STA_PASSPHRASE
+        sta_config.get("passphrase")->updateString(String(DEFAULT_WIFI_STA_PASSPHRASE));
+#endif
+    }
+
+    if (!api.restorePersistentConfig("wifi/ap_config", &ap_config, API::SavedDefaultConfig::Keep)) {
+#ifdef DEFAULT_WIFI_AP_ENABLE
+        ap_config.get("enable_ap")->updateBool(DEFAULT_WIFI_AP_ENABLE);
+#endif
+#ifdef DEFAULT_WIFI_AP_FALLBACK_ONLY
+        ap_config.get("ap_fallback_only")->updateBool(DEFAULT_WIFI_AP_FALLBACK_ONLY);
+#endif
+#ifdef DEFAULT_WIFI_AP_SSID
+        ap_config.get("ssid")->updateString(String(DEFAULT_WIFI_AP_SSID));
+#else
+        ap_config.get("ssid")->updateString(esp32_common.get_default_name());
+#endif
+#ifdef DEFAULT_WIFI_AP_PASSPHRASE
+        String passphrase{DEFAULT_WIFI_AP_PASSPHRASE};
+#else
+        String passphrase = esp32_common.get_default_wifi_passphrase();
+#endif
+        if (passphrase.isEmpty()) {
+            // Prevent accidentally starting the AP with no passphrase
+            logger.printfln("No default passphrase set. Disabling AP.");
+            ap_config.get("enable_ap")->updateBool(false);
+        } else {
+            ap_config.get("passphrase")->updateString(passphrase);
+
+            // Best-effort clearing of temporary passphrase String
+            const size_t len = passphrase.length();
+            for (size_t i = 0; i < len; i++) {
+                passphrase.setCharAt(i, 'x');
+            }
+        }
+    }
+
+    if (ap_config.get("enable_ap")->asBool()) {
+        apply_ap_config(true); // Allocate runtime_ap, but don't start the AP yet.
+    }
+
+    if (sta_config.get("enable_sta")->asBool()) {
+        apply_sta_config(true); // Allocate runtime_sta, but don't start the connection yet.
+    }
+
+    if (runtime_sta) {
+        register_sta_event_handlers();
+    }
+
+    if (runtime_ap) {
+        register_ap_event_handlers();
+    }
+
+    WiFi.onEvent([this](arduino_event_id_t event, arduino_event_info_t info) {
+            const wifi_event_sta_scan_done_t *scan_info = &info.wifi_scan_done;
+
+            if (scan_info->status != 0) {
+                logger.printfln("Scan failed");
+                return;
+            }
+
+            const size_t network_count = scan_info->number;
+            logger.printfln("%zu networks found", network_count);
+
+#if MODULE_WS_AVAILABLE()
+            if (!ws.haveActiveClient()) {
+                return;
+            }
+
+            StringBuilder sb;
+
+            if (ws.pushRawStateUpdateBegin(&sb, MAX_SCAN_RESULT_LENGTH * network_count + 2, "wifi/scan_results")) {
+                get_scan_results(&sb, network_count);
+
+                // Discard internal data of found WiFis if the AP isn't currently performing automatic channel selection.
+                if (this->runtime_ap == nullptr || this->runtime_ap->scan_start_time_s == 0) {
+                    WiFi.scanDelete();
+                }
+
+                ws.pushRawStateUpdateEnd(&sb);
+            }
+#endif
+        },
+        ARDUINO_EVENT_WIFI_SCAN_DONE);
+
+    // For some reason, WiFi.setHostname only writes a temporary buffer that is passed to the IDF when calling WiFi.mode.
+    // As we have the same hostname for STA and AP, it is sufficient to set the hostname here once and never call WiFi.softAPsetHostname.
+#if MODULE_NETWORK_AVAILABLE()
+    const String &hostname = network.get_hostname();
+#else
+    const String hostname = esp32_common.get_default_name();
+#endif
+    WiFi.setHostname(hostname.c_str());
+
+    WiFi.persistent(false);
+    WiFi.disableSTA11b(runtime_sta == nullptr || !runtime_sta->enable_11b);
+
+    // STA mode is always on so that we can scan for WiFis and the HWRNG has entropy.
+    if (!WiFi.mode(WIFI_STA)) {
+        logger.printfln("WiFi STA enable failed");
+        return;
+    }
+    WiFi.setAutoReconnect(false);
+
+    // Check if WiFi connected automatically and erase configuration in that case.
+    if (WiFi.status() != WL_STOPPED) {
+        WiFi.disconnect(false, true);
+    }
+
+    // We don't need the additional speed of HT40 and it only causes more errors.
+    // Cannot be set in apply_sta_config_and_connect() and must be set directly after enabling station mode
+    // because it apparently clobbers some interface settings, including IGMP memberships.
+    esp_err_t err = esp_wifi_set_bandwidth(WIFI_IF_STA, WIFI_BW_HT20);
+    if (err != ESP_OK) {
+        logger.printfln("Setting HT20 for station failed: %s (%i)", esp_err_to_name(err), err);
+    }
+
+    esp_wifi_set_country_code("DE", true);
+    esp_wifi_set_ps(WIFI_PS_NONE);
+
+    // Request max TX power. The actual power will be limited by the country setting above.
+    WiFi.setTxPower(WIFI_POWER_21dBm);
+
+    if (runtime_ap) {
+        if (!runtime_ap->ap_fallback_only) {
+            apply_soft_ap_config_and_start();
+        } else {
+            task_scheduler.scheduleUncancelable([this]() {
+                bool connected = this->state.get("connection_state")->asEnum<WifiState>() == WifiState::Connected;
+
+#if MODULE_ETHERNET_AVAILABLE()
+                connected = connected || ethernet.get_connection_state() == EthernetState::Connected;
+#endif
+
+                // Start softAP immediately, but stop it only if
+                // we got a connection in the first 30 seconds after start-up
+                // or we had a connection for 5 minutes.
+
+                if (connected == this->runtime_ap->soft_ap_running) {
+                    if (this->runtime_ap->soft_ap_running) {
+                        ++this->runtime_ap->stop_soft_ap_runs;
+                        if (now_us() < 30_s || this->runtime_ap->stop_soft_ap_runs > 5 * 6) { // 5 * 6 * 10_s task delay = 5 minutes
+                            logger.printfln("Network connected. Stopping soft AP");
+                            WiFi.softAPdisconnect(true);
+                            this->runtime_ap->soft_ap_running = false;
+                        }
+                    } else {
+                        this->runtime_ap->stop_soft_ap_runs = 0;
+
+                        apply_soft_ap_config_and_start();
+                    }
+                }
+            },
+            runtime_sta != nullptr // STA enabled
+#if MODULE_ETHERNET_AVAILABLE()
+            || (ethernet.is_enabled() && ethernet.get_connection_state() != EthernetState::NotConnected)
+#endif
+            ? 30_s : 6_s, 10_s); // When Ethernet is not connected yet, wait 6 seconds: 4s for link up, 1s for DHCP, 1s for tolerance.
+        }
+
+        task_scheduler.scheduleUncancelable([this]() {
+            state.get("ap_state")->updateUint(get_ap_state());
+        }, 5_s, 5_s);
+    }
+
+    if (runtime_sta != nullptr) { // STA enabled
+        task_scheduler.scheduleUncancelable([this]() {
+            state.get("connection_state")->updateEnum(get_connection_state());
+        }, 1_s);
+
+        wl_status_t old_status = WL_STOPPED;
+        wl_status_t status;
+        micros_t state_deadline;
+
+        // The WiFi status can change a few times after enabling station mode.
+        // Wait for it to be in a stable disconnected state for 10ms.
+        // Don't hang if this takes longer than 1s. It usually takes only 12ms.
+        micros_t check_deadline = now_us() + 1_s;
+        for (;;) {
+            status = WiFi.STA.status();
+            if (status != old_status) {
+                if (status == WL_DISCONNECTED) {
+                    state_deadline = now_us() + 10_ms;
+                }
+                old_status = status;
+            }
+
+            if (status == WL_DISCONNECTED && deadline_elapsed(state_deadline)) {
+                break;
+            }
+
+            if (deadline_elapsed(check_deadline)) {
+                logger.printfln("WiFi stuck in state %i? Continuing...", status);
+                break;
+            }
+        }
+
+        if (runtime_ap == nullptr || runtime_ap->scan_start_time_s == 0) {
+            start_sta_connection();
+        } else {
+            // Discard returned task ID because the task will cancel itself.
+            (void)task_scheduler.scheduleWithFixedDelay([this]() {
+                if (this->runtime_ap->scan_start_time_s != 0) {
+                    // Channel selection is running.
+                    return;
+                }
+
+                task_scheduler.cancel(task_scheduler.currentTaskId());
+                this->start_sta_connection();
+            }, 2_s, 500_ms);
+        }
+    }
+}
+
+void Wifi::get_scan_results(StringBuilder *sb, size_t network_count)
+{
+    sb->putc('[');
+
+    for (size_t i = 0; i < network_count; ++i) {
+        const wifi_ap_record_t *ap_record = reinterpret_cast<wifi_ap_record_t *>(WiFi.getScanInfoByIndex(static_cast<int>(i)));
+        if (!ap_record) {
+            continue;
+        }
+
+        if (i > 0) {
+            sb->putc(',');
+        }
+
+        char json_buf[2 + 64] = ""; // use twice the maximum SSID length to have room for escaping
+        TFJsonSerializer json{json_buf, sizeof(json_buf)};
+
+        json.addString(reinterpret_cast<const char *>(ap_record->ssid));
+        json.end();
+
+        const uint8_t *bssid = ap_record->bssid;
+
+        sb->printf("{\"ssid\":%s,\"bssid\":\"%02hhX:%02hhX:%02hhX:%02hhX:%02hhX:%02hhX\",\"rssi\":%hhi,\"channel\":%hhu,\"encryption\":%i}",
+                   json_buf,
+                   bssid[0], bssid[1], bssid[2], bssid[3], bssid[4], bssid[5],
+                   ap_record->rssi,
+                   ap_record->primary,
+                   ap_record->authmode);
+    }
+
+    sb->putc(']');
+}
+
+// Called from Arduino event task
+[[gnu::noinline]]
+void Wifi::apply_ipv6_to_interface()
+{
+    if (!runtime_sta->want_ipv6) {
+        return;
+    }
+
+    WiFi.STA.enableIPv6(true);
+
+    esp_netif_t *sta_netif = WiFi.STA.netif();
+
+    for (size_t i = 0; i < runtime_sta->ip6_address_count; i++) {
+        ip6_addr_with_flags *ip6_with_flags = runtime_sta->ip6 + i;
+
+        char ip6_str[INET6_ADDRSTRLEN];
+        tf_ip6addr_ntoa(&ip6_with_flags->addr, ip6_str, std::size(ip6_str));
+
+        if ((ip6_with_flags->flags & IPV6_ADDR_FLAG_NEW) == 0) {
+            logger.printfln("Skipping already set address %s 0x%x", ip6_str, ip6_with_flags->flags);
+            continue;
+        }
+
+        ip6_with_flags->flags &= static_cast<uint16_t>(~IPV6_ADDR_FLAG_NEW);
+
+        const bool preferred = (ip6_with_flags->flags & IPV6_ADDR_FLAG_PREFERRED) != 0;
+
+        const esp_err_t err = esp_netif_add_ip6_address(sta_netif, ip6_with_flags->addr, preferred);
+
+        if (err != ESP_OK) {
+            logger.printfln("Failed to set static IPv6 address %s: %s (0x%04X)", ip6_str, esp_err_to_name(err), static_cast<unsigned>(err));
+        }
+    }
+
+    // TODO DNS
+    // String dns_str = config.get("dns6")->asString();
+    // if (dns_str != "::") {
+    //     // IPv6 DNS ist set as backup so its the lowest priority. Fallback is not enabled.
+    //     esp_netif_dns_type_t dns_type = ESP_NETIF_DNS_BACKUP;
+
+    //     // Check configured DNS
+    //     esp_netif_dns_info_t get_dns_info;
+    //     esp_netif_get_dns_info(sta_netif, dns_type, &get_dns_info);
+
+    //     esp_ip6_addr_t dns_addr;
+    //     esp_netif_str_to_ip6(dns_str.c_str(), &dns_addr);
+    //     esp_netif_dns_info_t dns_info;
+    //     dns_info.ip.type = ESP_IPADDR_TYPE_V6;
+    //     dns_info.ip.u_addr.ip6 = dns_addr;
+
+    //     if ((get_dns_info.ip.type != ESP_IPADDR_TYPE_V6 || memcmp(&get_dns_info.ip.u_addr.ip6, &dns_info.ip.u_addr.ip6, sizeof(esp_ip6_addr_t)) != 0)) {
+    //         esp_netif_set_dns_info(sta_netif, dns_type, &dns_info);
+    //     }
+    // }
+
+    // TODO: Cannot unset DNS6, so we just leave it in this case
+}
+
+// Called from main task
+[[gnu::noinline]]
+void Wifi::apply_ipv6_sta_config(sta_runtime *new_runtime)
+{
+    const bool want_ipv6 = sta_config.get("enable_ipv6")->asBool();
+    new_runtime->want_ipv6 = want_ipv6;
+
+    if (!want_ipv6) {
+        new_runtime->ip6_address_count = 0;
+        return;
+    }
+
+    ip6_addr_with_flags *ip6_addresses_new = new_runtime->ip6;
+    const char *ip6_str_unsafe[MAX_STATIC_IPV6_ADDRESSES]; // Pointers only valid during the execution of this function.
+    const Config *config_ip6 = static_cast<const Config *>(this->sta_config.get("ip6"));
+    const size_t addr_count_new = config_ip6->count();
+
+    assert(addr_count_new <= MAX_STATIC_IPV6_ADDRESSES);
+
+    for (size_t i = 0; i < addr_count_new; i++) {
+        ip6_addr_with_flags *ip6_new = ip6_addresses_new + i;
+        const Config *config_ip6_elem = static_cast<const Config *>(config_ip6->get(i));
+        ip6_str_unsafe[i] = config_ip6_elem->get("addr" )->asUnsafeCStr();
+        ip6_new->flags    = config_ip6_elem->get("flags")->asUint16() | IPV6_ADDR_FLAG_NEW;
+
+        if (esp_netif_str_to_ip6(ip6_str_unsafe[i], &ip6_new->addr) != ESP_OK) {
+            logger.printfln("Failed to parse IPv6 address: '%s'", ip6_str_unsafe[i]);
+            ip6_new->flags = std::numeric_limits<decltype(ip6_new->flags)>::max();
+            continue;
+        }
+    }
+
+    new_runtime->ip6_address_count = addr_count_new & 0x7;
+}
+
+void Wifi::start_scan()
+{
+    // Abort if a scan is running. This is safe, because
+    // the state will change to SCAN_FAILED if it timed out.
+    if (WiFi.scanComplete() == WIFI_SCAN_RUNNING)
+        return;
+
+    logger.printfln("Scanning for WiFi networks...");
+    WiFi.scanDelete();
+
+    // WIFI_SCAN_FAILED also means the scan is done.
+    if (WiFi.scanComplete() != WIFI_SCAN_FAILED)
+        return;
+
+    if (WiFi.scanNetworks(true, true) != WIFI_SCAN_FAILED) {
+        return;
+    }
+
+    logger.printfln("Starting WiFi scan failed. Maybe a connection attempt is running concurrently. Retrying once in 6 seconds.");
+    task_scheduler.scheduleOnce([this]() {
+        if (WiFi.scanNetworks(true, true) == WIFI_SCAN_FAILED) {
+            logger.printfln("Second scan attempt failed. Giving up.");
+            return;
+        }
+    }, 6_s);
+}
+
+void Wifi::register_urls()
+{
+    api.addState("wifi/state", &state, {}, {"sta_mac", "sta_bssid", "ap_bssid"});
+
+    api.addCommand("wifi/scan", Config::Null(), {}, [this](Language /*language*/, String &/*errmsg*/) {
+        start_scan();
+    }, true);
+
+    server.on("/wifi/scan_results", HTTP_GET, [this](WebServerRequest request) {
+        int16_t network_count = WiFi.scanComplete();
+
+        if (network_count == WIFI_SCAN_RUNNING) {
+            return request.send_plain(200, "scan in progress");
+        }
+
+        if (network_count < 0) {
+            return request.send_plain(200, "scan failed");
+        }
+
+        StringBuilder sb;
+
+        if (!sb.setCapacity(MAX_SCAN_RESULT_LENGTH * static_cast<size_t>(network_count) + 2)) {
+            return request.send_plain(200, "scan out of memory");
+        }
+
+        get_scan_results(&sb, static_cast<size_t>(network_count));
+
+        return request.send_json(200, sb);
+    });
+
+    api.addPersistentConfig("wifi/sta_config", &sta_config, {"passphrase", "password"}, {"ssid", "bssid"});
+    api.addPersistentConfig("wifi/ap_config", &ap_config, {"passphrase"});
+
+    // By now, the STA interface is up and the MAC can be queried.
+    uint8_t mac[6];
+    if (WiFi.STA.macAddress(mac) != nullptr) {
+        char mac_str[18];
+        const size_t len = snprintf_u(mac_str, std::size(mac_str), "%02X:%02X:%02X:%02X:%02X:%02X", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+
+        state.get("sta_mac")->updateString(String{mac_str, len});
+    }
+}
+
+WifiState Wifi::get_connection_state() const
+{
+    if (runtime_sta == nullptr)
+        return WifiState::NotConfigured;
+
+    switch (WiFi.status()) {
+        case WL_CONNECT_FAILED:
+        case WL_CONNECTION_LOST:
+        case WL_DISCONNECTED:
+        case WL_NO_SSID_AVAIL:
+            return WifiState::NotConnected;
+        case WL_SCAN_COMPLETED: // Part of the enum but apparently never set.
+        case WL_CONNECTED:
+            return WifiState::Connected;
+        case WL_STOPPED:
+        case WL_NO_SHIELD:
+            return WifiState::NotConfigured;
+        case WL_IDLE_STATUS:
+            return WifiState::Connecting;
+        default:
+            esp_system_abort("Invalid WiFi status");
+    }
+}
+
+bool Wifi::is_sta_enabled() const
+{
+    return runtime_sta != nullptr;
+}
+
+bool Wifi::is_sta_enabled_in_config() const
+{
+    return sta_config.get("enable_sta")->asBool();
+}
+
+bool Wifi::is_ap_enabled_in_config() const
+{
+    return ap_config.get("enable_ap")->asBool();
+}
+
+uint8_t Wifi::get_ap_state()
+{
+    if (runtime_ap == nullptr)
+        return 0; // Disabled
+
+    if (!runtime_ap->ap_fallback_only)
+        return 1; // Enabled
+
+    if (!runtime_ap->soft_ap_running)
+        return 2; // Fallback inactive
+
+    return 3; // Fallback active
+}
+
+int Wifi::get_sta_rssi() const
+{
+    return state.get("sta_rssi")->asInt();
+}
+
+const char* Wifi::get_ap_ssid() const
+{
+    if (runtime_ap) {
+        return runtime_ap->ip_ssid_passphrase + runtime_ap->ssid_offset;
+    } else {
+        return ap_config.get("ssid")->asUnsafeCStr();
+    }
+}
+
+const char* Wifi::get_ap_ip() const
+{
+    if (runtime_ap) {
+        return runtime_ap->ip_ssid_passphrase;
+    } else {
+        return ap_config.get("ip")->asUnsafeCStr();
+    }
+}
+
+const char* Wifi::get_ap_passphrase() const
+{
+    if (runtime_ap) {
+        return runtime_ap->ip_ssid_passphrase + runtime_ap->passphrase_offset;
+    } else {
+        return ap_config.get("passphrase")->asUnsafeCStr();
+    }
+}

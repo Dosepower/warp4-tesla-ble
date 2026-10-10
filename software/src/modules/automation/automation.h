@@ -1,0 +1,92 @@
+/* esp32-firmware
+ * Copyright (C) 2023 Frederic Henrichs <frederic@tinkerforge.com>
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, write to the
+ * Free Software Foundation, Inc., 59 Temple Place - Suite 330,
+ * Boston, MA 02111-1307, USA.
+ */
+
+#pragma once
+
+#include <map>
+#include <vector>
+
+#include "module.h"
+#include "config.h"
+#include "generated/automation_trigger_id.enum.h"
+#include "generated/automation_action_id.enum.h"
+#include "automation_backend.h"
+
+class Automation final : public IModule, public IAutomationBackend
+{
+public:
+    typedef std::function<void(const Config *)>    ActionCb;
+    typedef std::function<String(const Config *)> ValidatorCb;
+
+    struct ActionValue {
+        ActionCb callback;
+        ValidatorCb validator;
+        bool enable;
+    };
+
+    struct TriggerValue {
+        ValidatorCb validator;
+        bool enable;
+    };
+
+    typedef std::map<AutomationActionID, ActionValue>   ActionMap;
+    typedef std::map<AutomationTriggerID, TriggerValue> TriggerMap;
+    typedef std::vector<std::pair<size_t, Config *>>    ConfigVec;
+
+    Automation();
+
+    void pre_setup() override;
+    void setup() override;
+    void register_urls() override;
+
+    void register_action(AutomationActionID id, const Config &cfg, ActionCb &&callback, ValidatorCb &&validator = nullptr, bool enable = true);
+    void register_trigger(AutomationTriggerID id, const Config &cfg, ValidatorCb &&validator = nullptr, bool enable = true);
+
+    void set_enabled(AutomationActionID id, bool enable);
+    void set_enabled(AutomationTriggerID id, bool enable);
+
+    bool trigger(AutomationTriggerID number, void *data, IAutomationBackend *backend);
+    bool has_task_with_trigger(AutomationTriggerID number);
+    bool has_task_with_action(AutomationActionID number);
+    bool has_triggered(const Config *conf, void *data) override;
+    ConfigVec get_configured_triggers(AutomationTriggerID number);
+
+    void register_on_config_applied(std::function<void()> &&callback);
+
+private:
+    void apply_config();
+    void handle_cron_task();
+
+    Config config_tasks_prototype;
+    Config state_actions_prototype;
+    Config state_triggers_prototype;
+    ConfigRoot config;
+    ConfigRoot config_in_use;
+    ConfigRoot state;
+
+    ActionMap   action_map;
+    TriggerMap  trigger_map;
+    std::vector<ConfUnionPrototype<AutomationTriggerID>>    trigger_prototypes;
+    std::vector<ConfUnionPrototype<AutomationActionID>>     action_prototypes;
+    std::unique_ptr<micros_t[]> last_run;
+
+    std::vector<uint64_t> pending_delayed_tasks;
+    uint64_t cron_task_id = 0;
+    std::vector<std::function<void()>> on_config_applied_callbacks;
+};

@@ -1,0 +1,121 @@
+/** @jsxImportSource preact */
+import { h } from "preact";
+import { __ } from "../../ts/translation";
+import { toLocaleFixed } from "../../ts/util";
+let x = {
+    "day_ahead_prices": {
+        "status": {},
+        "navbar": {
+            "day_ahead_prices": "Dynamischer Strompreis"
+        },
+        "content": {
+            "day_ahead_prices": "Dynamischer Strompreis",
+            "enable_day_ahead_prices": "Börsenstrompreis aktiviert",
+            "enable_day_ahead_prices_desc": "Bezieht die Day-Ahead-Börsenstrompreise von der konfigurierten Quelle und stellt diese intern für andere Funktionen bereit.",
+            "no_data": "Keine Daten vorhanden",
+            "loading": "Lade Daten...",
+            "time": "Uhrzeit",
+            "total_price": "Gesamtpreis",
+            "electricity_price": "Strompreis",
+            "spot_market_price": "Börsenpreis",
+            "spot_market_price_incl_vat": "Börsenpreis inkl. MwSt",
+            "calendar_price": "Kalenderpreis",
+            "calendar_price_incl_vat": "Kalenderpreis inkl. MwSt",
+            "grid_fees_plus_taxes": "Netzentgelte + Steuern",
+            "surcharge": "Preisaufschlag",
+            "source": "Quelle",
+            "source_spot_market_desc": /*FFN*/(api_url: string) => <>Die Daten werden von <a href="https://www.entsoe.eu/about/" target="_blank">ENTSO-E</a> bereitgestellt und über <a href={api_url}>{api_url.replace("https://", "").replace(/\/$/, "")}</a> bezogen.</> /*NF*/,
+            "source_spot_market": "Automatisch über Strombörse",
+            "source_push": "Push über API",
+            "source_push_desc": <>Im Push-Modus werden Preisdaten über den API-Endpunkt {options.WARP_DOC_BASE_URL.length > 0 ? <a href={`${options.WARP_DOC_BASE_URL}/de/docs/interfaces/mqtt_http/api_reference/day_ahead_prices`} target="_blank">day_ahead_prices/prices_update</a> : <span>day_ahead_prices/prices_update</span>} bereitgestellt.</>,
+            "region": "Region",
+            "germany": "Deutschland",
+            "austria": "Österreich",
+            "luxembourg": "Luxemburg",
+            "belgium": "Belgien",
+            "resolution": "Auflösung",
+            "resolution_muted": "abhängig vom Stromanbieter",
+            "minutes15": "15 Minuten",
+            "minutes60": "60 Minuten",
+            "euro_divided_by_month": "€/Monat",
+            "grid_fees_and_taxes": "Netzentgelte und Steuern",
+            "electricity_provider_surcharge": "Preisaufschlag des Stromtarifs",
+            "electricity_provider_base_fee": "Grundgebühr des Stromtarifs",
+            "price_ct_per_kwh": "Preis [ct/kWh]",
+            "current_price": "Aktueller Strompreis",
+            "current_price_spot_market": "Aktueller Börsenpreis",
+            "current_price_calendar": "Aktueller Kalenderpreis",
+            "price_component_spot_market": "Börse",
+            "price_component_calendar": "Kalender",
+            "average_price": "Durchschnittspreis",
+            "now": "Jetzt",
+            "vat": "Mehrwertsteuer",
+            "vat_muted": "auf Börsenpreis und Kalenderpreis",
+            "extra_costs_help": <>
+                <p><strong>Optional: Zusatzkosten werden nur für die Darstellung des Preises verwendet, nicht für die Regelung!</strong></p>
+                <p>Die dynamischen Börsenstrompreise sind nur ein Teil der Stromkosten. Es fallen zusätzliche fixe Steuern, Netzentgelte und Aufschläge des spezifischen Stromtarifs an.</p>
+                <p>Eine der folgenden drei Einstellungen der Zusatzkosten wird empfohlen:</p>
+                <ul>
+                    <li>Zusatzkosten nicht konfigurieren: Es wird der Netto-Börsenpreis angezeigt.</li>
+                    <li>Mehrwertsteuer auf 0% konfigurieren, bei den anderen Kosten jeweils den Nettopreis eintragen: Es wird der Netto-Strompreis inkl. Gebühren angezeigt.</li>
+                    <li>Mehrwertsteuer auf z.B. 19% eintragen, bei den anderen Kosten jeweils den Bruttopreis eintragen: Es wird der Brutto-Strompreis inkl. Gebühren angezeigt.</li>
+                </ul>
+            </>,
+            "incl_all_costs": "inkl. aller Kosten",
+            "extra_costs": "Zusatzkosten",
+            "enable_calendar": "Preiskalender",
+            "enable_calendar_help": <>
+                <p>Der Preiskalender kann zur Umsetzung von <strong>Modul 3 nach § 14a EnWG</strong> verwendet werden. Modul 3 sieht zeitvariable Netzentgelte vor, bei denen in Schwachlastzeiten reduzierte und in Hochlastzeiten erhöhte Netzentgelte gelten.</p>
+                <p>Zur Konfiguration werden die Netzentgeltdifferenzen als Preisaufschläge im Kalender eingetragen. Zum Beispiel kann ein negativer Wert in Schwachlastzeiten (reduzierte Netzentgelte) und ein positiver Wert in Hochlastzeiten eingetragen werden. Diese Aufschläge werden zu den Day-Ahead-Börsenstrompreisen addiert.</p>
+                <p>Wenn der dynamische Strompreis deaktiviert ist, werden die Kalenderpreise direkt ohne Day-Ahead-Preise verwendet.</p>
+            </>,
+            "enable_calendar_desc": "Feste Preisaufschläge pro Wochentag und Uhrzeit zu den Day-Ahead-Preisen addieren.",
+            "enable_calendar_desc_standalone": "Festen Preis pro Wochentag und Uhrzeit definieren.",
+            "enable_calendar_muted": "z.B. für Modul 3 nach § 14a EnWG",
+            "calendar_mon": "Mo",
+            "calendar_tue": "Di",
+            "calendar_wed": "Mi",
+            "calendar_thu": "Do",
+            "calendar_fri": "Fr",
+            "calendar_sat": "Sa",
+            "calendar_sun": "So",
+            "calendar_prices": "Kalenderpreise",
+            "calendar_prices_muted": "Zellen auswählen und Preis eingeben",
+
+            "calendar_edit": "Kalender bearbeiten",
+            "calendar_apply": "Übernehmen",
+            "calendar_ct_kwh": "ct/kWh",
+            "calendar_selection": "Auswahl"
+        },
+        "automation": {
+            "trigger_text": /*FFN*/(type: number, comparison: number, value: number) => {
+                if (type == 0) {// average
+                    if (comparison == 0) { // greater
+                        return (<>Wenn der aktuelle Börsenstrompreis <b>größer</b> als <b>{toLocaleFixed(value, 1)} %</b> des Tagesdurchschnitt ist,{" "}</>)
+                    } else if (comparison == 1) { // less
+                        return (<>Wenn der aktuelle Börsenstrompreis <b>kleiner</b> als <b>{toLocaleFixed(value, 1)} %</b> des Tagesdurchschnitt ist,{" "}</>)
+                    }
+                } else if (type == 1) { // absolute
+                    if (comparison == 0) { // greater
+                        return (<>Wenn der aktuelle Börsenstrompreis <b>größer</b> als <b>{toLocaleFixed(value, 2)} ct</b> ist,{" "}</>)
+                    } else if (comparison == 1) { // less
+                        return (<>Wenn der aktuelle Börsenstrompreis <b>kleiner</b> als <b>{toLocaleFixed(value, 2)} ct</b> ist,{" "}</>)
+                    }
+                }
+                return (<>Unbekannt,{" "}</>)
+            }/*NF*/,
+            "comparative_value": "Vergleichswert",
+            "comparative_value_muted": "Der Vergleich findet auf dem Netto-Börsenstrompreis statt (ohne Netzentgelte, Steuern, Preisaufschläge etc.)",
+            "comparative_value_percent": "Prozentueller Vergleich zum Tagesdurchschnitt",
+            "comparative_value_absolute": "Vergleich zum absoluten Wert in Cent",
+            "comparison": "Vergleich",
+            "comparison_greater_than": "Größer als",
+            "comparison_less_than": "Kleiner als",
+            "value": "Wert",
+            "current_electricity_price": "Aktueller Strompreis"
+        },
+        "script": {
+            "save_failed": "Speichern der Strompreiseinstellungen fehlgeschlagen"
+        }
+    }
+}

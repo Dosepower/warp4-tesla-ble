@@ -1,0 +1,3568 @@
+/* esp32-firmware
+ * Copyright (C) 2020-2021 Erik Fleckstein <erik@tinkerforge.com>
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, write to the
+ * Free Software Foundation, Inc., 59 Temple Place - Suite 330,
+ * Boston, MA 02111-1307, USA.
+ */
+
+#include "charge_tracker.h"
+
+#include <esp_task.h>
+#include <memory>
+#include <vector>
+#include <LittleFS.h>
+#include <stdlib_noniso.h>
+#include <algorithm>
+#include <lwip/sockets.h>
+#include <mbedtls/sha256.h>
+
+#include "event_log_prefix.h"
+#include "generated/module_dependencies.h"
+#include "language.h"
+#include "options.h"
+#include "tools/freertos.h"
+#include "tools/malloc.h"
+#include "tools/fs.h"
+#include "tools/printf.h"
+#include "pdf_charge_log.h"
+#include "csv_charge_log.h"
+#include "generated/file_type.enum.h"
+#include "generated/csv_flavor.enum.h"
+#include "generated/generation_state.enum.h"
+#include "charge_tracker_defs.h"
+#include "bindings/base58.h"
+#include "modules/users/users.h"
+#include "modules/meters/meter_defs.h"
+#include "build.h"
+
+#define PDF_LETTERHEAD_MAX_SIZE 512
+
+#if defined(__GNUC__)
+    #pragma GCC diagnostic push
+
+    // pdPASS expands to an old-style cast that is also useless
+    #pragma GCC diagnostic ignored "-Wold-style-cast"
+    #pragma GCC diagnostic ignored "-Wuseless-cast"
+#endif
+
+static constexpr BaseType_t pdPASS_safe = pdPASS;
+
+#if defined(__GNUC__)
+    #pragma GCC diagnostic pop
+#endif
+
+static bool repair_logic(Charge *);
+
+#define CHARGE_RECORD_SIZE (sizeof(ChargeStart) + sizeof(ChargeEnd))
+
+static_assert(CHARGE_RECORD_SIZE == 16, "Unexpected size of ChargeStart + ChargeEnd");
+static_assert(DISPLAY_NAME_LENGTH == 32, "Unexpected display name length");
+
+#define MAX_CONFIGURED_CHARGELOG_USERS 5
+// We currently use an uint8_t to provide the size of the configured users array to the upload task.
+static_assert(MAX_CONFIGURED_CHARGELOG_USERS <= 255, "MAX_CONFIGURED_CHARGELOG_USERS must be <= 255");
+
+#define MAX_UPLOAD_RETRIES 5
+
+// Default: 30 files with 256 records each: 7680 records @ ~ max. 10 records per day = ~ 2 years and one month of records.
+// With charge management: up to max(30, managed_chargers * 2) files to accommodate multiple managed chargers.
+// Also update frontend when changing this!
+
+// Define static member variable for ChargeLogGenerationLockHelper
+std::atomic<GenerationState> ChargeLogGenerationLockHelper::generation_lock_state{GenerationState::Ready};
+
+#define CHARGE_RECORD_MAX_FILE_SIZE 4096
+
+static constexpr size_t CHARGE_RECORD_FILE_COUNT = OPTIONS_CHARGE_TRACKER_MAX_TRACKED_CHARGES() / (CHARGE_RECORD_MAX_FILE_SIZE / CHARGE_RECORD_SIZE);
+
+#define CHARGE_RECORD_LAST_CHARGES_SIZE 30
+
+static int read_letterhead_lines(char *letterhead) {
+    int letterhead_lines = 1;
+
+    for (size_t i = 0; i < PDF_LETTERHEAD_MAX_SIZE; ++i) {
+        if (letterhead[i] == '\0') {
+            break;
+        }
+
+        if (letterhead[i] == '\n') {
+            letterhead[i] = '\0';
+
+            if (letterhead_lines == 6) {
+                break;
+            }
+
+            ++letterhead_lines;
+        }
+    }
+    return letterhead_lines;
+}
+
+#if MODULE_REMOTE_ACCESS_AVAILABLE()
+// Compute a SHA-256 hash over the charge log generation config fields + the month.
+// The hash is used by the backend for deduplication of charge log uploads.
+static void compute_charge_log_hash(
+    uint8_t out_hash[32],
+    FileType file_type,
+    Language language,
+    const char *letterhead,
+    int user_filter,
+    int64_t device_filter,
+    CSVFlavor csv_delimiter,
+    uint32_t start_timestamp_min,
+    uint32_t end_timestamp_min)
+{
+    mbedtls_sha256_context ctx;
+    mbedtls_sha256_init(&ctx);
+    defer {mbedtls_sha256_free(&ctx);};
+
+    mbedtls_sha256_starts(&ctx, 0 /*use SHA256*/);
+
+    mbedtls_sha256_update(&ctx, reinterpret_cast<const unsigned char *>(&file_type), sizeof(file_type));
+    mbedtls_sha256_update(&ctx, reinterpret_cast<const unsigned char *>(&language), sizeof(language));
+    mbedtls_sha256_update(&ctx, reinterpret_cast<const unsigned char *>(&user_filter), sizeof(user_filter));
+    mbedtls_sha256_update(&ctx, reinterpret_cast<const unsigned char *>(&device_filter), sizeof(device_filter));
+    mbedtls_sha256_update(&ctx, reinterpret_cast<const unsigned char *>(&csv_delimiter), sizeof(csv_delimiter));
+    mbedtls_sha256_update(&ctx, reinterpret_cast<const unsigned char *>(&start_timestamp_min), sizeof(start_timestamp_min));
+    mbedtls_sha256_update(&ctx, reinterpret_cast<const unsigned char *>(&end_timestamp_min), sizeof(end_timestamp_min));
+    if (letterhead != nullptr)
+        mbedtls_sha256_update(&ctx, reinterpret_cast<const unsigned char *>(&letterhead), strlen(letterhead));
+
+    mbedtls_sha256_finish(&ctx, out_hash);
+}
+#endif
+
+String chargeRecordFilename(uint32_t i, const char *directory)
+{
+    char buf[64];
+    StringWriter sw(buf, sizeof(buf));
+    if (directory == nullptr) {
+        sw.printf(CHARGE_RECORD_FOLDER "/charge-record-%lu.bin", i);
+    } else {
+        sw.printf(CHARGE_RECORD_FOLDER "/%.30s/charge-record-%lu.bin", directory, i);
+    }
+    return String(buf, sw.getLength());
+}
+
+String chargeRecordDirectory(const char *directory)
+{
+    char buf[64];
+    StringWriter sw(buf, sizeof(buf));
+    if (directory == nullptr) {
+        sw.printf("%s", CHARGE_RECORD_FOLDER);
+    } else {
+        sw.printf(CHARGE_RECORD_FOLDER "/%.30s", directory);
+    }
+    return String(buf, sw.getLength());
+}
+
+#if MODULE_REMOTE_ACCESS_AVAILABLE()
+static bool wants_send(uint32_t current_time_min, uint32_t last_send_time_min)
+{
+    if (last_send_time_min == 0) {
+        return true;
+    }
+
+    time_t last_send_time = static_cast<time_t>(last_send_time_min) * 60;
+    tm last_send;
+    localtime_r(&last_send_time, &last_send);
+
+    time_t current_time = static_cast<time_t>(current_time_min) * 60;
+    tm current;
+    localtime_r(&current_time, &current);
+
+    // Only send once per month
+    if (last_send.tm_year == current.tm_year && last_send.tm_mon == current.tm_mon) {
+        return false;
+    }
+
+    return true;
+}
+#endif
+
+void ChargeTracker::pre_setup()
+{
+    last_charges_prototype = Config::Object({
+        {"timestamp_minutes", Config::Uint32(0)},
+        {"charge_duration", Config::Uint32(0)},
+        {"user_id", Config::Uint8(0)},
+        {"energy_charged", Config::Float(0)},
+        {"charger_name", Config::Str("", 0, 32)}
+    });
+
+    last_charges = Config::Array(
+        {},
+        &last_charges_prototype,
+        0, CHARGE_RECORD_LAST_CHARGES_SIZE, Config::type_id<Config::ConfObject>()
+    );
+
+    current_charge = Config::Object({
+        {"user_id", Config::Int16(-1)},
+        {"meter_start", Config::Float(0)},
+        {"evse_uptime_start", Config::Uint32(0)},
+        {"timestamp_minutes", Config::Uint32(0)},
+        {"authorization_type", Config::Enum<CMAuthType>(CMAuthType::None)},
+        {"authorization_info", Config{Config::ConfVariant()}},
+        {"charger_name", Config::Str("", 0, 32)}
+    });
+
+    state = Config::Object({
+        {"tracked_charges", Config::Uint16(0)},
+        {"first_charge_timestamp", Config::Uint32(0)},
+        {"generator_state", Config::Enum(GenerationState::Ready)}
+    });
+
+#if MODULE_REMOTE_ACCESS_AVAILABLE()
+    charge_log_send_prototype = Config::Object({
+        {"user_id", Config::Int(-1, -2, 255)},
+        {"file_type", Config::Enum(FileType::PDF)},
+        {"language", Config::Enum(Language::German)},
+        {"letterhead", Config::Str("", 0, PDF_LETTERHEAD_MAX_SIZE)},
+        {"user_filter", Config::Int16(0)},
+        {"device_filter", Config::Int52(DEVICE_FILTER_ALL_CHARGERS)},
+        {"csv_delimiter", Config::Enum(CSVFlavor::Excel)},
+        {"filter_empty_charges", Config::Bool(true)},
+        {"last_upload_timestamp_min", Config::Uint32(0)}
+    });
+#endif
+
+    config = Config::Object({
+        {"electricity_price", Config::Uint16(0)},
+#if MODULE_REMOTE_ACCESS_AVAILABLE()
+        {"remote_upload_configs", Config::Array(
+            {},
+            &charge_log_send_prototype,
+            0, MAX_CONFIGURED_CHARGELOG_USERS, Config::type_id<Config::ConfObject>()
+        )},
+#endif
+    });
+
+    pdf_letterhead_config = Config::Object({
+        {"letterhead", Config::Str("", 0, PDF_LETTERHEAD_MAX_SIZE)}
+    });
+
+// #if MODULE_AUTOMATION_AVAILABLE()
+//     automation.register_action(
+//         AutomationActionID::ChargeTrackerReset,
+//         *Config::Null(),
+//         [this](const Config *conf) {
+//             (void)conf;
+//             api.callCommand("charge_tracker/remove_all_charges", Config::ConfUpdateObject{{
+//                 {"do_i_know_what_i_am_doing", true}
+//             }});
+//         }
+//     );
+// #endif
+}
+
+
+static String get_charger_display_name_from_host(const char *directory)
+{
+    if (directory == nullptr || directory[0] == '\0') {
+        directory = esp32_common.get_uid_cstr();
+    }
+
+    uint32_t uid = 0;
+    if (tf_base58_decode(directory, &uid) != 0) {
+        return String(directory);
+    }
+
+    const char *name = charge_manager.get_charger_name_by_uid(uid);
+    if (name != nullptr) {
+        return String(name);
+    }
+
+    return String(directory);
+}
+
+static bool charged_invalid(ChargeStart cs, ChargeEnd ce)
+{
+    return isnan(cs.meter_start) || isnan(ce.meter_end) || ce.meter_end < cs.meter_start;
+}
+
+bool ChargeTracker::repair_last(float meter_start, const char *directory)
+{
+    Charge charges[3];
+    charges[0].ce.meter_end = NAN;
+    charges[2].cs.meter_start = meter_start;
+
+    uint32_t first_charge_record = 1;
+    uint32_t last_charge_record = 1;
+    if (!getChargerChargeRecords(directory, &first_charge_record, &last_charge_record))
+        return true;
+
+    bool repaired = false;
+    {
+        File r_file = LittleFS.open(chargeRecordFilename(last_charge_record, directory), "r+");
+        if (r_file.size() % CHARGE_RECORD_SIZE != 0) {
+            logger.printfln("Can't repair last charge: Last charge end was not tracked or file is damaged! Size is %u bytes, offset is %u bytes. Expected 0", r_file.size(), r_file.size() % CHARGE_RECORD_SIZE);
+            // TODO: for robustness we would have to write the last end here? Yes, but only if % == 9. Also write duration 0, so we know this is a "faked" end. Still write the correct meter state.
+            return false;
+        }
+
+        if (r_file.size() >= sizeof(Charge) * 2) {
+            r_file.seek(r_file.size() - sizeof(Charge) * 2);
+            r_file.read(reinterpret_cast<uint8_t *>(&charges), sizeof(Charge) * 2);
+        }
+        else if (r_file.size() == sizeof(Charge)) {
+            if (last_charge_record > 1) {
+                File tmp = LittleFS.open(chargeRecordFilename(last_charge_record - 1, directory), "r");
+                auto tmp_size = tmp.size();
+                if (tmp_size % CHARGE_RECORD_SIZE != 0 || tmp_size < sizeof(Charge) * 2) {
+                    logger.printfln("Can't repair last charge: Penultimate tracked charge file is damaged! Size is %u bytes, offset is %u bytes. Expected 0", tmp_size, tmp_size % CHARGE_RECORD_SIZE);
+                    return false;
+                }
+                tmp.seek(tmp.size() - sizeof(Charge) * 2);
+                tmp.read(reinterpret_cast<uint8_t *>(&charges), sizeof(Charge));
+            }
+            r_file.seek(r_file.size() - sizeof(Charge));
+            r_file.read(reinterpret_cast<uint8_t *>(&charges[1]), sizeof(Charge));
+        }
+
+        if (repair_logic(&charges[1])) {
+            r_file.seek(r_file.size() - sizeof(Charge));
+            r_file.write(reinterpret_cast<uint8_t *>(&charges[1]), sizeof(Charge));
+            logger.printfln("Repaired previous broken charge.");
+        }
+    }
+
+    if (repaired) {
+        auto repaired_entry_charger_name = get_charger_display_name_from_host(directory);
+        for (int i = this->last_charges.count() - 1; i >= 0; --i) {
+            auto charge = this->last_charges.get(i);
+            if (charge->get("timestamp_minutes")->asUint32() == charges[1].cs.timestamp_minutes
+                    && charge->get("charge_duration")->asUint32() == charges[1].ce.charge_duration
+                    && charge->get("user_id")->asUint8() == charges[1].cs.user_id
+                    && charge->get("charger_name")->asString() == repaired_entry_charger_name) {
+                charge->get("energy_charged")->updateFloat(charged_invalid(charges[1].cs, charges[1].ce) ? NAN : charges[1].ce.meter_end - charges[1].cs.meter_start);
+            }
+        }
+    }
+
+    return true;
+}
+
+bool ChargeTracker::startCharge(uint32_t timestamp_minutes, float meter_start, uint8_t user_id, uint32_t evse_uptime, CMAuthType auth_method, Config::ConfVariant auth_info, const char *directory) {
+#if MODULE_REQUIRE_METER_AVAILABLE()
+    if (!require_meter.allow_charging(meter_start) && directory == nullptr) {
+        return false;
+    }
+#endif
+
+    std::lock_guard<std::mutex> lock{records_mutex};
+
+    if (!repair_last(meter_start, directory)) {
+        return false;
+    }
+
+    uint32_t last_record = 1;
+    getChargerChargeRecords(directory, nullptr, &last_record);
+
+    ChargeStart cs;
+    File file = LittleFS.open(chargeRecordFilename(last_record, directory), "a", true);
+
+    if (file.size() == CHARGE_RECORD_MAX_FILE_SIZE) {
+        ++last_record;
+
+        String new_file_name = chargeRecordFilename(last_record, directory);
+        logger.printfln("Last charge record file %s is full. Creating the new file %s", file.name(), new_file_name.c_str());
+        file.close();
+
+        if (removeOldRecords())
+            this->update_first_charge_timestamp();
+
+        file = LittleFS.open(new_file_name, "w", true);
+        ++this->total_charge_log_files;
+        state.get("tracked_charges")->updateUint(this->total_charge_log_entries);
+    }
+
+    cs.timestamp_minutes = timestamp_minutes;
+    cs.meter_start = meter_start;
+    cs.user_id = user_id;
+
+    uint8_t buf[sizeof(ChargeStart)] = {0};
+    memcpy(buf, &cs, sizeof(cs));
+
+    file.write(buf, sizeof(cs));
+
+    if (directory != nullptr) {
+        logger.printfln("Tracked start of charge for %s", directory);
+        return true;
+    }
+
+    logger.printfln("Tracked start of charge for local charger.");
+
+    current_charge.get("user_id")->updateInt(user_id);
+    current_charge.get("meter_start")->updateFloat(meter_start);
+    current_charge.get("evse_uptime_start")->updateUint(evse_uptime);
+    current_charge.get("timestamp_minutes")->updateUint(timestamp_minutes);
+    current_charge.get("authorization_type")->updateEnum(auth_method);
+    current_charge.get("authorization_info")->value = auth_info;
+    current_charge.get("authorization_info")->value.updated = 0xFF;
+    current_charge.get("charger_name")->updateString(get_charger_display_name_from_host(directory));
+    return true;
+}
+
+void ChargeTracker::endCharge(uint32_t charge_duration_seconds, float meter_end, const char *directory)
+{
+    std::lock_guard<std::mutex> lock{records_mutex};
+    ChargeEnd ce;
+
+    uint32_t last_record = 1;
+    getChargerChargeRecords(directory, nullptr, &last_record);
+
+    {
+        File file = LittleFS.open(chargeRecordFilename(last_record, directory), "a");
+        if ((file.size() % CHARGE_RECORD_SIZE) != sizeof(ChargeStart)) {
+            logger.printfln("Can't track end of charge: Last charge start was not tracked or file is damaged! Size is %u bytes, offset is %u bytes. Expected %u", file.size() , file.size() % CHARGE_RECORD_SIZE, sizeof(ChargeStart));
+            // TODO: How to handle this case? Add a charge start with the same meter value as the last end?
+            // This would also mean that all the size checks of startCharge have to be duplicated!
+            // If we check in ::setup() whether a charge is running, this can never happen.
+            return;
+        }
+
+        ce.charge_duration = charge_duration_seconds;
+        ce.meter_end = meter_end;
+
+        uint8_t buf[sizeof(ChargeEnd)] = {0};
+        memcpy(buf, &ce, sizeof(ce));
+
+        file.write(buf, sizeof(ce));
+    }
+
+    // We've just written the charge record in the file. It is always safe to read it back again.
+    if (last_charges.count() == CHARGE_RECORD_LAST_CHARGES_SIZE)
+        last_charges.remove(0);
+
+    File f = LittleFS.open(chargeRecordFilename(last_record, directory));
+    f.seek(-CHARGE_RECORD_SIZE, SeekMode::SeekEnd);
+    this->readNRecords(&f, 1, directory);
+
+    if (directory != nullptr) {
+        logger.printfln("Tracked end of charge for %s", directory);
+        return;
+    } else {
+        logger.printfln("Tracked end of charge for local charger.");
+    }
+
+    current_charge.get("user_id")->updateInt(-1);
+    current_charge.get("meter_start")->updateFloat(0);
+    current_charge.get("evse_uptime_start")->updateUint(0);
+    current_charge.get("timestamp_minutes")->updateUint(0);
+    current_charge.get("authorization_type")->updateUint(0);
+    current_charge.get("authorization_info")->value = Config::ConfVariant{};
+
+    ++this->total_charge_log_entries;
+    state.get("tracked_charges")->updateUint(this->total_charge_log_entries);
+}
+
+bool ChargeTracker::is_user_tracked(uint8_t user_id)
+{
+    const size_t user_id_offset = offsetof(ChargeStart, user_id);
+
+    auto check_directory = [this, user_id, user_id_offset](const char *directory) -> bool {
+        uint32_t first_record = 0;
+        uint32_t last_record = 0;
+
+        if (!getChargerChargeRecords(directory, &first_record, &last_record)) {
+            return false;
+        }
+
+        for (int file = first_record; file <= static_cast<int>(last_record); ++file) {
+            File f = LittleFS.open(chargeRecordFilename(file, directory));
+            size_t size = f.size();
+            // LittleFS caches internally, so we can read single bytes without a huge performance loss.
+            for (size_t i = 0; i < size; i += CHARGE_RECORD_SIZE) {
+                f.seek(i + user_id_offset);
+                int read_user_id = f.read();
+                if (read_user_id < 0)
+                    continue;
+                if (user_id == read_user_id)
+                    return true;
+            }
+        }
+        return false;
+    };
+
+    if (check_directory(nullptr)) {
+        return true;
+    }
+
+    bool user_not_tracked = for_filename_in(CHARGE_RECORD_FOLDER,
+        [&check_directory](const char *filename, size_t filename_len, bool is_dir) {
+            if (is_dir)
+                if (check_directory(filename))
+                    return false; // early exit if check_directory returns true
+            return true;
+        });
+
+    return !user_not_tracked;
+}
+
+bool ChargeTracker::has_tracked_charges(uint32_t charger_uid)
+{
+    if (charger_uid == 0)
+        return false;
+
+    // Convert UID to base58 string (directory name)
+    char b58[9] = {0};
+    tf_base58_encode(charger_uid, b58);
+
+    uint32_t first_record = 0;
+    uint32_t last_record = 0;
+    return getChargerChargeRecords(b58, &first_record, &last_record);
+}
+
+bool ChargeTracker::removeOldRecords()
+{
+    // NOP if the file limit is not exceeded.
+    if (this->total_charge_log_files < CHARGE_RECORD_FILE_COUNT) {
+        return false;
+    }
+
+    // Find the directory with the oldest charge-record that has at least 2 files
+    const char *oldest_dir = nullptr;
+    uint32_t first_record = 0;
+    {
+        uint32_t oldest_timestamp = UINT32_MAX;
+        auto find_oldest_record = [this, &oldest_timestamp, &oldest_dir, &first_record](const char *directory) {
+            uint32_t inner_first_record = 1;
+            uint32_t inner_last_record = 1;
+            if (!getChargerChargeRecords(directory, &inner_first_record, &inner_last_record))
+                return true;
+
+            // We will only remove records if there are at least two per directory.
+            // This check also allows us to assume that first_record is full
+            // (i.e. there's at least one charge tracked
+            // and we don't have to handle that the tracked value was a ChargeStart (as opposed to a ChargeEnd)
+            if (inner_first_record == inner_last_record)
+                return true;
+
+            File f = LittleFS.open(chargeRecordFilename(inner_first_record, directory));
+
+            for (size_t i = CHARGE_RECORD_SIZE; i < CHARGE_RECORD_MAX_FILE_SIZE; i += 16) {
+                f.seek(i, SeekMode::SeekEnd);
+
+                uint8_t buf[CHARGE_RECORD_SIZE];
+                f.read(buf, CHARGE_RECORD_SIZE);
+
+                Charge c;
+                memcpy(&c, buf, CHARGE_RECORD_SIZE);
+
+                if (c.cs.timestamp_minutes != 0) {
+                    if (c.cs.timestamp_minutes <= oldest_timestamp) {
+                        oldest_timestamp = c.cs.timestamp_minutes;
+                        oldest_dir = directory;
+                        first_record = inner_first_record;
+                    }
+                    return true;
+                }
+            }
+
+            // If we reach this point, each timestamp was 0, i.e. unknown
+            oldest_timestamp = 0;
+            oldest_dir = directory;
+            first_record = inner_first_record;
+            return false;
+        };
+
+        // TODO: don't always remove the same charger's tracked chargers if no charger has had NTP sync
+        if (find_oldest_record(nullptr)) {
+            for_filename_in(CHARGE_RECORD_FOLDER,
+                [&find_oldest_record](const char *name, size_t name_len, bool is_dir) {
+                    if (is_dir)
+                        return find_oldest_record(name);
+                    return true;
+                }
+            );
+        }
+
+        if (oldest_timestamp == UINT32_MAX)
+            return false;
+    }
+
+    const size_t user_id_offset = offsetof(ChargeStart, user_id);
+
+    uint32_t users_to_delete[8] = {0}; // one bit per user
+
+    // Remove found oldest record.
+    // Fill users_to_delete with all users that are tracked in this record.
+    {
+        String name = chargeRecordFilename(first_record, oldest_dir);
+        logger.printfln("Directory %s: Dropping the oldest charge record (%s)",
+                    oldest_dir ? oldest_dir : "main", name.c_str());
+
+        {
+            File f = LittleFS.open(name, "r");
+            size_t size = f.size();
+            for (size_t i = 0; i < size; i += CHARGE_RECORD_SIZE) {
+                f.seek(i + user_id_offset);
+                int x = f.read();
+                if (x < 0)
+                    continue;
+                uint8_t user_id = x;
+                users_to_delete[user_id / 32] |= (1 << (user_id % 32));
+            }
+        }
+        LittleFS.remove(name);
+
+        --this->total_charge_log_files;
+        this->total_charge_log_entries -= CHARGE_RECORD_MAX_FILE_SIZE / CHARGE_RECORD_SIZE;
+        state.get("tracked_charges")->updateUint(this->total_charge_log_entries);
+    }
+
+    // Remove users from users_to_delete that are still tracked in other charge records.
+    {
+        auto clear_users_in_use = [this, &users_to_delete, oldest_dir](const char *directory) {
+            uint32_t inner_first_record = 1;
+            uint32_t inner_last_record = 1;
+            if (!getChargerChargeRecords(directory, &inner_first_record, &inner_last_record))
+                return;
+
+            //users_to_delete has now set a bit for every user_id that was used in the deleted charge records.
+            //Clear this bit for every user that is still used in the current charge records.
+            for (int file = inner_first_record; file < inner_last_record; ++file) {
+                File f = LittleFS.open(chargeRecordFilename(file, oldest_dir));
+                size_t size = f.size();
+                // LittleFS caches internally, so we can read single bytes without a huge performance loss.
+                for (size_t i = 0; i < size; i += CHARGE_RECORD_SIZE) {
+                    f.seek(i + user_id_offset);
+                    int x = f.read();
+                    if (x < 0)
+                        continue;
+                    uint8_t user_id = x;
+                    users_to_delete[user_id / 32] &= ~(1 << (user_id % 32));
+                }
+                vTaskDelay(1);
+            }
+        };
+
+        clear_users_in_use(nullptr);
+
+        for_filename_in(CHARGE_RECORD_FOLDER,
+            [&clear_users_in_use](const char *name, size_t name_len, bool is_dir) {
+                if (is_dir) {
+                    clear_users_in_use(name);
+                }
+                return true;
+            });
+    }
+
+    // Now only users that are safe to remove remain.
+    for (int user_id = 0; user_id < 256; ++user_id) {
+        if ((users_to_delete[user_id / 32] & (1 << (user_id % 32))) != 0) {
+            // remove_from_username_file only removes if the user is not configured
+            users.remove_from_username_file(user_id);
+        }
+    }
+
+    // Check if the charger that we deleted from still has any charge records.
+    // If not, remove it from the charger names file.
+    if (!getChargerChargeRecords(oldest_dir, nullptr, nullptr)) {
+        uint32_t uid = 0;
+
+        if (oldest_dir == nullptr) {
+            uid = esp32_common.get_uid_num();
+        } else {
+            if (tf_base58_decode(oldest_dir, &uid) != 0) {
+                uid = 0;
+            }
+        }
+
+        if (uid != 0) {
+            charge_manager.remove_from_charger_names_file(uid);
+        }
+    }
+
+    return true;
+}
+
+bool ChargeTracker::setupRecords(const char *directory)
+{
+    String folder_path = chargeRecordDirectory(directory);
+
+    if (!LittleFS.mkdir(folder_path)) { // mkdir also returns true if the directory already exists and is a directory.
+        logger.printfln("Failed to create charge record folder: %s", folder_path.c_str());
+        return false;
+    }
+
+    // Two more to handle power cycles where a new record was created but the oldest one was not yet deleted.
+    uint32_t found_blobs[CHARGE_RECORD_FILE_COUNT + 2] = {0};
+    size_t found_blobs_size = ARRAY_SIZE(found_blobs);
+    int found_blob_counter = 0;
+
+    if (!for_filename_in(folder_path.c_str(),
+            [&found_blobs,
+                &found_blobs_size,
+                &found_blob_counter]
+            (const String &name, bool is_dir) {
+                if (is_dir) {
+                    return true;
+                }
+
+                if (name == "use_imexsum") {
+                    return true;
+                }
+
+                if (!name.startsWith("charge-record-") || !name.endsWith(".bin")) {
+                    logger.printfln("Unexpected file %s in charge record folder", name.c_str());
+                    return true;
+                }
+
+                long suffix = name.substring(14, name.length() - 4).toInt();
+                if (suffix == 0) {
+                    logger.printfln("Unexpected file %s in charge record folder", name.c_str());
+                    return true;
+                }
+
+                if (found_blob_counter >= found_blobs_size) {
+                    logger.printfln("Too many charge records found!");
+                    return false;
+                }
+
+                found_blobs[found_blob_counter] = suffix;
+                ++found_blob_counter;
+                return true;
+            })
+        ) {
+        return false;
+    }
+
+    this->total_charge_log_files += found_blob_counter;
+
+    if (found_blob_counter == 0) {
+        return true;
+    }
+
+    std::sort(found_blobs, found_blobs + found_blob_counter);
+
+    for (int i = 0; i < found_blob_counter - 1; ++i) {
+        if (found_blobs[i] + 1 != found_blobs[i + 1]) {
+            logger.printfln("Directory %s: Non-consecutive charge records found! (Next after %lu is %lu. Expected was %lu)",
+                           directory ? directory : "main", found_blobs[i], found_blobs[i+1], found_blobs[i] + 1);
+            return false;
+        }
+
+        const String fname = chargeRecordFilename(found_blobs[i], directory);
+        const size_t fsize = file_size(LittleFS, fname);
+        if (fsize != CHARGE_RECORD_MAX_FILE_SIZE) {
+            logger.printfln("Directory %s: Charge record %s doesn't have max size: %u bytes (expected: %u)",
+                           directory ? directory : "main", fname.c_str(), fsize, CHARGE_RECORD_MAX_FILE_SIZE);
+            return false;
+        }
+    }
+
+    const String last_file_name = chargeRecordFilename(found_blobs[found_blob_counter - 1], directory);
+    const size_t last_file_size = file_size(LittleFS, last_file_name);
+    if (last_file_size > CHARGE_RECORD_MAX_FILE_SIZE) {
+        logger.printfln("Directory %s: Last charge record %s is too long: %u bytes (max: %u)",
+                       directory ? directory : "main", last_file_name.c_str(), last_file_size, CHARGE_RECORD_MAX_FILE_SIZE);
+        return false;
+    }
+
+    this->total_charge_log_entries += ((found_blob_counter - 1) * CHARGE_RECORD_MAX_FILE_SIZE + last_file_size) / CHARGE_RECORD_SIZE;
+
+    return true;
+}
+
+bool ChargeTracker::currentlyCharging(const char *directory, ChargeStart *cs)
+{
+    uint32_t last_record = 1;
+    if (!getChargerChargeRecords(directory, nullptr, &last_record))
+        return false; // If the directory does not exist, or it is empty, no ChargeStart was tracked.
+
+    const size_t fsize = file_size(LittleFS, chargeRecordFilename(last_record, directory));
+    auto result = (fsize % CHARGE_RECORD_SIZE) == sizeof(ChargeStart);
+
+    if (result && cs != nullptr) {
+        char buf[sizeof(ChargeStart)];
+        File f = LittleFS.open(chargeRecordFilename(last_record, directory), "r");
+        f.seek(-sizeof(ChargeStart), SeekMode::SeekEnd);
+        f.readBytes(buf, sizeof(ChargeStart));
+        memcpy(cs, buf, sizeof(ChargeStart));
+    }
+
+    return result;
+}
+
+bool ChargeTracker::getChargerChargeRecords(const char *directory, uint32_t *first_record, uint32_t *last_record)
+{
+    String folder_path = chargeRecordDirectory(directory);
+
+    if (!LittleFS.exists(folder_path))
+        return false;
+
+    uint32_t found_blobs[CHARGE_RECORD_FILE_COUNT + 2] = {0};
+    int found_blob_counter = 0;
+
+    for_filename_in(folder_path.c_str(),
+        [&found_blobs, &found_blob_counter](String name, bool is_dir) {
+            if (is_dir)
+                return true;
+
+            if (!name.startsWith("charge-record-") || !name.endsWith(".bin"))
+                return true;
+
+            long suffix = name.substring(14, name.length() - 4).toInt();
+            if (suffix == 0)
+                return true;
+
+            if (found_blob_counter >= ARRAY_SIZE(found_blobs))
+                return false;
+
+            found_blobs[found_blob_counter] = suffix;
+            ++found_blob_counter;
+            return true;
+    });
+
+    if (found_blob_counter == 0)
+        return false;
+
+    std::sort(found_blobs, found_blobs + found_blob_counter);
+
+    if (first_record != nullptr)
+        *first_record = found_blobs[0];
+
+    if (last_record != nullptr)
+        *last_record = found_blobs[found_blob_counter - 1];
+
+    return true;
+}
+
+void ChargeTracker::update_first_charge_timestamp() {
+    uint32_t first_charge_timestamp = UINT32_MAX;
+
+    auto read_first_charge = [this, &first_charge_timestamp](const char *directory) {
+        uint32_t first_record;
+        getChargerChargeRecords(directory, &first_record, nullptr);
+        File f = LittleFS.open(chargeRecordFilename(first_record, directory));
+
+        if (!f)
+            return;
+
+        uint8_t buf[CHARGE_RECORD_SIZE];
+        size_t bytes_read = f.read(buf, CHARGE_RECORD_SIZE);
+        if (bytes_read != CHARGE_RECORD_SIZE)
+            return;
+
+        Charge c;
+        memcpy(&c, buf, CHARGE_RECORD_SIZE);
+        first_charge_timestamp = std::min(first_charge_timestamp, c.cs.timestamp_minutes);
+    };
+
+    read_first_charge(nullptr);
+
+    for_filename_in(CHARGE_RECORD_FOLDER, [this, &read_first_charge](const char *name, size_t name_len, bool is_dir) {
+        if (!is_dir)
+            return true;
+
+        read_first_charge(name);
+        return true;
+    });
+
+    state.get("first_charge_timestamp")->updateUint(first_charge_timestamp == UINT32_MAX ? 0 : first_charge_timestamp);
+}
+
+void ChargeTracker::readNRecords(File *f, size_t records_to_read, const char *directory)
+{
+    uint8_t buf[CHARGE_RECORD_SIZE];
+    ChargeStart cs;
+    ChargeEnd ce;
+
+    String charger_display_name = get_charger_display_name_from_host(directory);
+
+    for (int i = 0; i < records_to_read; ++i) {
+        memset(buf, 0, sizeof(buf));
+        f->read(buf, CHARGE_RECORD_SIZE);
+
+        memcpy(&cs, buf, sizeof(cs));
+        memcpy(&ce, buf + sizeof(cs), sizeof(ce));
+
+        auto last_charge = last_charges.add();
+        last_charge->get("timestamp_minutes")->updateUint(cs.timestamp_minutes);
+        last_charge->get("charge_duration")->updateUint(ce.charge_duration);
+        last_charge->get("user_id")->updateUint(cs.user_id);
+        last_charge->get("energy_charged")->updateFloat(charged_invalid(cs, ce) ? NAN : ce.meter_end - cs.meter_start);
+        last_charge->get("charger_name")->updateString(charger_display_name);
+    }
+}
+
+void ChargeTracker::setup()
+{
+    logger.printfln("Checking charge records");
+    initialized = this->setupRecords(nullptr);
+    if (!initialized) {
+        return;
+    }
+
+    // Setup all subdirectories
+    for_filename_in(CHARGE_RECORD_FOLDER,
+        [this](const char *name, size_t name_len, bool is_dir) {
+            if (is_dir) {
+                // Setup records for this subdirectory
+                if (!this->setupRecords(name)) {
+                    logger.printfln("Warning: Failed to setup records for directory %s", name);
+                }
+            }
+            return true;
+        });
+
+    last_charges.reserve(CHARGE_RECORD_LAST_CHARGES_SIZE);
+
+    repair_charges();
+
+    api.restorePersistentConfig("charge_tracker/config", &config);
+    api.restorePersistentConfig("charge_tracker/pdf_letterhead_config", &pdf_letterhead_config);
+}
+
+std::vector<ChargeWithLocation> ChargeTracker::readLastChargesFromDirectory(const char *directory)
+{
+    std::vector<ChargeWithLocation> charges;
+    charges.reserve(CHARGE_RECORD_LAST_CHARGES_SIZE);
+
+    uint32_t first_record = 0;
+    uint32_t last_record = 0;
+    uint32_t prev_known_timestamp = 0;
+
+    // Get the range of records for this directory
+    if (!getChargerChargeRecords(directory, &first_record, &last_record)) {
+        return charges; // Empty vector if directory doesn't exist or has no records
+    }
+
+    // Read charges from the last file first (most recent)
+    for (int file_idx = last_record; file_idx >= static_cast<int>(first_record) && charges.size() < CHARGE_RECORD_LAST_CHARGES_SIZE; --file_idx) {
+        File f = LittleFS.open(chargeRecordFilename(file_idx, directory));
+        if (!f) {
+            continue;
+        }
+
+        size_t file_size = f.size();
+        size_t num_records = file_size / CHARGE_RECORD_SIZE;
+
+        // Read from end to beginning of file
+        for (int record_idx = num_records - 1; record_idx >= 0 && charges.size() < CHARGE_RECORD_LAST_CHARGES_SIZE; --record_idx) {
+            f.seek(record_idx * CHARGE_RECORD_SIZE);
+
+            uint8_t buf[CHARGE_RECORD_SIZE];
+            size_t bytes_read = f.read(buf, CHARGE_RECORD_SIZE);
+
+            if (bytes_read != CHARGE_RECORD_SIZE) {
+                continue;
+            }
+
+            ChargeStart cs;
+            ChargeEnd ce;
+            memcpy(&cs, buf, sizeof(cs));
+            memcpy(&ce, buf + sizeof(cs), sizeof(ce));
+
+            ChargeWithLocation charge;
+            charge.charge.cs = cs;
+            charge.charge.ce = ce;
+            charge.directory = directory ? String(directory) : String();
+            charge.prev_known_timestamp_minutes = prev_known_timestamp;
+
+            charges.push_back(charge);
+
+            if (cs.timestamp_minutes != 0) {
+                prev_known_timestamp = cs.timestamp_minutes;
+            }
+        }
+
+        f.close();
+    }
+
+    return charges;
+}
+
+static void merge_charge_vectors(std::vector<ChargeWithLocation> &target, std::vector<ChargeWithLocation> &source)
+{
+    if (target.empty()) {
+        target = std::move(source);
+        return;
+    }
+
+    auto target_iter = target.begin();
+    auto source_iter = source.begin();
+
+    for (; target_iter != target.end() && source_iter != source.end(); ) {
+        if (*source_iter > *target_iter) {
+            target_iter = target.insert(target_iter, *source_iter);
+            ++source_iter;
+            ++target_iter;
+        } else {
+            ++target_iter;
+        }
+    }
+
+    // Keep only the newest CHARGE_RECORD_LAST_CHARGES_SIZE entries
+    if (target.size() > CHARGE_RECORD_LAST_CHARGES_SIZE) {
+        target.resize(CHARGE_RECORD_LAST_CHARGES_SIZE);
+    }
+}
+
+bool user_configured(const uint8_t configured_users[MAX_ACTIVE_USERS], uint8_t user_id)
+{
+    for (int i = 0; i < MAX_ACTIVE_USERS; ++i) {
+        if (configured_users[i] == user_id) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static size_t timestamp_min_to_date_time_string(char buf[17], uint32_t timestamp_min, Language language)
+{
+    const char * const unknown = (language == Language::English) ? "unknown" : "unbekannt";
+    size_t unknown_len =  (language == Language::English) ? ARRAY_SIZE("unknown") : ARRAY_SIZE("unbekannt");
+
+    if (timestamp_min == 0) {
+        memcpy(buf, unknown, unknown_len);
+        return unknown_len - 1; // exclude null terminator
+    }
+    time_t timestamp = ((int64_t)timestamp_min) * 60;
+    struct tm t;
+    localtime_r(&timestamp, &t);
+
+    if (language == Language::English)
+        return sprintf_u(buf, "%4.4i-%2.2i-%2.2i %2.2i:%2.2i", t.tm_year + 1900, t.tm_mon + 1, t.tm_mday, t.tm_hour, t.tm_min);
+
+    return sprintf_u(buf, "%2.2i.%2.2i.%4.4i %2.2i:%2.2i", t.tm_mday, t.tm_mon + 1, t.tm_year + 1900, t.tm_hour, t.tm_min);
+}
+
+static size_t timestamp_min_to_date_string(char buf[11], uint32_t timestamp_min, Language language)
+{
+    time_t timestamp = ((int64_t)timestamp_min) * 60;
+    struct tm t;
+    localtime_r(&timestamp, &t);
+
+    if (language == Language::English) {
+        return sprintf_u(buf, "%4.4i-%2.2i-%2.2i", t.tm_year + 1900, t.tm_mon + 1, t.tm_mday);
+    }
+
+    return sprintf_u(buf, "%2.2i.%2.2i.%4.4i", t.tm_mday, t.tm_mon + 1, t.tm_year + 1900);
+}
+
+#define PDF_NO_VALUE "-"
+
+// Formats value with the given number of decimals and localized decimal and thousands separators.
+// buf must have room for at least 24 bytes. Returns the length without the null terminator.
+static size_t format_number(char *buf, double value, int decimals, Language language)
+{
+    if (!(fabs(value) < 1e12)) {
+        memcpy(buf, PDF_NO_VALUE, ARRAY_SIZE(PDF_NO_VALUE));
+        return ARRAY_SIZE(PDF_NO_VALUE) - 1;
+    }
+
+    char tmp[24];
+    int len = snprintf(tmp, sizeof(tmp), "%.*f", decimals, value);
+    if ((len <= 0) || (len >= (int)sizeof(tmp))) {
+        memcpy(buf, PDF_NO_VALUE, ARRAY_SIZE(PDF_NO_VALUE));
+        return ARRAY_SIZE(PDF_NO_VALUE) - 1;
+    }
+
+    const char thousands_separator = language == Language::English ? ',' : '.';
+    const char decimal_separator = language == Language::English ? '.' : ',';
+
+    const char *dot = strchr(tmp, '.');
+    const int int_len = dot != nullptr ? (int)(dot - tmp) : len;
+    const int digits_start = tmp[0] == '-' ? 1 : 0;
+
+    char *out = buf;
+    for (int i = 0; i < int_len; ++i) {
+        *out++ = tmp[i];
+        const int remaining_digits = int_len - i - 1;
+        if ((i >= digits_start) && (remaining_digits > 0) && ((remaining_digits % 3) == 0)) {
+            *out++ = thousands_separator;
+        }
+    }
+
+    if (dot != nullptr) {
+        *out++ = decimal_separator;
+        const size_t frac_len = strlen(dot + 1);
+        memcpy(out, dot + 1, frac_len);
+        out += frac_len;
+    }
+
+    *out = '\0';
+    return (size_t)(out - buf);
+}
+
+static size_t format_duration(char *buf, uint32_t duration_s)
+{
+    return sprintf_u(buf, "%lu:%02lu:%02lu", duration_s / 3600, (duration_s / 60) % 60, duration_s % 60);
+}
+
+static uint32_t charge_cost_cents(double charged_kwh, uint32_t electricity_price)
+{
+    // electricity_price is in ct/100 per kWh
+    return (uint32_t)round(charged_kwh * electricity_price / 100.0);
+}
+
+#define PDF_TABLE_LINE_LEN (17   /* start: "01.02.3456 12:34\0" or "3456-02-01 12:34\0" (or unknown) */ \
+                          + 17   /* end */ \
+                          + DISPLAY_NAME_LENGTH + 4 /* user display name + \0 + slack written by display_name_entry::get */ \
+                          + DISPLAY_NAME_LENGTH + 4 /* charger display name + \0 + slack */ \
+                          + 11   /* duration: max "4660:00:00\0" (24 bit seconds) */ \
+                          + 24   /* meter start */ \
+                          + 24   /* meter end */ \
+                          + 24   /* energy */ \
+                          + 24)  /* cost */
+
+// Writes one '\0'-separated table row for the PDF. See PDFTableColumn.
+static char *tracked_charge_to_pdf_row(char *buf, const ChargeStart &cs, const ChargeEnd &ce, const GenerationParams *params, uint32_t charger_uid)
+{
+    const Language lang = params->language;
+    const uint32_t duration = ce.charge_duration;
+
+    // Start
+    buf += 1 + timestamp_min_to_date_time_string(buf, cs.timestamp_minutes, lang);
+
+    // End: The start time is only known with minute resolution.
+    buf += 1 + timestamp_min_to_date_time_string(buf, cs.timestamp_minutes == 0 ? 0 : cs.timestamp_minutes + (duration + 30) / 60, lang);
+
+    // User
+    buf += 1 + params->display_name_cache[cs.user_id].get(buf);
+
+    // Charger
+    buf += 1 + params->get_charger_display_name(charger_uid, buf);
+
+    // Duration
+    buf += 1 + format_duration(buf, duration);
+
+    // Meter start and end
+    for (float meter_value : {cs.meter_start, ce.meter_end}) {
+        if (isnan(meter_value)) {
+            memcpy(buf, PDF_NO_VALUE, ARRAY_SIZE(PDF_NO_VALUE));
+            buf += ARRAY_SIZE(PDF_NO_VALUE);
+        } else {
+            buf += 1 + format_number(buf, meter_value, 3, lang);
+        }
+    }
+
+    // Energy and cost
+    if (charged_invalid(cs, ce)) {
+        memcpy(buf, PDF_NO_VALUE, ARRAY_SIZE(PDF_NO_VALUE));
+        buf += ARRAY_SIZE(PDF_NO_VALUE);
+
+        if (params->electricity_price != 0) {
+            memcpy(buf, PDF_NO_VALUE, ARRAY_SIZE(PDF_NO_VALUE));
+            buf += ARRAY_SIZE(PDF_NO_VALUE);
+        }
+    } else {
+        const float charged = ce.meter_end - cs.meter_start;
+        buf += 1 + format_number(buf, charged, 3, lang);
+
+        if (params->electricity_price != 0) {
+            buf += 1 + format_number(buf, charge_cost_cents(charged, params->electricity_price) / 100.0, 2, lang);
+        }
+    }
+
+    return buf;
+}
+
+static const char *get_meter_type_name(uint8_t meter_type)
+{
+    switch (meter_type) {
+        case METER_TYPE_SDM72DM:       return "Eastron SDM72";
+        case METER_TYPE_SDM630:        return "Eastron SDM630";
+        case METER_TYPE_SDM72DMV2:     return "Eastron SDM72V2";
+        case METER_TYPE_SDM630MCTV2:   return "Eastron SDM630MCT";
+        case METER_TYPE_DSZ15DZMOD:    return "Eltako DSZ15DZMOD";
+        case METER_TYPE_DEM4A:         return "YTL DEM4A";
+        case METER_TYPE_DMED341MID7ER: return "Lovato DMED341MID7ER";
+        case METER_TYPE_DSZ16DZE:      return "Eltako DSZ16DZE";
+        case METER_TYPE_WM3M4C:        return "Iskra WM3M4C";
+        case METER_TYPE_WM3M4:         return "Iskra WM3M4";
+        default:                       return nullptr;
+    }
+}
+
+// All meter types known to get_meter_type_name are MID certified.
+static bool meter_type_is_mid(uint8_t meter_type)
+{
+    return get_meter_type_name(meter_type) != nullptr;
+}
+
+static bool repair_logic(Charge *buf)
+{
+    bool repaired = false;
+    uint8_t state = 0;
+
+    // There are only known issues with broken charges with a meter end of 0.
+    // We can add the same logic for the start too if needed.
+    state |= !isnan(buf[-1].ce.meter_end) << 3;
+    state |= (!isnan(buf[0].cs.meter_start) && buf[0].cs.meter_start != 0) << 2;
+    state |= (!isnan(buf[0].ce.meter_end) && buf[0].ce.meter_end != 0) << 1;
+    state |= !isnan(buf[1].cs.meter_start);
+
+    // We have five cases that can be repaired/ have to be repaired. state is a bitmap.
+    switch (state)
+    {
+    // The end of a charge is missing but we got the beginning and the beginning of the next charge.
+    case 10:
+    case 11:
+        if (buf[-1].ce.meter_end <= buf[0].ce.meter_end
+                && buf[0].ce.meter_end - buf[-1].ce.meter_end < CHARGE_TRACKER_MAX_REPAIR) {
+            if (buf[0].cs.meter_start == 0 && buf[-1].ce.meter_end < CHARGE_TRACKER_MAX_REPAIR)
+                break;
+
+            buf[0].cs.meter_start = buf[-1].ce.meter_end;
+            repaired = true;
+        }
+        break;
+
+    // The start of a charge is missing but we got the end of it and the end of the previous charge.
+    case 5:
+    case 13:
+        if (buf[0].cs.meter_start <= buf[1].cs.meter_start
+                && buf[1].cs.meter_start - buf[0].cs.meter_start < CHARGE_TRACKER_MAX_REPAIR) {
+            // If the Meter is new and somehow meter start and meter end is 0 this is not a broken charge.
+            if (buf[0].ce.meter_end == 0 && buf[0].cs.meter_start == 0)
+                break;
+
+            buf[0].ce.meter_end = buf[1].cs.meter_start;
+            repaired = true;
+        }
+        break;
+
+    // We got no meter values of the charge but we got the end of the previous and the start of the next.
+    case 9:
+        if (buf[-1].ce.meter_end <= buf[1].cs.meter_start
+                && buf[1].cs.meter_start - buf[-1].ce.meter_end < CHARGE_TRACKER_MAX_REPAIR
+                && !(buf[-1].ce.meter_end == 0 && buf[0].cs.meter_start == 0 && buf[0].ce.meter_end == 0 && buf[1].cs.meter_start == 0)) {
+            buf[0].cs.meter_start = buf[-1].ce.meter_end;
+            buf[0].ce.meter_end = buf[1].cs.meter_start;
+            repaired = true;
+        }
+        break;
+
+    default:
+        break;
+    }
+    return repaired;
+}
+
+void ChargeTracker::repair_charges()
+{
+    auto buf = heap_alloc_array<Charge>(258);
+    uint32_t num_repaired = 0;
+
+    std::vector<ChargeWithLocation> all_charges;
+    all_charges.reserve(CHARGE_RECORD_LAST_CHARGES_SIZE * 2);
+
+    // Helper lambda to repair charges in a specific directory
+    auto repair_directory = [this, &buf, &num_repaired, &all_charges](const char *directory) {
+        uint32_t first_record = 0;
+        uint32_t last_record = 0;
+
+        // Get the range of records for this directory
+        if (!getChargerChargeRecords(directory, &first_record, &last_record)) {
+            return; // No records in this directory
+        }
+
+        for (uint32_t i = first_record; i <= last_record; ++i) {
+            bool file_needs_repair = false;
+            memset(reinterpret_cast<uint8_t *>(&buf[1]), 0, sizeof(Charge) * 257);
+
+            int read;
+            {
+                File f = LittleFS.open(chargeRecordFilename(i, directory));
+                if (i < last_record) {
+                    File next_f = LittleFS.open(chargeRecordFilename(i + 1, directory));
+                    read = next_f.read(reinterpret_cast<uint8_t *>(&buf[257]), sizeof(Charge));
+                    if (read != sizeof(Charge))
+                        buf[257].cs.meter_start = NAN;
+                }
+                else
+                    buf[257].cs.meter_start = NAN;
+
+                read = f.read(reinterpret_cast<uint8_t *>(&buf[1]), sizeof(Charge) * 257);
+                if (read == -1 || read == 0) {
+                    break;
+                }
+
+                for (int a = 1; a < read / sizeof(Charge); a++) {
+                    if (repair_logic(&buf[a])) {
+                        file_needs_repair = true;
+                        num_repaired++;
+                    }
+                }
+            }
+            if (file_needs_repair) {
+                File write_f = LittleFS.open(chargeRecordFilename(i, directory), "w");
+                write_f.write(reinterpret_cast<uint8_t *>(&buf[1]), read);
+            }
+
+            // buf[0] is the last charge of the last file,
+            // buf[256] is the last charge of the this file.
+            // Advance one file.
+            buf[0] = buf[256];
+        }
+
+        std::vector<ChargeWithLocation> dir_charges = readLastChargesFromDirectory(directory);
+        merge_charge_vectors(all_charges, dir_charges);
+    };
+
+    repair_directory(nullptr);
+
+    // Scan all subdirectories
+    for_filename_in(CHARGE_RECORD_FOLDER,
+        [&repair_directory](const char *name, size_t name_len, bool is_dir) {
+            if (is_dir) {
+                repair_directory(name);
+            }
+            return true;
+        });
+
+    if (num_repaired != 0) {
+        logger.printfln("Repaired %lu charge-entries across all directories.", num_repaired);
+    }
+
+    // Populate last_charges from the collected charges
+    std::lock_guard<std::mutex> lock{records_mutex};
+
+    // Clear existing last_charges
+    while (last_charges.count() > 0) {
+        last_charges.remove(0);
+    }
+
+    // Add charges from the vector (already sorted newest first)
+    size_t charges_to_add = std::min(all_charges.size(), static_cast<size_t>(CHARGE_RECORD_LAST_CHARGES_SIZE));
+    for (int i = static_cast<int>(charges_to_add) - 1; i >= 0; --i) {
+        const auto &charge = all_charges[i];
+
+        auto last_charge = last_charges.add();
+        last_charge->get("timestamp_minutes")->updateUint(charge.charge.cs.timestamp_minutes);
+        last_charge->get("charge_duration")->updateUint(charge.charge.ce.charge_duration);
+        last_charge->get("user_id")->updateUint(charge.charge.cs.user_id);
+
+        float energy_charged = charged_invalid(charge.charge.cs, charge.charge.ce) ? NAN : charge.charge.ce.meter_end - charge.charge.cs.meter_start;
+        last_charge->get("energy_charged")->updateFloat(energy_charged);
+
+        String charger_display_name = get_charger_display_name_from_host(charge.directory.c_str());
+        last_charge->get("charger_name")->updateString(charger_display_name);
+    }
+}
+
+bool GenerationParams::init() {
+    auto initialize = [this]() {
+        this->electricity_price = charge_tracker.config.get("electricity_price")->asUint();
+#if MODULE_DEVICE_NAME_AVAILABLE()
+        this->display_name = device_name.display_name.get("display_name")->asString();
+        this->unique_device_name = device_name.name.get("name")->asString();
+        if (this->display_name != this->unique_device_name)
+            this->unique_device_name = display_name + " (" + unique_device_name + ")";
+        this->display_type = device_name.name.get("display_type")->asString();
+        if (this->display_type.isEmpty()) {
+            this->display_type = OPTIONS_PRODUCT_NAME();
+        }
+#else
+        this->display_type = OPTIONS_PRODUCT_NAME();
+        this->display_name = "unknown device";
+        this->unique_device_name = "unknown device";
+#endif
+
+        this->local_uid = esp32_common.get_uid_num();
+
+#if MODULE_EVSE_COMMON_AVAILABLE() && MODULE_METERS_AVAILABLE()
+        {
+            // Only the meter classes of built-in meters report a meter type.
+            uint32_t slot = evse_common.get_charger_meter();
+            MeterClassID meter_class = meters.get_meter_class(slot);
+            if ((meter_class == MeterClassID::EVSEV2) || (meter_class == MeterClassID::RS485Bricklet) || (meter_class == MeterClassID::EnergyManager)) {
+                const Config *meter_state = api.getState(meters.get_path(slot, Meters::PathType::State), false);
+                if (meter_state != nullptr) {
+                    this->charger_meter_type = static_cast<uint8_t>(meter_state->get("type")->asUint());
+                }
+            }
+        }
+#endif
+
+        for (size_t i = 0; i < users.config.get("users")->count(); ++i) {
+            this->configured_users[i] = users.config.get("users")->get(i)->get("id")->asUint();
+        }
+
+        for (size_t i = 0; i < charge_manager.config.get("chargers")->count(); ++i) {
+            this->configured_chargers[i] = charge_manager.config.get("chargers")->get(i)->get("uid")->asUint();
+        }
+
+        // TODO: possible optimization: Only allocate one cache entry if the user filter is set to one user
+        // TODO use unique_ptr_any here?
+        this->display_name_cache = static_cast<decltype(display_name_cache)>(malloc_iram_or_psram_or_dram(MAX_PASSIVE_USERS * sizeof(display_name_cache[0])));
+        if (this->display_name_cache == nullptr)
+            return;
+
+        // - read all usernames from file first
+        // - then overwrite users that are configured
+        // - then handle special cases to translate unknown user and/or anonymous
+        {
+            File f = LittleFS.open(USERNAME_FILE, "r");
+
+            for (size_t user_id = 0; user_id < MAX_PASSIVE_USERS; ++user_id) {
+                f.seek(user_id * USERNAME_ENTRY_LENGTH + USERNAME_LENGTH, SeekMode::SeekSet);
+
+                char buf[USERNAME_LENGTH] = {}; // Stays empty if the file does not exist.
+                f.read((uint8_t *)buf, DISPLAY_NAME_LENGTH);
+
+                auto length = strnlen(buf, DISPLAY_NAME_LENGTH);
+                this->display_name_cache[user_id].set(length, buf);
+            }
+        }
+
+        {
+            const auto &c = api.getState("users/config")->get("users");
+            for (const auto &cfg : c) {
+                auto user_id = cfg.get("id")->asUint();
+                auto length = cfg.get("display_name")->asString().length();
+
+                char buf[USERNAME_LENGTH];
+                memcpy(buf, cfg.get("display_name")->asEphemeralCStr(), length);
+
+                this->display_name_cache[user_id].set(length, buf);
+            }
+        }
+
+        for (size_t user_id = 0; user_id < MAX_PASSIVE_USERS; ++user_id) {
+            char buf[USERNAME_LENGTH + 1]; // +1 to always fit \0
+            size_t length = this->display_name_cache[user_id].get(buf);
+
+            const char *b = nullptr;
+
+            if (length == 0) {
+                // length should never be 0 except if we manually upload test data to the charger.
+                b = CSVTranslations::getDeletedUser(this->language);
+            } else if (user_id == 0 && strcmp(buf, "Anonymous") == 0) {
+                // Replace "Anonymous" with translated string
+                b = CSVTranslations::getUnknownUser(this->language);
+            }
+
+            if (b != nullptr) {
+                length = std::min(strlen(b), static_cast<size_t>(DISPLAY_NAME_LENGTH));
+                strncpy(buf, b, DISPLAY_NAME_LENGTH); // Pads with \0: set() copies whole 32 bit words.
+                this->display_name_cache[user_id].set(length, buf);
+            }
+        }
+
+        char empty_name[4] = {};
+#if OPTIONS_PRODUCT_ID_IS_WARP()
+        this->charger_display_name_cache = static_cast<decltype(charger_display_name_cache)>(malloc_iram_or_psram_or_dram(sizeof(charger_display_name_cache[0])));
+        if (this->charger_display_name_cache == nullptr)
+            return;
+
+        this->charger_display_name_cache[0].set(0, 0, empty_name);
+#else
+        this->charger_display_name_cache = static_cast<decltype(charger_display_name_cache)>(malloc_iram_or_psram_or_dram(MAX_TRACKED_CHARGERS * sizeof(charger_display_name_cache[0])));
+        if (this->charger_display_name_cache == nullptr)
+            return;
+
+        for (size_t i = 0; i < MAX_TRACKED_CHARGERS; ++i) {
+            this->charger_display_name_cache[i].set(0, 0, empty_name);
+        }
+
+        if (LittleFS.exists(CHARGER_NAMES_FILE)) {
+            File f = LittleFS.open(CHARGER_NAMES_FILE, "r");
+
+            for (size_t i = 0; i < MAX_TRACKED_CHARGERS; ++i) {
+                struct [[gnu::packed]] {
+                    uint32_t uid;
+                    char buf[CHARGER_NAME_LENGTH];
+                } entry;
+
+                f.read((uint8_t *)&entry, CHARGER_NAME_ENTRY_LENGTH);
+
+                auto length = strnlen(entry.buf, DISPLAY_NAME_LENGTH);
+                this->charger_display_name_cache[i].set(entry.uid, length, entry.buf);
+            }
+        }
+
+        {
+            const auto &c = api.getState("charge_manager/config")->get("chargers");
+            for (const auto &cfg : c) {
+                auto uid = cfg.get("uid")->asUint();
+                auto length = cfg.get("name")->asString().length();
+
+                char buf[CHARGER_NAME_LENGTH];
+                memcpy(buf, cfg.get("name")->asEphemeralCStr(), length);
+
+                int idx = -1;
+                for (size_t i = 0; i < MAX_TRACKED_CHARGERS; ++i) {
+                    if (this->charger_display_name_cache[i].uid != uid)
+                        continue;
+                    idx = i;
+                    break;
+                }
+
+                if (idx == -1) {
+                    for (size_t i = 0; i < MAX_TRACKED_CHARGERS; ++i) {
+                        if (this->charger_display_name_cache[i].uid != 0)
+                            continue;
+                        idx = i;
+                        break;
+                    }
+                }
+
+                if (idx == -1)
+                    esp_system_abort("Charger display name cache too small");
+
+                this->charger_display_name_cache[idx].set(uid, length, buf);
+            }
+        }
+
+        for (size_t i = 0; i < MAX_TRACKED_CHARGERS; ++i) {
+            char buf[CHARGER_NAME_LENGTH + 1]; // +1 to always fit \0
+            size_t length = this->charger_display_name_cache[i].get(buf);
+
+            if (length == 0) {
+                // length should never be 0 except if we manually upload test data to the charger.
+                const char *b = CSVTranslations::getDeletedCharger(this->language);
+                length = strlen(b);
+                strncpy(buf, b, DISPLAY_NAME_LENGTH);
+            }
+        }
+#endif
+    };
+
+    bool result = true;
+    if (running_in_main_task()) {
+        initialize();
+    } else {
+        result = task_scheduler.await(std::move(initialize));
+    }
+
+    return result && this->display_name_cache != nullptr && this->charger_display_name_cache != nullptr;
+}
+
+bool GenerationParams::parse_request(std::unique_ptr<char[]> &buf, StaticJsonDocument<256> &doc, WebServerRequest &request) {
+    if (request.contentLength() > 1024) {
+        request.send_plain(413);
+        return false;
+    }
+
+    buf = heap_alloc_array<char>(1024);
+    auto received = request.receive(buf.get(), 1024);
+
+    if (received < 0) {
+        request.send_plain(500, "Failed to receive request payload");
+        return false;
+    }
+
+    DeserializationError error = deserializeJson(doc, buf.get(), received);
+
+    if (error) {
+        char error_string[64];
+        StringWriter sw(error_string, ARRAY_SIZE(error_string));
+        sw.puts("Failed to deserialize string: ");
+        sw.puts(error.c_str());
+        request.send_plain(400, sw);
+        return false;
+    }
+
+    if (!bool(doc["api_not_final_acked"])) {
+        request.send_plain(400, "Please acknowledge that this API is subject to change!");
+        return false;
+    }
+
+    this->user = doc["user_filter"];
+    this->device = doc["device_filter"];
+    this->start_min = doc["start_timestamp_min"];
+    this->end_min = doc["end_timestamp_min"];
+    this->language = (Language)((uint8_t)doc["language"]);
+    this->filter_empty_charges = doc["filter_empty_charges"] | false; // Default to false
+
+    this->current_min = rtc.timestamp_minutes();
+    // This is 0 if there is no time sync.
+    // Use the browser's time in this case.
+    if (this->current_min == 0) {
+        this->current_min = doc["current_timestamp_min"];
+    }
+    return true;
+}
+
+size_t GenerationParams::get_charger_display_name(uint32_t uid, char *buf) const {
+    if (uid != 0) {
+        for (size_t i = 0; i < MAX_TRACKED_CHARGERS; ++i) {
+            if (this->charger_display_name_cache[i].uid != uid)
+                continue;
+
+            return this->charger_display_name_cache[i].get(buf);
+        }
+    }
+
+    // Charges of the local charger (uid 0 is used if only local charges are tracked) are named after this device if the charge manager does not know a name for it.
+    if ((uid == 0) || (uid == this->local_uid)) {
+        size_t len = std::min(this->display_name.length(), static_cast<size_t>(DISPLAY_NAME_LENGTH));
+        const char *name = this->display_name.c_str();
+
+        // Don't cut UTF-8 sequences
+        while ((len > 0) && (len < this->display_name.length()) && ((name[len] & 0xC0) == 0x80)) {
+            --len;
+        }
+
+        memcpy(buf, name, len);
+        buf[len] = '\0';
+        return len;
+    }
+
+    *buf = '\0';
+    return 0;
+}
+
+bool PDFGenerationParams::parse_request(std::unique_ptr<char[]> &buf, StaticJsonDocument<256> &doc, WebServerRequest &request) {
+    if (!this->GenerationParams::parse_request(buf, doc, request))
+        return false;
+
+    this->letterhead_buf = heap_alloc_array<char>(PDF_LETTERHEAD_MAX_SIZE + 1);
+    auto letterhead = this->letterhead_buf.get();
+
+    bool letterhead_passed = doc.containsKey("letterhead") && !doc["letterhead"].isNull();
+
+    if (letterhead_passed) {
+        if (strlen(doc["letterhead"]) > PDF_LETTERHEAD_MAX_SIZE) {
+            request.send_plain(400, "Letterhead is too long!");
+            return false;
+        }
+
+        strncpy(letterhead, doc["letterhead"], PDF_LETTERHEAD_MAX_SIZE + 1);
+    }
+
+    bool persist_letterhead = !doc.containsKey("persist_letterhead") || doc["persist_letterhead"];
+
+    if (this->pdf_letterhead_config != nullptr && persist_letterhead) {
+        auto result = task_scheduler.await([this, letterhead, letterhead_passed]() {
+            auto saved_letterhead = this->pdf_letterhead_config->get("letterhead");
+            if (!letterhead_passed) {
+                strncpy(letterhead, saved_letterhead->asEphemeralCStr(), PDF_LETTERHEAD_MAX_SIZE + 1);
+                return;
+            }
+
+            if (saved_letterhead->asString() != letterhead) {
+                saved_letterhead->updateString(letterhead);
+                API::writeConfig("charge_tracker/pdf_letterhead_config", this->pdf_letterhead_config);
+            }
+        });
+        if (!result) {
+            request.send_plain(500, "Failed to fetch saved letterhead: Await failed.");
+            return false;
+        }
+    } else if (this->pdf_letterhead_config != nullptr && !letterhead_passed) {
+        auto result = task_scheduler.await([this, letterhead]() {
+            auto saved_letterhead = this->pdf_letterhead_config->get("letterhead");
+            strncpy(letterhead, saved_letterhead->asEphemeralCStr(), PDF_LETTERHEAD_MAX_SIZE + 1);
+        });
+        if (!result) {
+            request.send_plain(500, "Failed to fetch saved letterhead: Await failed.");
+            return false;
+        }
+    } else if (!letterhead_passed) {
+        request.send_plain(400, "Letterhead is required for send endpoints");
+        return false;
+    }
+
+    letterhead_lines = read_letterhead_lines(letterhead);
+    return true;
+}
+
+bool GenerationParams::include_charge(const Charge *charge) const {
+    bool include_start = this->start_min == 0 // There is no start filter, accept any charge
+                     || (charge->cs.timestamp_minutes != 0 // Charge start is not unknown (charges with unknown start time are always excluded if there is a start filter)
+                         && charge->cs.timestamp_minutes >= this->start_min); // Charge start is later than filter begin.
+    if (!include_start) // The charge started before the start filter
+        return false;
+
+    bool include_end = this->end_min == 0 // There is no end filter, accept any charge
+                     || (charge->cs.timestamp_minutes != 0 // Charge start is not unknown (charges with unknown start time are always excluded if there is an end filter)
+                         && charge->cs.timestamp_minutes < this->end_min); // Charge start is earlier than filter end.
+    if (!include_end) // The charge started before the start filter
+        return false;
+
+    bool include_user = this->user == USER_FILTER_ALL_USERS // There is no user filter, accept any charge.
+                     || (user == USER_FILTER_DELETED_USERS && !user_configured(configured_users, charge->cs.user_id)) // User is not configured, i.e. deleted.
+                     || (user == USER_FILTER_CONFIGURED_USERS && user_configured(configured_users, charge->cs.user_id)) // User is configured, i.e. not deleted.
+                     || charge->cs.user_id == user; // User matches.
+    if (!include_user)
+        return false;
+
+    if (this->filter_empty_charges && (charged_invalid(charge->cs, charge->ce) || ((charge->ce.meter_end - charge->cs.meter_start) < CHARGE_TRACKER_EMPTY_CHARGE_THRESHOLD_KWH))) {
+        return false;
+    }
+
+    // device intentionally not checked here: Checking this for every charge is inefficient, because we know which device a complete set of charge-record files belongs to.
+    return true;
+}
+
+bool GenerationParams::include_device(const char *directory) const {
+    uint32_t uid = 0;
+
+    if (directory == nullptr) {
+        uid = esp32_common.get_uid_num();
+    } else {
+        if (tf_base58_decode(directory, &uid) != 0) {
+            return false;
+        }
+    }
+
+    return this->include_device(uid);
+}
+
+bool GenerationParams::include_device(uint32_t uid) const {
+    if (this->device == DEVICE_FILTER_ALL_CHARGERS)
+        return true;
+
+    if (this->device >= 0)
+        return this->device == uid;
+
+    bool configured = false;
+    for (size_t i = 0; i < ARRAY_SIZE(this->configured_chargers); ++i) {
+        if (this->configured_chargers[i] == uid) {
+            configured = true;
+            break;
+        }
+    }
+
+    if (this->device == DEVICE_FILTER_CONFIGURED_CHARGERS)
+        return configured;
+
+    if (this->device == DEVICE_FILTER_DELETED_CHARGERS)
+        return !configured;
+
+    return false;
+}
+
+void ChargeTracker::register_urls()
+{
+    // We have to do this here, not at the end of setup,
+    // because removeOldRecords calls users.remove_from_username_file
+    // which requires that the user config is already loaded from flash.
+    // This happens in users::setup() i.e. _after_ charge_tracker::setup()
+    removeOldRecords();
+
+    // We've removed a charge record. Update first charge timestamp
+    this->update_first_charge_timestamp();
+    state.get("tracked_charges")->updateUint(this->total_charge_log_entries);
+
+    api.addPersistentConfig("charge_tracker/config", &config, {}, {"letterhead"});
+    api.addPersistentConfig("charge_tracker/pdf_letterhead_config", &pdf_letterhead_config, {}, {"letterhead"});
+
+    server.on_HTTPThread("/charge_tracker/charge_log", HTTP_GET, [this](WebServerRequest request) {
+        std::lock_guard<std::mutex> lock{records_mutex};
+
+        auto url_buf = heap_alloc_array<char>(CHARGE_RECORD_MAX_FILE_SIZE);
+        if (url_buf == nullptr) {
+            return request.send_plain(507);
+        }
+
+        uint32_t first_charge_record = 1;
+        uint32_t last_charge_record = 1;
+        getChargerChargeRecords(nullptr, &first_charge_record, &last_charge_record);
+
+        const size_t fsize = file_size(LittleFS, chargeRecordFilename(last_charge_record, nullptr));
+        const size_t file_size = (last_charge_record - first_charge_record) * CHARGE_RECORD_MAX_FILE_SIZE + fsize;
+
+        // Don't do a chunked response without any chunk. The webserver does strange things in this case
+        if (file_size == 0) {
+            return request.send_bytes(200);
+        }
+
+        request.beginChunkedResponse_bytes(200);
+        for (int i = first_charge_record; i <= last_charge_record; ++i) {
+            File f = LittleFS.open(chargeRecordFilename(i, nullptr));
+            int read = f.read((uint8_t *)url_buf.get(), CHARGE_RECORD_MAX_FILE_SIZE);
+            int trunc = read - (read % CHARGE_RECORD_SIZE);
+            SEND_CHUNK_OR_FAIL_LEN(request, url_buf.get(), trunc);
+        }
+        return request.endChunkedResponse();
+    });
+
+    api.addState("charge_tracker/last_charges", &last_charges);
+    api.addState("charge_tracker/current_charge", &current_charge, {}, {"tag_id", "tag_type"});
+    api.addState("charge_tracker/state", &state);
+
+    api.addCommand("charge_tracker/remove_all_charges", Config::Confirm(), {Config::confirm_key}, [this](Language /*language*/, String &errmsg) {
+        if (!Config::Confirm()->get(Config::ConfirmKey())->asBool()) {
+            errmsg = "Tracked charges will NOT be removed";
+            return;
+        }
+
+        remove_directory(CHARGE_RECORD_FOLDER);
+        users.remove_username_file();
+        charge_manager.remove_charger_names_file();
+
+        trigger_reboot("removing all tracked charges", 1_s);
+    }, true);
+
+    server.on_HTTPThread("/charge_tracker/pdf", HTTP_PUT, [this](WebServerRequest request) {
+        std::unique_ptr<ChargeLogGenerationLockHelper> lock_helper = ChargeLogGenerationLockHelper::try_lock(GenerationState::LocalDownload);
+        if (lock_helper == nullptr) {
+            return request.send_plain(429, "Another charge log generation is already in progress");
+        }
+
+        logger.printfln("Beginning PDF generation. Please ignore timeout errors (rc -1 etc.) until it is done.");
+
+        PDFGenerationParams params{&this->pdf_letterhead_config};
+        {
+            auto buf = heap_alloc_array<char>(1024);
+            StaticJsonDocument<256> doc;
+            if (!params.parse_request(buf, doc, request))
+                return request.unsafe_ResponseAlreadySent();
+        }
+
+        if (!params.init()) {
+            return request.send_plain(500, "Failed to generate PDF: Task timed out");
+        }
+
+        const auto callback = [this, &request](const void *data, size_t len) -> esp_err_t {
+            // sendChunk complains if called with length == 0, because this indicates the end of the chunked response.
+            // endChunkedResponse is called after the PDF generation is done.
+            if (len == 0)
+                return ESP_OK;
+
+            // FIXME: sendChunk failures probably aren't propagated upwards properly.
+            // The HTTP callback should return any sendChunk failures.
+            return request.sendChunk(static_cast<const char *>(data), len);
+        };
+
+        request.beginChunkedResponse(200, "application/pdf");
+        int rc = this->generate_pdf(callback, &params, &request);
+        if (rc != 0)
+            return WebServerRequestReturnProtect{.error = ESP_FAIL};
+
+        return request.endChunkedResponse();
+    });
+
+    server.on_HTTPThread("/charge_tracker/csv", HTTP_PUT, [this](WebServerRequest request) {
+        std::unique_ptr<ChargeLogGenerationLockHelper> lock_helper = ChargeLogGenerationLockHelper::try_lock(GenerationState::LocalDownload);
+        if (lock_helper == nullptr) {
+            return request.send_plain(429, "Another charge log generation is already in progress");
+        }
+
+        logger.printfln("Beginning CSV generation. Please ignore timeout errors (rc -1 etc.) until it is done.");
+
+        CSVGenerationParams params{};
+        {
+            auto buf = heap_alloc_array<char>(1024);
+            StaticJsonDocument<256> doc;
+            if (!params.parse_request(buf, doc, request))
+                return request.unsafe_ResponseAlreadySent();
+        }
+
+        if (!params.init()) {
+            return request.send_plain(500, "Failed to generate CSV: Task timed out");
+        }
+
+        const auto callback = [this, &request](const char* buffer, size_t len) -> esp_err_t {
+            // FIXME: sendChunk failures probably aren't propagated upwards properly.
+            // The HTTP callback should return any sendChunk failures.
+            return request.sendChunk(buffer, len);
+        };
+
+        request.beginChunkedResponse(200, "text/csv");
+        CSVChargeLogGenerator csv_generator;
+        int rc = csv_generator.generateCSV(params, std::move(callback));
+        if (rc < 0)
+            return WebServerRequestReturnProtect{.error = ESP_FAIL};
+
+        return request.endChunkedResponse();
+    });
+
+#if MODULE_REMOTE_ACCESS_AVAILABLE()
+    server.on_HTTPThread("/charge_tracker/send_charge_log_pdf", HTTP_PUT, [this](WebServerRequest request) {
+        std::unique_ptr<ChargeLogGenerationLockHelper> lock_helper = ChargeLogGenerationLockHelper::try_lock(GenerationState::ManualRemoteSend);
+        if (lock_helper == nullptr) {
+            return request.send_plain(429, "Another charge log generation is already in progress");
+        }
+
+        auto params = std::make_unique<PDFGenerationParams>(&this->pdf_letterhead_config);
+        uint32_t cookie = 0;
+        String remote_access_user_uuid;
+
+        {
+            auto buf = heap_alloc_array<char>(1024);
+            StaticJsonDocument<256> doc;
+            if (!params->parse_request(buf, doc, request))
+                return request.unsafe_ResponseAlreadySent();
+
+            if (!doc.containsKey("cookie")) {
+                return request.send_plain(400, "Missing cookie parameter");
+            }
+
+            cookie = doc["cookie"];
+
+            if (!doc.containsKey("remote_access_user_uuid")) {
+                return request.send_plain(400, "Missing remote_access_user_uuid parameter");
+            }
+            remote_access_user_uuid = String(doc["remote_access_user_uuid"].as<const char*>());
+        }
+
+        if (!params->init()) {
+            return request.send_plain(500, "Failed to generate PDF mail: Task timed out");
+        }
+
+        ChargeLogGenerationLockHelper *lock_helper_ptr = lock_helper.release();
+        PDFGenerationParams *params_ptr = params.release();
+        task_scheduler.scheduleOnce([this, cookie, params_ptr, lock_helper_ptr, remote_access_user_uuid]() mutable {
+                this->start_charge_log_upload_for_user(
+                cookie,
+                FileType::PDF,
+                std::unique_ptr<GenerationParams>{params_ptr},
+                std::unique_ptr<ChargeLogGenerationLockHelper>(lock_helper_ptr),
+                remote_access_user_uuid);
+        });
+        return request.send_plain(200, "Charge-log upload for specific config started");
+    });
+
+    server.on_HTTPThread("/charge_tracker/send_charge_log_csv", HTTP_PUT, [this](WebServerRequest request) {
+        std::unique_ptr<ChargeLogGenerationLockHelper> lock_helper = ChargeLogGenerationLockHelper::try_lock(GenerationState::ManualRemoteSend);
+        if (lock_helper == nullptr) {
+            return request.send_plain(429, "Another charge log generation is already in progress");
+        }
+
+        auto params = std::make_unique<CSVGenerationParams>();
+        uint32_t cookie = 0;
+        String remote_access_user_uuid;
+
+        {
+            auto buf = heap_alloc_array<char>(1024);
+            StaticJsonDocument<256> doc;
+            if (!params->parse_request(buf, doc, request))
+                return request.unsafe_ResponseAlreadySent();
+
+            if (!doc.containsKey("cookie")) {
+                return request.send_plain(400, "Missing cookie parameter");
+            }
+
+            cookie = doc["cookie"];
+
+            if (!doc.containsKey("remote_access_user_uuid")) {
+                return request.send_plain(400, "Missing remote_access_user_uuid parameter");
+            }
+            remote_access_user_uuid = String(doc["remote_access_user_uuid"].as<const char*>());
+        }
+
+        if (!params->init()) {
+            return request.send_plain(500, "Failed to generate CSV mail: Task timed out");
+        }
+
+        ChargeLogGenerationLockHelper *lock_helper_ptr = lock_helper.release();
+        CSVGenerationParams *params_ptr = params.release();
+        task_scheduler.scheduleOnce([this, cookie, params_ptr, lock_helper_ptr, remote_access_user_uuid]() mutable {
+                this->start_charge_log_upload_for_user(
+                cookie,
+                FileType::CSV,
+                std::unique_ptr<GenerationParams>{params_ptr},
+                std::unique_ptr<ChargeLogGenerationLockHelper>(lock_helper_ptr),
+                remote_access_user_uuid);
+        });
+        return request.send_plain(200, "Charge-log upload for specific config started");
+    });
+
+    if (config.get("remote_upload_configs")->count() > 0) {
+        monthly_upload_task_id = task_scheduler.scheduleWithFixedDelay([this]() {
+            // In case someone deletes all remote upload configs without restarting, we also stop trying to send.
+            if (config.get("remote_upload_configs")->count() == 0) {
+                if (monthly_upload_user_idx >= 0) {
+                    finish_monthly_upload();
+                }
+                task_scheduler.cancel(task_scheduler.currentTaskId());
+                return;
+            }
+
+            // If a monthly upload is in progress, check the state machine.
+            if (monthly_upload_user_idx >= 0) {
+                ChargeLogSendState send_state = charge_log_send_ctx.state;
+
+                if (send_state == ChargeLogSendState::Done) {
+                    // Update last_upload_timestamp_min for successfully uploaded user
+                    config.get("remote_upload_configs")->get(static_cast<uint8_t>(monthly_upload_user_idx))
+                        ->get("last_upload_timestamp_min")->updateUint(rtc.timestamp_minutes());
+                    API::writeConfig("charge_tracker/config", &config);
+                    logger.printfln("Monthly charge log upload for user %d completed successfully", monthly_upload_user_idx);
+
+                    // Advance to next user
+                    monthly_upload_user_idx++;
+                    while (monthly_upload_user_idx < monthly_upload_config_count) {
+                        if (try_start_monthly_upload_for_user(monthly_upload_user_idx)) {
+                            return;
+                        }
+                        monthly_upload_user_idx++;
+                    }
+                    finish_monthly_upload();
+                    return;
+                }
+
+                if (send_state == ChargeLogSendState::Error) {
+                    logger.printfln("Monthly charge log upload for user %d failed with error code %u (%s)",
+                                    monthly_upload_user_idx,
+                                    static_cast<uint8_t>(charge_log_send_ctx.error_code),
+                                    get_charge_log_send_error_name(charge_log_send_ctx.error_code));
+
+                    // Advance to next user
+                    monthly_upload_user_idx++;
+                    while (monthly_upload_user_idx < monthly_upload_config_count) {
+                        if (try_start_monthly_upload_for_user(monthly_upload_user_idx)) {
+                            return;
+                        }
+                        monthly_upload_user_idx++;
+                    }
+                    finish_monthly_upload();
+                    return;
+                }
+
+                // Check timeout (5 minutes per user)
+                if (deadline_elapsed(monthly_upload_deadline)) {
+                    logger.printfln("Monthly charge log upload for user %d timed out after 5 minutes. Check the remote access connection stability.", monthly_upload_user_idx);
+
+                    // Advance to next user
+                    monthly_upload_user_idx++;
+                    while (monthly_upload_user_idx < monthly_upload_config_count) {
+                        if (try_start_monthly_upload_for_user(monthly_upload_user_idx)) {
+                            return;
+                        }
+                        monthly_upload_user_idx++;
+                    }
+                    finish_monthly_upload();
+                    return;
+                }
+
+                // Still in progress, will check again on next tick
+                return;
+            }
+
+            // No upload in progress - check if we should start one.
+
+            // Only send when no charge is in progress. This avoids not sending a charge that started at the end of the last month.
+            if (this->currentlyCharging()) {
+                return;
+            }
+
+            timeval tv;
+            bool is_synced = rtc.clock_synced(&tv);
+            if (!is_synced) {
+                return;
+            }
+
+            uint32_t earliest_send = UINT32_MAX;
+            for (const Config &cfg : config.get("remote_upload_configs")) {
+                const uint32_t last_send_minutes = cfg.get("last_upload_timestamp_min")->asUint();
+                if (earliest_send > last_send_minutes) {
+                    earliest_send = last_send_minutes;
+                }
+            }
+
+            // Already sent for this month?
+            if (!wants_send(tv.tv_sec / 60, earliest_send)) {
+                return;
+            }
+
+            // Acquire generation lock
+            auto lock = ChargeLogGenerationLockHelper::try_lock(GenerationState::RemoteSend);
+            if (lock == nullptr) {
+                logger.printfln("Could not acquire charge log generation lock for remote upload. Another charge log generation (PDF/CSV download or upload) is already in progress.");
+                return;
+            }
+            pending_generation_lock = std::move(lock);
+
+            // Compute last month timestamps
+            tm last_month_start;
+            localtime_r(&tv.tv_sec, &last_month_start);
+            tm last_month_end = last_month_start;
+
+            last_month_start.tm_mday = 1;
+            if (last_month_start.tm_mon == 0) {
+                last_month_start.tm_mon = 11;
+                last_month_start.tm_year--;
+            } else {
+                last_month_start.tm_mon--;
+            }
+            last_month_start.tm_hour = 0;
+            last_month_start.tm_min = 0;
+            last_month_start.tm_sec = 0;
+            last_month_start.tm_isdst = -1;
+
+            last_month_end.tm_mday = 1;
+            last_month_end.tm_hour = 0;
+            last_month_end.tm_min = 0;
+            last_month_end.tm_sec = 0;
+            last_month_end.tm_isdst = -1;
+
+            monthly_upload_start_timestamp_min = static_cast<uint32_t>(mktime(&last_month_start)) / 60;
+            monthly_upload_end_timestamp_min = static_cast<uint32_t>(mktime(&last_month_end)) / 60;
+            monthly_upload_config_count = config.get("remote_upload_configs")->count();
+
+            // Switch to fast polling while upload is in progress
+            task_scheduler.updateDelay(monthly_upload_task_id, 1_s);
+
+            // Find first user that needs upload
+            monthly_upload_user_idx = 0;
+            while (monthly_upload_user_idx < monthly_upload_config_count) {
+                if (try_start_monthly_upload_for_user(monthly_upload_user_idx)) {
+                    return;
+                }
+                monthly_upload_user_idx++;
+            }
+
+            // No users needed upload
+            finish_monthly_upload();
+        }, 10_s, 4_h);
+        // Delay so that all other start-up tasks can finish, because sending the protocols causes high load for quite some time.
+        // Check only once every four hours, to avoid a stampede event at midnight on the 2nd of a month.
+        // Protocols will thus be uploaded between midnight and 4:00 on the 2nd of a month.
+        // While actively uploading, the interval is decreased to 1 second.
+    }
+
+#endif
+}
+
+#if MODULE_REMOTE_ACCESS_AVAILABLE()
+
+static void push_upload_result_error(uint32_t cookie, const char *error_msg)
+{
+    char buf[256];
+    TFJsonSerializer json{buf, sizeof(buf)};
+
+    json.addObject();
+    json.addMemberNumber("cookie", cookie);
+    json.addMemberString("error", error_msg);
+    json.endObject();
+    json.end();
+
+    ws.pushRawStateUpdate(buf, "charge_tracker/upload_result");
+}
+
+static void push_upload_result_success(uint32_t cookie)
+{
+    char buf[128];
+    TFJsonSerializer json{buf, sizeof(buf)};
+
+    json.addObject();
+    json.addMemberNumber("cookie", cookie);
+    json.addMemberString("error", "");
+    json.endObject();
+    json.end();
+
+    ws.pushRawStateUpdate(buf, "charge_tracker/upload_result");
+}
+
+static String build_filename(const time_t start, const time_t end, FileType file_type, Language language) {
+    struct tm gen_tm;
+    timeval tv;
+    rtc.clock_synced(&tv);
+    time_t generation_time = tv.tv_sec;
+    localtime_r(&generation_time, &gen_tm);
+
+    char buf[128];
+    StringWriter fname(buf, std::size(buf));
+
+    fname.printf("%s-%s-%s-%04d-%02d-%02dT%02d-%02d-%02d-%03d.%s",
+                 device_name.name.get("type")->asUnsafeCStr(),
+                 device_name.name.get("uid" )->asUnsafeCStr(),
+                 language == Language::English ? "charge-log" : "Ladelog",
+                 gen_tm.tm_year + 1900,
+                 gen_tm.tm_mon + 1,
+                 gen_tm.tm_mday,
+                 gen_tm.tm_hour,
+                 gen_tm.tm_min,
+                 gen_tm.tm_sec,
+                 0, // milliseconds (not available from struct tm)
+                 file_type == FileType::PDF ? "pdf" : "csv");
+
+    return fname.toString();
+}
+
+static constexpr uint32_t CHARGE_LOG_SEND_TASK_STACK_SIZE = 6144;
+
+static void charge_log_send_tcp_task(void *arg)
+{
+    std::unique_ptr<RemoteUploadRequest> upload_args{static_cast<RemoteUploadRequest *>(arg)};
+    if (!upload_args) {
+        vTaskDelete(NULL);
+        return;
+    }
+
+    // Helper: destructors are not called after vTaskDelete, so we must release upload_args explicitly.
+    auto cleanup_and_delete_task = [&upload_args]() {
+        if (charge_tracker.charge_log_send_ctx.state == ChargeLogSendState::Error) {
+            charge_tracker.pending_generation_lock.reset();
+        }
+        upload_args = nullptr;
+        vTaskDelete(NULL);
+    };
+
+    int tcp_sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (tcp_sock < 0) {
+        logger.printfln("Failed to create TCP socket for charge log: %s (%i)", strerror(errno), errno);
+        charge_tracker.charge_log_send_ctx.error_code = ChargeLogSendError::ConnectionOpenFailed;
+        charge_tracker.charge_log_send_ctx.state = ChargeLogSendState::Error;
+        if (upload_args->use_format_overrides && upload_args->cookie != 0) {
+            push_upload_result_error(upload_args->cookie, "Failed to create TCP socket for charge log upload. Check network configuration.");
+        }
+        cleanup_and_delete_task();
+        return;
+    }
+
+    struct sockaddr_in local_addr;
+    memset(&local_addr, 0, sizeof(local_addr));
+    local_addr.sin_family = AF_INET;
+    local_addr.sin_port = 0;
+    local_addr.sin_addr.s_addr = inet_addr("10.123.123.2");
+
+    int ret = bind(tcp_sock, reinterpret_cast<struct sockaddr *>(&local_addr), sizeof(local_addr));
+    if (ret < 0) {
+        logger.printfln("Failed to bind TCP socket for charge log: %s (%i)", strerror(errno), errno);
+        close(tcp_sock);
+        charge_tracker.charge_log_send_ctx.error_code = ChargeLogSendError::ConnectionOpenFailed;
+        charge_tracker.charge_log_send_ctx.state = ChargeLogSendState::Error;
+        if (upload_args->use_format_overrides && upload_args->cookie != 0) {
+            push_upload_result_error(upload_args->cookie, "Failed to bind TCP socket for charge log upload. The local network interface may not be ready.");
+        }
+        cleanup_and_delete_task();
+        return;
+    }
+
+    struct sockaddr_in src_addr;
+    socklen_t addr_len = sizeof(src_addr);
+    if (getsockname(tcp_sock, reinterpret_cast<struct sockaddr *>(&src_addr), &addr_len) == 0) {
+        remote_access.send_port = ntohs(src_addr.sin_port);
+    }
+
+    struct sockaddr_in tcp_dest;
+    memset(&tcp_dest, 0, sizeof(tcp_dest));
+    tcp_dest.sin_family = AF_INET;
+    tcp_dest.sin_port = htons(8080);
+    tcp_dest.sin_addr.s_addr = inet_addr("10.123.123.3");
+
+    ret = connect(tcp_sock, reinterpret_cast<struct sockaddr *>(&tcp_dest), sizeof(tcp_dest));
+    if (ret < 0) {
+        logger.printfln("Failed to connect TCP socket for charge log: %s (%i)", strerror(errno), errno);
+        close(tcp_sock);
+        charge_tracker.charge_log_send_ctx.error_code = ChargeLogSendError::ConnectionOpenFailed;
+        charge_tracker.charge_log_send_ctx.state = ChargeLogSendState::Error;
+        if (upload_args->use_format_overrides && upload_args->cookie != 0) {
+            push_upload_result_error(upload_args->cookie, "Failed to connect to management server for charge log upload. Verify the remote access connection is active.");
+        }
+        cleanup_and_delete_task();
+        return;
+    }
+
+    charge_tracker.charge_log_send_ctx.tcp_sock = tcp_sock;
+    charge_tracker.charge_log_send_ctx.state = ChargeLogSendState::SendingData;
+
+    bool send_error = false;
+    auto tcp_send_fn = [tcp_sock, &send_error](const void *buf, size_t len) -> int {
+        if (send_error) {
+            return -1;
+        }
+
+        const uint8_t *data = static_cast<const uint8_t *>(buf);
+        size_t chunk_sent = 0;
+        while (chunk_sent < len) {
+            int sent = send(tcp_sock, data + chunk_sent, len - chunk_sent, 0);
+            if (sent <= 0) {
+                logger.printfln("TCP send error: %s (%i)", strerror(errno), errno);
+                send_error = true;
+                return -1;
+            }
+            chunk_sent += sent;
+        }
+        return 0;
+    };
+
+    upload_args->generation_params->current_min = rtc.timestamp_minutes();
+
+    bool generation_error = false;
+    if (upload_args->file_type == FileType::PDF) {
+        int rc = charge_tracker.generate_pdf(
+            [&tcp_send_fn](const void *buffer, size_t len) -> int {
+                return tcp_send_fn(buffer, len);
+            },
+            static_cast<PDFGenerationParams *>(upload_args->generation_params.get()),
+            nullptr);
+        generation_error = rc != 0;
+    } else {
+        CSVChargeLogGenerator csv_generator;
+        int rc = csv_generator.generateCSV(
+            *static_cast<CSVGenerationParams *>(upload_args->generation_params.get()),
+            [&tcp_send_fn](const char *buffer, size_t len) -> int {
+                return tcp_send_fn(buffer, len);
+            }
+        );
+        generation_error = rc < 0;
+    }
+
+    if (send_error || generation_error) {
+        if (send_error) {
+            logger.printfln("Error occurred while sending charge log data via TCP");
+        } else {
+            logger.printfln("Error occurred while generating charge log for upload");
+        }
+
+        close(tcp_sock);
+        charge_tracker.charge_log_send_ctx.tcp_sock = -1;
+        charge_tracker.charge_log_send_ctx.error_code = ChargeLogSendError::ServerErrorAfterDataSend;
+        charge_tracker.charge_log_send_ctx.state = ChargeLogSendState::Error;
+        if (upload_args->use_format_overrides && upload_args->cookie != 0) {
+            push_upload_result_error(upload_args->cookie, send_error
+                ? "Connection lost while transmitting charge log data. Please try again."
+                : "Failed to generate charge log for upload. Please try again.");
+        }
+        cleanup_and_delete_task();
+        return;
+    }
+
+    close(tcp_sock);
+    charge_tracker.charge_log_send_ctx.tcp_sock = -1;
+    charge_tracker.charge_log_send_ctx.state = ChargeLogSendState::WaitingForFinalAck;
+
+    cleanup_and_delete_task();
+    return;
+}
+
+bool ChargeTracker::try_start_monthly_upload_for_user(int user_idx)
+{
+    timeval tv;
+    rtc.clock_synced(&tv);
+    const time_t t_now = tv.tv_sec;
+
+    Config::Wrap upload_config = config.get("remote_upload_configs")->get(user_idx);
+    uint32_t last_upload = upload_config->get("last_upload_timestamp_min")->asUint();
+
+    if (!wants_send(t_now / 60, last_upload)) {
+        return false;
+    }
+
+    // Get user UUID from remote_access config
+    int user_id = upload_config->get("user_id")->asInt();
+    const Config *remote_access_config = api.getState("remote_access/config");
+    String user_uuid;
+    for (const Config &user_cfg : remote_access_config->get("users")) {
+        if (user_cfg.get("id")->asUint8() == static_cast<uint8_t>(user_id)) {
+            user_uuid = user_cfg.get("uuid")->asString();
+            break;
+        }
+    }
+
+    // Parse user UUID
+    uint8_t parsed_uuid[16] = {0};
+    if (!remote_access.parse_uuid_string(user_uuid.c_str(), parsed_uuid)) {
+        logger.printfln("Invalid remote access user UUID for monthly upload: %s", user_uuid.c_str());
+        return false;
+    }
+
+    auto file_type = upload_config->get("file_type")->asEnum<FileType>();
+
+    // Build the upload request from config
+    auto upload_request_ptr = std::make_unique<RemoteUploadRequest>();
+    upload_request_ptr->config_index = user_idx;
+    upload_request_ptr->remote_access_user_uuid = user_uuid;
+    upload_request_ptr->file_type = file_type;
+
+    std::unique_ptr<GenerationParams> params = nullptr;
+
+    if (file_type == FileType::PDF)
+        params = std::make_unique<PDFGenerationParams>(nullptr);
+    else
+        params = std::make_unique<CSVGenerationParams>();
+
+    params->user = upload_config->get("user_filter")->asInt16();
+    params->device = upload_config->get("device_filter")->asInt52();
+    params->start_min = monthly_upload_start_timestamp_min;
+    params->end_min = monthly_upload_end_timestamp_min;
+    params->language = upload_config->get("language")->asEnum<Language>();
+    params->filter_empty_charges = upload_config->get("filter_empty_charges")->asBool();
+    // Not part of the config hash on purpose. The hash is used for deduplication of uploads and would change for all existing configs when adding this field.
+    params->current_min = rtc.timestamp_minutes();
+
+    params->init();
+
+    if (file_type == FileType::CSV) {
+        static_cast<CSVGenerationParams *>(params.get())->flavor = upload_config->get("csv_delimiter")->asEnum<CSVFlavor>();
+    } else if (file_type == FileType::PDF) {
+        const String &letterhead_string = upload_config->get("letterhead")->asString();
+        const size_t letterhead_terminated_length = letterhead_string.length() + 1;
+        auto letterhead_buf = heap_alloc_array<char>(letterhead_terminated_length);
+        strncpy(letterhead_buf.get(), letterhead_string.c_str(), letterhead_terminated_length);
+
+        static_cast<PDFGenerationParams *>(params.get())->letterhead_lines = read_letterhead_lines(letterhead_buf.get());
+        static_cast<PDFGenerationParams *>(params.get())->letterhead_buf = std::move(letterhead_buf);
+    }
+
+    // Build filename and get display name
+    String filename = build_filename(
+        ((time_t)params->start_min) * 60,
+        ((time_t)params->end_min) * 60,
+        upload_request_ptr->file_type,
+        params->language);
+
+    // Compute config hash
+    uint8_t config_hash[32];
+    compute_charge_log_hash(config_hash,
+        upload_request_ptr->file_type,
+        params->language,
+        file_type == FileType::PDF ? (static_cast<PDFGenerationParams *>(params.get()))->letterhead_buf.get() : nullptr,
+        params->user,
+        params->device,
+        file_type == FileType::PDF ? CSVFlavor::Excel : (static_cast<CSVGenerationParams *>(params.get()))->flavor,
+        params->start_min,
+        params->end_min);
+
+    upload_request_ptr->generation_params = std::move(params);
+
+    // Start the state machine
+    remote_upload_request = std::move(upload_request_ptr);
+    bool sm_started = start_charge_log_send_sm(
+        filename.c_str(),
+        filename.length(),
+        remote_upload_request->generation_params->display_name.c_str(),
+        remote_upload_request->generation_params->display_name.length(),
+        parsed_uuid,
+        remote_upload_request->generation_params->language,
+        true,
+        config_hash);
+
+    if (!sm_started) {
+        logger.printfln("Failed to start charge log send for monthly upload user %d. The management connection may not be established or another send operation is in progress.", user_idx);
+        remote_upload_request.reset();
+        return false;
+    }
+
+    monthly_upload_deadline = calculate_deadline(5_min);
+    return true;
+}
+
+void ChargeTracker::finish_monthly_upload()
+{
+    monthly_upload_user_idx = -1;
+    monthly_upload_config_count = 0;
+    pending_generation_lock.reset();
+    task_scheduler.updateDelay(monthly_upload_task_id, 4_h);
+}
+
+void ChargeTracker::start_charge_log_upload_for_user(const uint32_t cookie, const FileType file_type, std::unique_ptr<GenerationParams> params, std::unique_ptr<ChargeLogGenerationLockHelper> generation_lock, const String &remote_access_user_uuid)
+{
+    // Parse the remote_access_user_uuid string to extract the binary UUID
+    uint8_t user_uuid[16] = {0};
+    if (!remote_access.parse_uuid_string(remote_access_user_uuid.c_str(), user_uuid)) {
+        logger.printfln("Invalid remote access user UUID: %s", remote_access_user_uuid.c_str());
+        if (cookie != 0) {
+            push_upload_result_error(cookie, "Invalid remote access user UUID. Check the remote access user configuration.");
+        }
+        return;
+    }
+
+    // Build filename for the charge log
+    String filename = build_filename(((time_t)params->start_min) * 60, ((time_t)params->end_min) * 60, file_type, params->language);
+
+    bool pdf = file_type == FileType::PDF;
+
+    // Compute config hash for deduplication
+    uint8_t config_hash[32];
+    compute_charge_log_hash(config_hash,
+        file_type, params->language,
+        pdf ? (static_cast<PDFGenerationParams *>(params.get()))->letterhead_buf.get() : nullptr,
+        params->user, params->device,
+        pdf ? CSVFlavor::Excel : (static_cast<CSVGenerationParams *>(params.get()))->flavor,
+        params->start_min, params->end_min);
+
+    // Initiate the charge log send state machine
+    if (!start_charge_log_send_sm(filename.c_str(), filename.length(),
+                                   params->display_name.c_str(), params->display_name.length(),
+                                   user_uuid, params->language, false, config_hash)) {
+        logger.printfln("Failed to initiate charge log send state machine");
+        // If the state machine couldn't be started, notify and return
+        if (cookie != 0) {
+            push_upload_result_error(cookie, "Failed to start charge log upload. The management connection may not be established or another upload is already in progress.");
+        }
+        return;
+    }
+
+    // Create task for file generation and transmission
+    remote_upload_request = std::make_unique<RemoteUploadRequest>();
+    remote_upload_request->cookie = cookie;
+    remote_upload_request->file_type = file_type;
+    remote_upload_request->use_format_overrides = true;
+    remote_upload_request->remote_access_user_uuid = remote_access_user_uuid;
+    remote_upload_request->generation_params = std::move(params);
+    pending_generation_lock = std::move(generation_lock);
+}
+
+bool ChargeTracker::send_metadata_from_ctx()
+{
+    const size_t filename_len = charge_log_send_ctx.filename.length();
+    const size_t display_name_len = charge_log_send_ctx.display_name.length();
+
+    const size_t meta_total = sizeof(management_packet_header) + 16 + sizeof(uint16_t) + sizeof(uint16_t) + 2 + 1 + filename_len + display_name_len;
+    auto meta_buf = heap_alloc_array<uint8_t>(meta_total);
+    if (!meta_buf) {
+        logger.printfln("Cannot send charge log: out of memory while allocating metadata buffer (%zu bytes)", meta_total);
+        return false;
+    }
+
+    management_packet_header meta_header;
+    meta_header.magic = 0x1234;
+    meta_header.length = static_cast<uint16_t>(meta_total - sizeof(management_packet_header));
+    meta_header.seq_num = 0;
+    meta_header.version = 1;
+    meta_header.type = PacketType::MetadataForChargeLog;
+
+    size_t written = charge_log_send_metadata_packet::write_to_buffer(
+        meta_buf.get(), meta_total,
+        meta_header,
+        charge_log_send_ctx.user_uuid,
+        charge_log_send_ctx.lang,
+        charge_log_send_ctx.is_monthly_email,
+        charge_log_send_ctx.filename.c_str(), static_cast<uint16_t>(filename_len),
+        charge_log_send_ctx.display_name.c_str(), static_cast<uint16_t>(display_name_len)
+    );
+
+    if (written == 0) {
+        logger.printfln("Cannot send charge log: metadata buffer too small (needed %zu bytes, wrote 0)", meta_total);
+        return false;
+    }
+
+    int ret = remote_access.send_to_mgmt_server(meta_buf.get(), written);
+    if (ret < 0) {
+        logger.printfln("Failed to send charge log metadata: %s (%i)", strerror(errno), errno);
+        return false;
+    }
+
+    logger.printfln("Sent MetadataForChargeLog packet (%zu bytes)", written);
+    return true;
+}
+
+bool ChargeTracker::start_charge_log_send_sm(
+    const char *filename, size_t filename_len,
+    const char *display_name, size_t display_name_len,
+    const uint8_t user_uuid[16],
+    Language language,
+    bool is_monthly_email,
+    const uint8_t config_hash[32])
+{
+    if (!remote_access.is_mgmt_connected()) {
+        logger.printfln("Cannot send charge log: management connection to remote access server is not established. Ensure remote access is enabled and connected.");
+        return false;
+    }
+
+    if (charge_log_send_ctx.state != ChargeLogSendState::Idle
+        && charge_log_send_ctx.state != ChargeLogSendState::Done
+        && charge_log_send_ctx.state != ChargeLogSendState::Error) {
+        logger.printfln("Cannot send charge log: another charge log send operation is already active (state %u). Wait for the current operation to complete.",
+                        static_cast<uint8_t>(charge_log_send_ctx.state));
+        return false;
+    }
+
+    // Store metadata context
+    memcpy(charge_log_send_ctx.user_uuid, user_uuid, 16);
+    charge_log_send_ctx.is_monthly_email = is_monthly_email;
+    charge_log_send_ctx.filename = String(filename, filename_len);
+    charge_log_send_ctx.display_name = String(display_name, display_name_len);
+    charge_log_send_ctx.tcp_sock = -1;
+    charge_log_send_ctx.error_code = ChargeLogSendError::Success;
+    charge_log_send_ctx.nack_reason = {};
+
+    const char *lang_str = nullptr;
+    switch (language) {
+        case Language::German:  lang_str = "de"; break;
+        case Language::English: lang_str = "en"; break;
+        default:
+            logger.printfln("Cannot send charge log: unsupported language value. Only German and English are supported.");
+            return false;
+    }
+    charge_log_send_ctx.lang[0] = static_cast<uint8_t>(lang_str[0]);
+    charge_log_send_ctx.lang[1] = static_cast<uint8_t>(lang_str[1]);
+
+    // Send RequestChargeLogSend with config hash
+    request_charge_log_send_packet request_pkt;
+    request_pkt.header.magic = 0x1234;
+    request_pkt.header.length = sizeof(request_pkt.hash);
+    request_pkt.header.seq_num = 0;
+    request_pkt.header.version = 1;
+    request_pkt.header.type = PacketType::RequestChargeLogSend;
+    memcpy(request_pkt.hash, config_hash, 32);
+
+    int ret = remote_access.send_to_mgmt_server(&request_pkt, sizeof(request_pkt));
+    if (ret < 0) {
+        logger.printfln("Failed to send charge log request: %s (%i)", strerror(errno), errno);
+        charge_log_send_ctx.state = ChargeLogSendState::Error;
+        charge_log_send_ctx.error_code = ChargeLogSendError::SendRequestFailed;
+        return false;
+    }
+
+    logger.printfln("Sent RequestChargeLogSend packet with config hash");
+    charge_log_send_ctx.state = ChargeLogSendState::RequestSent;
+    return true;
+}
+
+bool ChargeTracker::handle_charge_log_send_packet(PacketType type, NackReason nack_reason)
+{
+    // Only process packets while in a packet-driven state
+    switch (charge_log_send_ctx.state) {
+        case ChargeLogSendState::RequestSent:
+        case ChargeLogSendState::MetadataSent:
+        case ChargeLogSendState::OpeningConnection:
+        case ChargeLogSendState::WaitingForFinalAck:
+            break;
+
+        case ChargeLogSendState::Idle:
+        case ChargeLogSendState::Done:
+        case ChargeLogSendState::Error:
+        default:
+            return false;
+    }
+
+    switch (charge_log_send_ctx.state) {
+        case ChargeLogSendState::RequestSent: {
+            if (type == PacketType::Nack) {
+                if (nack_reason == NackReason::AlreadySent) {
+                    logger.printfln("Charge log already sent, updating last_upload_timestamp_min");
+                    if (remote_upload_request && !remote_upload_request->use_format_overrides && remote_upload_request->config_index >= 0) {
+                        int8_t cfg_idx = remote_upload_request->config_index;
+                        config.get("remote_upload_configs")->get(static_cast<uint8_t>(cfg_idx))->get("last_upload_timestamp_min")->updateUint(rtc.timestamp_minutes());
+                        API::writeConfig("charge_tracker/config", &config);
+                    }
+                    if (remote_upload_request && remote_upload_request->use_format_overrides && remote_upload_request->cookie != 0) {
+                        push_upload_result_success(remote_upload_request->cookie);
+                    }
+                    charge_log_send_ctx.state = ChargeLogSendState::Done;
+                    remote_upload_request.reset();
+                    pending_generation_lock.reset();
+                    return true;
+                }
+
+                charge_log_send_ctx.nack_reason = nack_reason;
+                charge_log_send_ctx.error_code = ChargeLogSendError::RequestRejected;
+                charge_log_send_ctx.state = ChargeLogSendState::Error;
+
+                const char *reason_str = "unknown";
+                switch (nack_reason) {
+                    case NackReason::Busy: reason_str = "server busy"; break;
+                    case NackReason::TooManyRequests: reason_str = "too many requests"; break;
+                    case NackReason::OngoingRequest: reason_str = "ongoing request"; break;
+                    case NackReason::Timeout: reason_str = "timeout"; break;
+                    default: break;
+                }
+
+                if (remote_upload_request && remote_upload_request->use_format_overrides && remote_upload_request->cookie != 0) {
+                    char err_msg[128];
+                    snprintf(err_msg, sizeof(err_msg), "Charge log upload request rejected by server: %s. Please try again later.", reason_str);
+                    push_upload_result_error(remote_upload_request->cookie, err_msg);
+                }
+                remote_upload_request.reset();
+                pending_generation_lock.reset();
+                return true;
+            }
+
+            // Ack means server explicitly accepted - send metadata and advance
+            if (type == PacketType::Ack) {
+                if (!send_metadata_from_ctx()) {
+                    charge_log_send_ctx.error_code = ChargeLogSendError::SendMetadataFailed;
+                    charge_log_send_ctx.state = ChargeLogSendState::Error;
+                    remote_upload_request.reset();
+                    pending_generation_lock.reset();
+                    return true;
+                }
+                charge_log_send_ctx.state = ChargeLogSendState::MetadataSent;
+                return true;
+            }
+            return false;
+        }
+
+        case ChargeLogSendState::MetadataSent: {
+            if (type == PacketType::Ack) {
+                charge_log_send_ctx.state = ChargeLogSendState::OpeningConnection;
+                logger.printfln("Metadata accepted, opening TCP connection...");
+                return true;
+            }
+            if (type == PacketType::Nack) {
+                charge_log_send_ctx.nack_reason = nack_reason;
+                charge_log_send_ctx.error_code = ChargeLogSendError::MetadataRejected;
+                charge_log_send_ctx.state = ChargeLogSendState::Error;
+                logger.printfln("Charge log metadata rejected (reason: %s)",
+                                get_nack_reason_name(nack_reason));
+                if (remote_upload_request && remote_upload_request->use_format_overrides && remote_upload_request->cookie != 0) {
+                    char err_msg[128];
+                    snprintf(err_msg, sizeof(err_msg), "Charge log metadata rejected by server: %s. Verify the remote access configuration.", get_nack_reason_name(nack_reason));
+                    push_upload_result_error(remote_upload_request->cookie, err_msg);
+                }
+                remote_upload_request.reset();
+                pending_generation_lock.reset();
+                return true;
+            }
+            return false;
+        }
+
+        case ChargeLogSendState::OpeningConnection: {
+            if (type == PacketType::Ack) {
+                if (remote_upload_request == nullptr) {
+                    logger.printfln("Cannot send charge log: upload request context is missing. This is an internal error.");
+                    charge_log_send_ctx.error_code = ChargeLogSendError::ConnectionOpenFailed;
+                    charge_log_send_ctx.state = ChargeLogSendState::Error;
+                    return true;
+                }
+
+                RemoteUploadRequest *args = remote_upload_request.get();
+                const BaseType_t ret = xTaskCreatePinnedToCore(
+                    charge_log_send_tcp_task,
+                    "ChargeLogSendTcp",
+                    CHARGE_LOG_SEND_TASK_STACK_SIZE,
+                    args,
+                    1,
+                    nullptr,
+                    0);
+
+                if (ret != pdPASS_nowarn) {
+                    logger.printfln("Charge log send task could not be created: %s (0x%lx)", esp_err_to_name(ret), static_cast<uint32_t>(ret));
+                    charge_log_send_ctx.error_code = ChargeLogSendError::ConnectionOpenFailed;
+                    charge_log_send_ctx.state = ChargeLogSendState::Error;
+                    if (remote_upload_request->use_format_overrides && remote_upload_request->cookie != 0) {
+                        push_upload_result_error(remote_upload_request->cookie, "Failed to start charge log upload task: insufficient system resources. Try again after restarting the device.");
+                    }
+                    remote_upload_request.reset();
+                    pending_generation_lock.reset();
+                    return true;
+                }
+
+                remote_upload_request.release();
+                return true;
+            }
+            if (type == PacketType::Nack) {
+                charge_log_send_ctx.nack_reason = nack_reason;
+                charge_log_send_ctx.error_code = ChargeLogSendError::ConnectionOpenFailed;
+                charge_log_send_ctx.state = ChargeLogSendState::Error;
+                logger.printfln("Failed to open TCP connection for charge log upload (reason: %s)",
+                                get_nack_reason_name(nack_reason));
+                if (remote_upload_request && remote_upload_request->use_format_overrides && remote_upload_request->cookie != 0) {
+                    char err_msg[128];
+                    snprintf(err_msg, sizeof(err_msg), "Server refused to open data connection for charge log upload: %s. Please try again later.", get_nack_reason_name(nack_reason));
+                    push_upload_result_error(remote_upload_request->cookie, err_msg);
+                }
+                remote_upload_request.reset();
+                pending_generation_lock.reset();
+                return true;
+            }
+            return false;
+        }
+
+        case ChargeLogSendState::WaitingForFinalAck: {
+            if (type == PacketType::Ack) {
+                charge_log_send_ctx.state = ChargeLogSendState::Done;
+                logger.printfln("Charge log send completed successfully");
+                remote_upload_request.reset();
+                pending_generation_lock.reset();
+                return true;
+            }
+            if (type == PacketType::Nack) {
+                charge_log_send_ctx.nack_reason = nack_reason;
+                charge_log_send_ctx.error_code = ChargeLogSendError::ServerErrorAfterDataSend;
+                charge_log_send_ctx.state = ChargeLogSendState::Error;
+                logger.printfln("Server reported error after charge log data was sent (reason: %s)",
+                                get_nack_reason_name(nack_reason));
+                if (remote_upload_request && remote_upload_request->use_format_overrides && remote_upload_request->cookie != 0) {
+                    char err_msg[128];
+                    snprintf(err_msg, sizeof(err_msg), "Server rejected the charge log after data transfer: %s. The upload may need to be retried.", get_nack_reason_name(nack_reason));
+                    push_upload_result_error(remote_upload_request->cookie, err_msg);
+                }
+                remote_upload_request.reset();
+                pending_generation_lock.reset();
+                return true;
+            }
+            return false;
+        }
+
+        default:
+            return false;
+    }
+}
+#endif
+
+namespace {
+struct SubtotalStats {
+    uint64_t duration_s;
+    double charged;
+    uint32_t cost_cents;
+    uint32_t charges;
+
+    void add(const ChargeStart &cs, const ChargeEnd &ce, uint32_t electricity_price) {
+        ++charges;
+        duration_s += ce.charge_duration;
+
+        if (charged_invalid(cs, ce)) {
+            return;
+        }
+
+        const float kwh = ce.meter_end - cs.meter_start;
+        charged += kwh;
+        if (electricity_price != 0) {
+            cost_cents += charge_cost_cents(kwh, electricity_price);
+        }
+    }
+};
+
+struct Subtotal {
+    SubtotalStats stats;
+    uint32_t id; // User ID or charger UID
+};
+
+// Growable list of subtotals, only containing the users or chargers that occur in the report.
+// Doesn't use std::vector: A failed allocation must not abort.
+struct SubtotalList {
+    Subtotal *items = nullptr;
+    uint16_t count = 0;
+    uint16_t capacity = 0;
+    uint16_t last = 0;   // Index of the last found entry: Consecutive charges often have the same user or charger.
+    bool failed = false; // The list is incomplete and must not be shown (oom?).
+
+    SubtotalList() {}
+    SubtotalList(const SubtotalList &) = delete;
+    SubtotalList &operator=(const SubtotalList &) = delete;
+
+    ~SubtotalList() {
+        free_any(items);
+    }
+
+    Subtotal *find_or_add(uint32_t id) {
+        if ((last < count) && (items[last].id == id)) {
+            return &items[last];
+        }
+
+        for (uint16_t i = 0; i < count; ++i) {
+            if (items[i].id == id) {
+                last = i;
+                return &items[i];
+            }
+        }
+
+        if (failed) {
+            return nullptr;
+        }
+
+        if (count == capacity) {
+            // There are at most MAX_PASSIVE_USERS users and MAX_TRACKED_CHARGERS chargers.
+            const uint16_t new_capacity = (capacity == 0) ? 8 : (capacity * 2);
+            Subtotal *new_items = static_cast<Subtotal *>(malloc_psram_or_dram(new_capacity * sizeof(Subtotal)));
+            if (new_items == nullptr) {
+                failed = true;
+                return nullptr;
+            }
+
+            if (count > 0) {
+                memcpy(new_items, items, count * sizeof(Subtotal));
+            }
+            free_any(items);
+            items = new_items;
+            capacity = new_capacity;
+        }
+
+        items[count] = Subtotal{};
+        items[count].id = id;
+        last = count;
+        return &items[count++];
+    }
+
+    // Shown only if there is more than one entry
+    uint16_t rows() const {
+        return ((count > 1) && !failed) ? count : 0;
+    }
+};
+
+struct PDFStats {
+    SubtotalStats total = {};
+    bool seen_charges_without_meter = false;
+    bool only_local_charges = true;
+    uint32_t unknown_start_charges = 0;
+    uint32_t first_known_start_min = 0;
+    uint32_t last_known_start_min = 0;
+
+    // Sorted by name after sort() was called
+    SubtotalList users;
+    SubtotalList chargers;
+
+    void add(const ChargeStart &cs, const ChargeEnd &ce, uint32_t charger_uid, uint32_t electricity_price) {
+        total.add(cs, ce, electricity_price);
+
+        if (charged_invalid(cs, ce)) {
+            seen_charges_without_meter = true;
+        }
+
+        if (cs.timestamp_minutes == 0) {
+            ++unknown_start_charges;
+        } else {
+            if ((first_known_start_min == 0) || (cs.timestamp_minutes < first_known_start_min)) {
+                first_known_start_min = cs.timestamp_minutes;
+            }
+            if (cs.timestamp_minutes > last_known_start_min) {
+                last_known_start_min = cs.timestamp_minutes;
+            }
+        }
+
+        Subtotal *user = users.find_or_add(cs.user_id);
+        if (user != nullptr) {
+            user->stats.add(cs, ce, electricity_price);
+        }
+
+        Subtotal *charger = chargers.find_or_add(charger_uid);
+        if (charger != nullptr) {
+            charger->stats.add(cs, ce, electricity_price);
+        }
+    }
+
+    void sort(const GenerationParams *params) {
+        if (users.failed || chargers.failed) {
+            logger.printfln("Not enough memory for subtotals in PDF charge log");
+        }
+
+        std::sort(users.items, users.items + users.count, [params](const Subtotal &a, const Subtotal &b) {
+            char name_a[DISPLAY_NAME_LENGTH + 4];
+            char name_b[DISPLAY_NAME_LENGTH + 4];
+            params->display_name_cache[a.id].get(name_a);
+            params->display_name_cache[b.id].get(name_b);
+            int cmp = strcasecmp(name_a, name_b);
+            return (cmp != 0) ? (cmp < 0) : (a.id < b.id);
+        });
+
+        std::sort(chargers.items, chargers.items + chargers.count, [params](const Subtotal &a, const Subtotal &b) {
+            char name_a[DISPLAY_NAME_LENGTH + 4];
+            char name_b[DISPLAY_NAME_LENGTH + 4];
+            params->get_charger_display_name(a.id, name_a);
+            params->get_charger_display_name(b.id, name_b);
+            int cmp = strcasecmp(name_a, name_b);
+            return (cmp != 0) ? (cmp < 0) : (a.id < b.id);
+        });
+    }
+};
+
+struct PDFTexts {
+    PDFStats stats;
+
+    char period[64];
+    char created[24];
+    char users[DISPLAY_NAME_LENGTH + 8];
+    char meter[64];
+    char price[40];
+    char tile_energy[40];
+    char tile_count[24];
+    char tile_third[40];
+    char totals_duration[24];
+    char totals_energy[24];
+    char totals_cost[24];
+    char note[1024]; // The longest possible note is about 850 bytes currently
+    char footer[256];
+    char doc_subject[64];
+    char doc_creator[64];
+    char table_lines[PDF_TABLE_LINES_PER_OBJECT * PDF_TABLE_LINE_LEN];
+};
+} // anonymous namespace
+
+// Sum of charge durations as h:mm:ss. buf must have room for 24 bytes.
+// Can't overflow: max. 32768 charges * 2^24 s.
+static void format_duration_sum(char *buf, uint64_t duration_s)
+{
+    snprintf(buf, 24, "%llu:%02llu:%02llu", duration_s / 3600, (duration_s / 60) % 60, duration_s % 60);
+}
+
+// Writes the cells of a subtotal row, see PDFSubtotalColumn.
+static void subtotal_row_to_cells(char *buf, const char *name, const SubtotalStats &s, const GenerationParams *params)
+{
+    const Language lang = params->language;
+    char *head = buf;
+
+    const size_t name_len = std::min(strlen(name), static_cast<size_t>(DISPLAY_NAME_LENGTH + 3));
+    memcpy(head, name, name_len);
+    head[name_len] = '\0';
+    head += name_len + 1;
+
+    head += 1 + format_number(head, s.charges, 0, lang);
+    format_duration_sum(head, s.duration_s);
+    head += 1 + strlen(head);
+    head += 1 + format_number(head, s.charged, 3, lang);
+    if (params->electricity_price != 0) {
+        format_number(head, s.cost_cents / 100.0, 2, lang);
+    }
+}
+
+static_assert(DISPLAY_NAME_LENGTH + 4 + 4 * 24 <= PDF_SUBTOTAL_ROW_LEN, "PDF_SUBTOTAL_ROW_LEN too small");
+
+static void build_pdf_report(PDFReport &report, PDFTexts &texts, const PDFGenerationParams *params)
+{
+    const PDFStats &stats = texts.stats;
+    const bool en = params->language == Language::English;
+    const Language lang = params->language;
+    const bool show_cost = params->electricity_price != 0;
+    char num[24];
+
+#if OPTIONS_PRODUCT_ID_IS_ELTAKO()
+    report.doc_title = en ? "ELTAKO Charge Log" : "ELTAKO Ladelog";
+#else
+    report.doc_title = en ? "WARP Charge Log" : "WARP Ladelog";
+#endif
+    report.title = en ? "Charge Log" : "Ladelog";
+    report.subtitle = en ? "Record of the tracked charging sessions" : "Ladenachweis der erfassten Ladevorgänge";
+
+    // Period. Use the dates of the first charge and the export if no filter is set.
+    {
+        StringWriter sw(texts.period, sizeof(texts.period));
+        if (params->start_min != 0) {
+            timestamp_min_to_date_string(num, params->start_min, lang);
+            sw.puts(num);
+        } else if (stats.first_known_start_min != 0) {
+            timestamp_min_to_date_string(num, stats.first_known_start_min, lang);
+            sw.puts(num);
+        } else {
+            sw.puts(en ? "start of records" : "Aufzeichnungsbeginn");
+        }
+
+        sw.puts(" - ");
+
+        if (params->end_min != 0) {
+            // The end of the filter is exclusive.
+            timestamp_min_to_date_string(num, params->end_min - 1, lang);
+            sw.puts(num);
+        } else if (params->current_min != 0) {
+            timestamp_min_to_date_string(num, params->current_min, lang);
+            sw.puts(num);
+        } else if (stats.last_known_start_min != 0) {
+            timestamp_min_to_date_string(num, stats.last_known_start_min, lang);
+            sw.puts(num);
+        } else {
+            sw.puts(en ? "end of records" : "Aufzeichnungsende");
+        }
+        report.period = texts.period;
+    }
+
+    // Document properties
+    report.doc_author = params->unique_device_name.c_str();
+    {
+        StringWriter sw(texts.doc_subject, sizeof(texts.doc_subject));
+        sw.printf("%s %s", report.title, texts.period);
+    }
+    report.doc_subject = texts.doc_subject;
+    {
+        StringWriter sw(texts.doc_creator, sizeof(texts.doc_creator));
+        sw.printf("%s, Firmware %s", params->display_type.c_str(), build_version_full_str());
+    }
+    report.doc_creator = texts.doc_creator;
+
+    report.letterhead = params->letterhead_buf.get();
+    report.letterhead_lines = params->letterhead_lines;
+
+    // Info block
+    const char *meter_name = stats.only_local_charges ? get_meter_type_name(params->charger_meter_type) : nullptr;
+    const bool meter_is_mid = (meter_name != nullptr) && meter_type_is_mid(params->charger_meter_type);
+    {
+        int row = 0;
+        report.info_labels[row] = en ? "Period" : "Zeitraum";
+        report.info_bold[row] = true;
+        report.info_values[row++] = texts.period;
+
+        report.info_labels[row] = en ? "Device" : "Gerät";
+        report.info_values[row++] = params->unique_device_name.c_str();
+
+        if (meter_name != nullptr) {
+            snprintf(texts.meter, sizeof(texts.meter), "%s%s", meter_name, meter_is_mid ? " (MID)" : "");
+            report.info_labels[row] = en ? "Energy meter" : "Stromzähler";
+            report.info_values[row++] = texts.meter;
+        }
+
+        if (params->user == USER_FILTER_ALL_USERS) {
+            strcpy(texts.users, en ? "All users" : "Alle Benutzer");
+        } else if (params->user == USER_FILTER_CONFIGURED_USERS) {
+            strcpy(texts.users, en ? "Configured users" : "Konfigurierte Benutzer");
+        } else if (params->user == USER_FILTER_DELETED_USERS) {
+            strcpy(texts.users, en ? "Deleted users" : "Gelöschte Benutzer");
+        } else {
+            params->display_name_cache[params->user].get(texts.users);
+        }
+        report.info_labels[row] = en ? "Users" : "Benutzer";
+        report.info_values[row++] = texts.users;
+
+        if (show_cost) {
+            format_number(num, params->electricity_price / 100.0, 2, lang);
+            snprintf(texts.price, sizeof(texts.price), "%s ct/kWh", num);
+            report.info_labels[row] = en ? "Electricity price" : "Strompreis";
+            report.info_values[row++] = texts.price;
+        }
+
+        timestamp_min_to_date_time_string(texts.created, params->current_min, lang);
+        report.info_labels[row] = en ? "Created on" : "Erstellt am";
+        report.info_values[row++] = texts.created;
+
+        report.info_rows = row;
+    }
+
+    // Tiles
+    format_number(num, stats.total.charged, 3, lang);
+    snprintf(texts.tile_energy, sizeof(texts.tile_energy), "%s kWh", num);
+    report.tile_labels[0] = en ? "Total energy" : "Gesamtenergie";
+    report.tile_values[0] = texts.tile_energy;
+
+    format_number(texts.tile_count, stats.total.charges, 0, lang);
+    report.tile_labels[1] = en ? "Charging sessions" : "Ladevorgänge";
+    report.tile_values[1] = texts.tile_count;
+
+    if (show_cost) {
+        format_number(num, stats.total.cost_cents / 100.0, 2, lang);
+        snprintf(texts.tile_third, sizeof(texts.tile_third), "%s €", num);
+        report.tile_labels[2] = en ? "Total cost" : "Gesamtkosten";
+    } else {
+        format_duration_sum(num, stats.total.duration_s);
+        snprintf(texts.tile_third, sizeof(texts.tile_third), "%s h", num);
+        report.tile_labels[2] = en ? "Total charging time" : "Gesamtladedauer";
+    }
+    report.tile_values[2] = texts.tile_third;
+
+    // Table
+    report.section_title = en ? "Tracked charging sessions" : "Erfasste Ladevorgänge";
+    report.show_cost_column = show_cost;
+    // One cell per visible column, see PDFTableVisibleColumn. The second line of a header belongs to the second line of a charge, except for the units of the single line columns.
+    report.table_header = en ? "No.\0" "Start\nEnd\0" "User\nCharger\0" "Duration\n(h:mm:ss)\0" "Start reading\nEnd reading\0" "Energy\n(kWh)\0" "Cost\n(€)"
+                             : "Nr.\0" "Start\nEnde\0" "Benutzer\nWallbox\0" "Ladedauer\n(h:mm:ss)\0" "Start-Zählerstand\nEnd-Zählerstand\0" "Energie\n(kWh)\0" "Kosten\n(€)";
+    report.no_charges_text = en ? "No charging sessions were tracked in the selected period."
+                                : "Im ausgewählten Zeitraum wurden keine Ladevorgänge erfasst.";
+
+    // Totals
+    report.totals_label = en ? "Total" : "Summe";
+    format_duration_sum(texts.totals_duration, stats.total.duration_s);
+    report.totals_duration = texts.totals_duration;
+    format_number(texts.totals_energy, stats.total.charged, 3, lang);
+    report.totals_energy = texts.totals_energy;
+    if (show_cost) {
+        format_number(texts.totals_cost, stats.total.cost_cents / 100.0, 2, lang);
+        report.totals_cost = texts.totals_cost;
+    }
+
+    // Subtotals. Only shown if there is more than one user or charger.
+    if (stats.users.rows() > 0) {
+        PDFSubtotalTable &t = report.subtotal_tables[report.subtotal_table_count++];
+        t.title = en ? "Summary by user" : "Übersicht nach Benutzer";
+        t.header = en ? "User\0" "Charging sessions\0" "Duration\n(h:mm:ss)\0" "Energy\n(kWh)\0" "Cost\n(€)"
+                      : "Benutzer\0" "Ladevorgänge\0" "Ladedauer\n(h:mm:ss)\0" "Energie\n(kWh)\0" "Kosten\n(€)";
+        t.rows = stats.users.rows();
+    }
+
+    const int charger_table = (stats.chargers.rows() > 0) ? report.subtotal_table_count : -1;
+    if (charger_table >= 0) {
+        PDFSubtotalTable &t = report.subtotal_tables[report.subtotal_table_count++];
+        t.title = en ? "Summary by charger" : "Übersicht nach Wallbox";
+        t.header = en ? "Charger\0" "Charging sessions\0" "Duration\n(h:mm:ss)\0" "Energy\n(kWh)\0" "Cost\n(€)"
+                      : "Wallbox\0" "Ladevorgänge\0" "Ladedauer\n(h:mm:ss)\0" "Energie\n(kWh)\0" "Kosten\n(€)";
+        t.rows = stats.chargers.rows();
+    }
+
+    report.subtotal_row = [&stats, params, charger_table](int table, uint32_t row, char *buf) {
+        char name[DISPLAY_NAME_LENGTH + 4];
+
+        if (table == charger_table) {
+            const Subtotal &charger = stats.chargers.items[row];
+            params->get_charger_display_name(charger.id, name);
+            subtotal_row_to_cells(buf, name, charger.stats, params);
+        } else {
+            const Subtotal &user = stats.users.items[row];
+            params->display_name_cache[user.id].get(name);
+            subtotal_row_to_cells(buf, name, user.stats, params);
+        }
+    };
+
+    // Note
+    {
+        StringWriter sw(texts.note, sizeof(texts.note));
+
+        sw.puts(en ? "This report was generated automatically from the charge log of the device listed above."
+                   : "Dieser Bericht wurde automatisch aus dem Ladelog des oben genannten Geräts erstellt.");
+
+        sw.puts(en ? " It contains all charging sessions that started within the stated period. All times are in the local time of the device."
+                   : " Enthalten sind alle Ladevorgänge, die im angegebenen Zeitraum begonnen haben. Alle Zeitangaben in Ortszeit des Geräts.");
+
+        if (meter_name != nullptr) {
+            if (en) {
+                sw.printf(" The energy was measured by the %senergy meter %s.", meter_is_mid ? "MID certified " : "", meter_name);
+            } else {
+                sw.printf(" Die Energiemengen wurden mit dem %sStromzähler %s gemessen.", meter_is_mid ? "MID-konformen " : "", meter_name);
+            }
+        } else {
+            // The meter type is not known here (e.g. charges of other chargers exported on an Energy Manager), but all chargers we support are only sold with MID certified meters.
+            sw.puts(en ? " The energy was measured with MID certified energy meters."
+                       : " Die Energiemengen wurden mit MID-konformen Stromzählern gemessen.");
+        }
+
+        sw.puts(en ? " The energy of a charging session is the difference between the meter readings at its end and start."
+                   : " Die Energie eines Ladevorgangs ergibt sich aus der Differenz der Zählerstände bei Ende und Start.");
+
+        if (show_cost) {
+            if (en) {
+                sw.printf(" Costs were calculated with the configured electricity price of %s.", texts.price);
+            } else {
+                sw.printf(" Die Kosten wurden mit dem konfigurierten Strompreis von %s berechnet.", texts.price);
+            }
+        }
+
+        if (params->filter_empty_charges) {
+            sw.puts(en ? " Charging sessions without significant energy flow (1 Wh or less) are not listed."
+                       : " Ladevorgänge ohne nennenswerten Energiefluss (höchstens 1 Wh) sind nicht aufgeführt.");
+        }
+
+        if (stats.unknown_start_charges == 1) {
+            sw.puts(en ? " The start time of one charging session is unknown, because the device's clock was not synchronized at that time."
+                       : " Bei einem Ladevorgang ist die Startzeit unbekannt, da die Uhr des Geräts zu diesem Zeitpunkt nicht synchronisiert war.");
+        } else if (stats.unknown_start_charges > 1) {
+            if (en) {
+                sw.printf(" The start time of %lu charging sessions is unknown, because the device's clock was not synchronized at that time.", stats.unknown_start_charges);
+            } else {
+                sw.printf(" Bei %lu Ladevorgängen ist die Startzeit unbekannt, da die Uhr des Geräts zu diesem Zeitpunkt nicht synchronisiert war.", stats.unknown_start_charges);
+            }
+        }
+
+        if (stats.seen_charges_without_meter) {
+            sw.puts(en ? " At least one charging session has no valid meter readings. The totals are therefore incomplete."
+                       : " Für mindestens einen Ladevorgang liegen keine gültigen Zählerstände vor. Die Summen sind daher unvollständig.");
+        }
+
+        report.note_title = en ? "Note" : "Hinweis";
+        report.note = texts.note;
+    }
+
+    snprintf(texts.footer, sizeof(texts.footer), "%s \xC2\xB7 %s \xC2\xB7 %s \xC2\xB7 Firmware %s",
+             report.title, params->unique_device_name.c_str(), params->display_type.c_str(), build_version_full_str());
+    report.footer = texts.footer;
+    report.page_label_format = en ? "Page %d of %d" : "Seite %d von %d";
+}
+
+int ChargeTracker::generate_pdf(
+    std::function<int(const void *buffer, size_t len)> &&callback,
+    const PDFGenerationParams *params,
+    WebServerRequest *request
+) {
+    if ((params->display_name_cache == nullptr) || (params->charger_display_name_cache == nullptr)) {
+        logger.printfln("Cannot generate PDF charge log: Generation parameters not initialized");
+        return -1;
+    }
+
+    unique_ptr_any<PDFTexts> texts = make_unique_psram<PDFTexts>();
+    if (texts == nullptr) {
+        logger.printfln("Cannot generate PDF charge log: Out of memory");
+        return -1;
+    }
+
+    PDFStats &stats = texts->stats;
+
+#if OPTIONS_PRODUCT_ID_IS_WARP()
+    // WARP1 has limited memory (no PSRAM), use file-by-file reading
+    int first_file = -1;
+    int first_charge = -1;
+    int last_file = -1;
+    int last_charge = -1;
+    std::lock_guard<std::mutex> lock{records_mutex};
+
+    uint32_t first_charge_record = 0;
+    uint32_t last_charge_record = 0;
+
+    if (getChargerChargeRecords(nullptr, &first_charge_record, &last_charge_record)) {
+        Charge c;
+        for (int i = first_charge_record; i <= last_charge_record; ++i) {
+            File f = LittleFS.open(chargeRecordFilename(i, nullptr));
+            for (int j = 0; j < (CHARGE_RECORD_MAX_FILE_SIZE / CHARGE_RECORD_SIZE); ++j) {
+                if (f.read((uint8_t *)&c, CHARGE_RECORD_SIZE) != CHARGE_RECORD_SIZE)
+                    goto search_done;
+
+                if (!params->include_charge(&c))
+                    continue;
+
+                if (first_file == -1)
+                    first_file = i;
+                if (first_charge == -1)
+                    first_charge = j;
+                last_file = i;
+                last_charge = j;
+                stats.add(c.cs, c.ce, 0, params->electricity_price);
+            }
+        }
+    }
+search_done:
+#else
+    // Non-WARP1 builds have PSRAM, use getFilteredCharges for efficient charge collection
+    size_t filtered_count = 0;
+    ExportCharge *filtered_charges = getFilteredCharges(*params, &filtered_count);
+
+    for (size_t i = 0; i < filtered_count; ++i) {
+        stats.add(filtered_charges[i].charge.cs, filtered_charges[i].charge.ce, filtered_charges[i].charger_uid, params->electricity_price);
+        if (filtered_charges[i].charger_uid != params->local_uid) {
+            stats.only_local_charges = false;
+        }
+    }
+#endif
+
+    stats.sort(params);
+
+    PDFReport report;
+    build_pdf_report(report, *texts, params);
+
+    char *table_lines_buffer = texts->table_lines;
+    const size_t table_lines_buffer_size = sizeof(texts->table_lines);
+    const bool any_charges_tracked = stats.total.charges > 0;
+
+    std::lock_guard<std::mutex> lock2{pdf_mutex};
+
+#if OPTIONS_PRODUCT_ID_IS_WARP()
+    int current_file = (first_file > -1 ? first_file : first_charge_record);
+    int current_charge = (first_charge > -1 ? first_charge : 0);
+    last_file = (last_file >= 0) ? last_file : last_charge_record;
+    File f;
+
+    int rc = init_pdf_generator(callback,
+                       report,
+                       stats.total.charges,
+                       [table_lines_buffer,
+                        table_lines_buffer_size,
+                        &f,
+                        params,
+                        first_file,
+                        first_charge,
+                        last_file,
+                        last_charge,
+                        &current_file,
+                        &current_charge,
+                        any_charges_tracked]
+                       (const char * * table_lines) {
+        memset(table_lines_buffer, 0, table_lines_buffer_size);
+        int lines_generated = 0;
+        char *table_lines_head = table_lines_buffer;
+        Charge c;
+        while (any_charges_tracked && current_file <= last_file) {
+            if (current_charge >= (CHARGE_RECORD_MAX_FILE_SIZE / CHARGE_RECORD_SIZE)) {
+                current_charge = 0;
+            }
+            if (!f) {
+                f =  LittleFS.open(chargeRecordFilename(current_file, nullptr));
+                f.seek(CHARGE_RECORD_SIZE * current_charge);
+            }
+            for (; current_charge < (CHARGE_RECORD_MAX_FILE_SIZE / CHARGE_RECORD_SIZE); ++current_charge) {
+                if ((lines_generated == PDF_TABLE_LINES_PER_OBJECT) || ((current_file == last_file) && (current_charge > last_charge))) {
+                    break;
+                }
+                if (f.read((uint8_t *)&c, CHARGE_RECORD_SIZE) != CHARGE_RECORD_SIZE)
+                    break;
+
+                if (!params->include_charge(&c))
+                    continue;
+
+                table_lines_head = tracked_charge_to_pdf_row(table_lines_head, c.cs, c.ce, params, 0);
+                ++lines_generated;
+            }
+            if (current_charge >= (CHARGE_RECORD_MAX_FILE_SIZE / CHARGE_RECORD_SIZE)) {
+                f.close();
+                ++current_file;
+                current_charge = 0;
+            }
+            if ((lines_generated == PDF_TABLE_LINES_PER_OBJECT)) {
+                break;
+            }
+            if (current_file == last_file && current_charge >= last_charge) {
+                f.close();
+                break;
+            }
+        }
+        *table_lines = table_lines_buffer;
+        vTaskDelay(1);
+        return lines_generated;
+    });
+#else
+    size_t current_charge_idx = 0;
+
+    int rc = init_pdf_generator(callback,
+                       report,
+                       stats.total.charges,
+                       [table_lines_buffer,
+                        table_lines_buffer_size,
+                        &current_charge_idx,
+                        params,
+                        filtered_charges,
+                        filtered_count,
+                        any_charges_tracked]
+                       (const char * * table_lines) {
+        memset(table_lines_buffer, 0, table_lines_buffer_size);
+        int lines_generated = 0;
+        char *table_lines_head = table_lines_buffer;
+
+        while (any_charges_tracked && (current_charge_idx < filtered_count) && (lines_generated < PDF_TABLE_LINES_PER_OBJECT)) {
+            const auto &c = filtered_charges[current_charge_idx];
+
+            table_lines_head = tracked_charge_to_pdf_row(table_lines_head, c.charge.cs, c.charge.ce, params, c.charger_uid);
+            ++lines_generated;
+            ++current_charge_idx;
+        }
+
+        *table_lines = table_lines_buffer;
+
+        vTaskDelay(1);
+        return lines_generated;
+    });
+
+    free_any(filtered_charges);
+#endif
+
+    return rc;
+}
+
+ExportCharge *ChargeTracker::getFilteredCharges(const GenerationParams &params, size_t *out_count)
+{
+    std::lock_guard<std::mutex> lock{records_mutex};
+
+    const size_t max_records_per_file = CHARGE_RECORD_MAX_FILE_SIZE / CHARGE_RECORD_SIZE;
+    size_t total_files = 0;
+
+    // Count files in main directory if device_filter matches
+    uint32_t main_first = 0, main_last = 0;
+
+    if (params.include_device(nullptr)) {
+        if (getChargerChargeRecords(nullptr, &main_first, &main_last)) {
+            total_files += (main_last - main_first + 1);
+        }
+    }
+
+    // Count files in subdirectories
+    for_filename_in(CHARGE_RECORD_FOLDER,
+        [this, &params, &total_files](const char *name, size_t name_len, bool is_dir) {
+            if (is_dir) {
+                // Check if this directory matches the device filter
+                if (!params.include_device(name)) {
+                    return true;
+                }
+
+                uint32_t first_record = 0, last_record = 0;
+                if (getChargerChargeRecords(name, &first_record, &last_record)) {
+                    total_files += (last_record - first_record + 1);
+                }
+                vTaskDelay(1); // After every directory, give other tasks a chance to run and reset their watchdogs.
+            }
+            return true;
+        });
+
+    if (total_files == 0) {
+        *out_count = 0;
+        return nullptr;
+    }
+
+    size_t max_charges = total_files * max_records_per_file + 1; // TODO: why +1 here?
+
+    ExportCharge *charges = static_cast<ExportCharge *>(malloc_psram((max_charges + 1) * sizeof(ExportCharge))); // TODO: why *also* +1 here?!?
+    if (charges == nullptr) {
+        *out_count = 0;
+        return nullptr;
+    }
+
+    size_t charge_count = 0;
+
+    // Helper lambda to read charges from a directory
+    auto read_directory_charges = [this, &charges, &charge_count, max_charges, &params](const char *directory) {
+        uint32_t first_record = 0, last_record = 0;
+        if (!getChargerChargeRecords(directory, &first_record, &last_record)) {
+            return;
+        }
+
+        // Get charger UID from directory name
+        uint32_t charger_uid = 0;
+
+        if (directory == nullptr) {
+            charger_uid = esp32_common.get_uid_num();
+        } else {
+            if (tf_base58_decode(directory, &charger_uid) != 0) {
+                logger.printfln("Directory '%s' has invalid charger UID", directory == nullptr ? "main" : directory);
+                return;
+            }
+        }
+
+        uint32_t prev_known_timestamp = 0;
+        Charge c;
+
+        for (uint32_t file_idx = first_record; file_idx <= last_record && charge_count <= max_charges; ++file_idx) {
+            File f = LittleFS.open(chargeRecordFilename(file_idx, directory));
+            if (!f) {
+                continue;
+            }
+
+            size_t file_size = f.size();
+            size_t num_complete_records = file_size / CHARGE_RECORD_SIZE;
+
+            for (size_t record_idx = 0; record_idx < num_complete_records && charge_count <= max_charges; ++record_idx) {
+                size_t bytes_read = f.read((uint8_t *)&c, CHARGE_RECORD_SIZE);
+                if (bytes_read != CHARGE_RECORD_SIZE) {
+                    break;
+                }
+
+                if (!params.include_charge(&c)) {
+                    if (c.cs.timestamp_minutes != 0) {
+                        prev_known_timestamp = c.cs.timestamp_minutes;
+                    }
+                    continue;
+                }
+
+                charges[charge_count].charge.cs = c.cs;
+                charges[charge_count].charge.ce = c.ce;
+                charges[charge_count].charger_uid = charger_uid;
+                charges[charge_count].prev_known_timestamp_minutes = prev_known_timestamp;
+                ++charge_count;
+
+                if (c.cs.timestamp_minutes != 0) {
+                    prev_known_timestamp = c.cs.timestamp_minutes;
+                }
+            }
+
+            vTaskDelay(1);
+            f.close();
+        }
+    };
+
+    // Only read main directory if device filter matches
+    if (params.include_device(nullptr)) {
+        read_directory_charges(nullptr);
+    }
+
+    for_filename_in(CHARGE_RECORD_FOLDER,
+        [&params, &read_directory_charges](const char *name, size_t name_len, bool is_dir) {
+            if (is_dir) {
+                // Check if this directory matches the device filter
+                if (!params.include_device(name)) {
+                    return true;
+                }
+
+                read_directory_charges(name);
+            }
+            return true;
+        });
+
+    std::sort(charges, charges + charge_count, [](const ExportCharge &a, const ExportCharge &b) {
+        return b > a;
+    });
+
+    *out_count = charge_count;
+    return charges;
+}
+
+std::unique_ptr<ChargeLogGenerationLockHelper> ChargeLogGenerationLockHelper::try_lock(GenerationState kind) {
+    GenerationState expected = GenerationState::Ready;
+    if (!generation_lock_state.compare_exchange_strong(expected, kind)) {
+        return nullptr;
+    }
+
+    ensure_running_in_main_task([kind]() {
+        charge_tracker.state.get("generator_state")->updateEnum<GenerationState>(kind);
+    });
+
+    return std::make_unique<ChargeLogGenerationLockHelper>();
+}
+
+ChargeLogGenerationLockHelper::~ChargeLogGenerationLockHelper() {
+    ensure_running_in_main_task([]() {
+        charge_tracker.state.get("generator_state")->updateEnum<GenerationState>(GenerationState::Ready);
+    });
+    generation_lock_state.store(GenerationState::Ready);
+}

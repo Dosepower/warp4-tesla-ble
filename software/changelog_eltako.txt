@@ -1,0 +1,261 @@
+2025-07-22: 2.8.6 (c4e440b4)
+- Initial release
+
+2025-08-05: 2.8.7 (540648f7)
+- Modbus TCP: Add support for SMA hybrid inverter battery virtual meter
+- RCT Power: Add support for inverter, load and PV virtual meters
+- RCT Power: Add support for phase power value to virtual grid meter
+- SunSpec: Improve robustness of device scan on connect
+- Charge Manager: Add battery storage SoC threshold for PV excess charging
+- Charge Manager: Improve (m)DNS hostname lookup robustness
+- OCPP: Adapt to errata version 2025-04
+- MQTT auto discovery: Add phase currents
+- Improve EV wakeup attempt via IEC state F (through EVSE 2.0 Bricklet firmware 2.2.14)
+- Increase EV wakeup delay from 30s to 90s; some VW EVs will wakeup by themself, but need longer then 30s (through EVSE 2.0 Bricklet firmware 2.2.14)
+- Rework phase switching special handling for Polestar EVs and BMW PHEVs (through EVSE 2.0 Bricklet firmware 2.2.14)
+- Increase CP disconnect time for phase switching from 5s (not enough for Polestar EVs) to 15s (through EVSE 2.0 Bricklet firmware 2.2.14)
+- Improve translations
+
+2025-08-06: 2.8.8 (8b2ca1fc)
+- SunSpec: Fix power and phase-to-phase voltage values for WattNode meters
+- Fix crash in the common config logic
+
+2025-09-04: 2.8.9 (2397fc2e)
+- Support reading (HTTP-only) and writing (HTTP and MQTT) sub-APIs via URL/topic suffix
+- Add support for more Modbus TCP devices: VARTA Element/Flex battery, Chisage ESS hybrid inverter
+- SunSpec: Fix phase-to-phase voltage values for WattNode meters again
+- Fix firmware update progress bar
+- Fix controlled chargers erroneously being shown as unavailable after 49 days
+- Fix front button LED control via API not always being applied if last LED update was also set via API
+- Fix CP disconnect resulting in vehicle being reported as disconnected (through EVSE 2.0 Bricklet firmware 2.2.15)
+- Remove unnecessary long wait time after CP reconnect (through EVSE 2.0 Bricklet firmware 2.2.15)
+- Support Eltako DSZ16DZE (through EVSE 2.0 Bricklet firmware 2.2.15)
+
+2025-09-09: 2.8.10 (bf2cbf40)
+- Fix another issue where a CP disconnect results in the vehicle being reported as disconnected (through EVSE 2.0 Bricklet firmware 2.2.16)
+
+2025-11-03: 2.8.11 (dcf64e9e)
+- Add phase switching support to OCPP
+- Rework charge manager status section
+- Add charge manager decision information
+- Support overriding charge mode for a single charger and charge
+- Make charge mode optionally persistent
+- Add key generation to WireGuard subpage
+- Add supply voltage check
+- Modbus TCP: Fix Sungrow battery power and energy values
+- Modbus TCP: Fix Goodwe inverter and grid energy values
+- Modbus TCP: Fix Fox ESS H3 battery values; support second battery
+- Fix charge manager allocating too much if vehicle draws no current
+- Fix charge manager stopping chargers on reboot
+- Modbus TCP Server: Always allow reading known registers even if feature is not available
+- Fix WiFi AP's automatic channel selection interfering with first STA connection attempt
+- Fix injected NFC tags not showing up in web interface
+- Fix charger state change automation triggering after reboot
+- Make sure broken web server results in firmware rollback
+- Default phase switch wait time increased for compatibility with slow switching vehicles (through EVSE 2.0 Bricklet firmware 2.2.17)
+- Add configurable phase switch wait time (through EVSE 2.0 Bricklet firmware 2.2.17)
+- Support Iskra WM3M4C (through EVSE 2.0 Bricklet firmware 2.2.17)
+- Fix spuriously reported error state 5 (through EVSE 2.0 Bricklet firmware 2.2.17)
+- Improve phase switch robustness (through EVSE 2.0 Bricklet firmware 2.2.17)
+
+2025-11-04: 2.8.12 (f137cf63)
+- Fix language specific decimal separator in CSV charge log
+- Fix publishing deprecated object_id on Home Assistant MQTT discovery topics
+- Increase default phase switch wait time to 60 seconds (through EVSE 2.0 Bricklet firmware 2.2.18)
+
+2025-11-06: 2.8.13 (1a602778)
+- Fix wrong charge manager allocations when phase rotation is not configured
+- Work around Safari bug breaking firmware updates via remote access
+
+2025-12-18: 2.8.14 (e14922b8)
+- Add support for more Modbus TCP devices: Janitza UMG series meters, Huawei Smart Logger 3000
+- Add reading of battery capacity values to Alpha ESS, Hailei and Sungrow inverters
+- Fix Fronius GEN24 Plus MPPT power sum via SunSpec
+- Make WireGuard MTU configurable
+- Improve charge manager compatibility with vehicles that will start or stop charging depending on the available current
+- Automatically unblock charging when all related automation rules are removed
+- Fix charge mode buttons not showing up on managed charger that was a charge manager for only itself in the past
+- Fix "request charge mode" automation actions not being saved correctly
+- Display MACs and BSSIDs on ethernet and WiFi subpages
+- Fix Modbus TCP client not reconnecting pooled connections
+- Improve hostname/IP address validation
+- Improve web interface responsiveness with many configured chargers/meters
+- Update timezone database
+- Make sure CP can not stay disconnected when charging current is changed during disconnect (through EVSE 2.0 Bricklet firmware 2.2.19)
+
+2025-12-18: 2.8.15 (ef05176e)
+- Fix crash in charge manager initialization
+
+2025-12-22: 2.8.16 (c1f09919)
+- Fix crash while closing or reloading the web interface using the remote access
+
+2026-01-22: 2.8.17 (78c7dbd6)
+- Stop all chargers if PV excess charging or dynamic load management don't receive necessary meter values anymore
+- Always prefer ethernet connection over WiFi connection
+- Show warning if web interface and browser UI locale differ
+- Add optional scrollbar to wide tables
+- Add support for RCT Power grid phase voltage and frequency values
+- Invert power values of Fronius energy meters measuring loads
+- Fix grid energy values for some Goodwe inverters
+- Fix losing SMA Speedwire packets after a few minutes
+- Fix remote access blocking forever under unknown circumstances
+- Fix remote access attempting to connect twice in parallel
+- Fix error messages being lost when updating firmware via remote access
+- Fix remote access not being deactivated when device is deleted server-side while offline
+- Improve web server and web sockets robustness against dropped connections
+
+2026-02-05: 2.9.0 (07158960)
+- Add translated SunSpec scan report
+- Add language selection to charge log download
+- Fix charge logs not showing the unknown user's default name correctly
+- Fix encoding of non-CP-1252 characters in CSV charge logs
+- Fix Carlo Gavazzi EM270 and EM280 virtual meter config
+- Improve translations
+
+2026-04-22: 2.10.0 (27eee312)
+- Add configuration changes without reboot for most modules
+- Add HTTPS support to web interface and HTTP API
+- Add TLS 1.3 support
+- Add status information to many sub-pages
+- Add status widget to web interface
+- Add dark mode to web interface
+- Add Modbus TCP meter support: Solis hybrid inverter, Growatt TL-X(H) hybrid inverter, Eltako DSZ16D, DSZ16DE, DSZ16DZ and DSZ16DZE energy meters
+- Add Modbus TCP battery control support: Solis hybrid inverter, Growatt TL-X(H) hybrid inverter, SAX Power Home (does not support force charge/discharge)
+- Modbus TCP: Calculate SolarEdge PV power in case SunSpec MPPT model is missing
+- Modbus TCP: Add battery virtual meter for Fronius Verto Plus
+- Document missing Modbus TCP battery control support for SMA inverter series: Sunny Boy Smart Energy, Sunny Tripower Storage and Sunny Island
+- Add binary NFC tag ID registers to Eltako Modbus TCP register table
+- Fix crashes caused by WireGuard (re)connects
+- Fix charge log PDF generation skipping entries when using date filter
+- Charge Manager: Improve handling of vehicles that take some time to (re)start charging
+- Fix OCPP overriding other phase switch decisions
+- Fix logged automation rule index
+- Modbus TCP: Fix temperature value of second SolarEdge battery
+- Modbus TCP: Fix grid import energy value for GoodWe inverters
+- Modbus TCP: Fix sign of power value for GoodWe inverters' "meter" virtual meter
+- Modbus TCP: Fix detection of second battery for GoodWe inverters
+- SunSpec: Fix Fronius Verto Plus MPPT power sum
+- SunSpec: Fix inverter AC/DC power sign mismatch
+- SunSpec: Fix version detection of KOSTAL Smart Energy Meters with firmware 2.6.0
+- SunSpec: Improve scan robustness
+- Warn more when disabling network interfaces to prevent lock-out
+- Fix Iskra WM3M4C's non-resettable energy values being marked as resettable
+- Improve WebSocket robustness
+- Disallow selecting meters with wrong location for PV excess charging / dynamic load management
+- Improve remote access robustness
+- Center header logo on small screens
+- Update timezone database
+- Unify device scan dialogs
+- Add measurement of grid frequency via PE detection when using a DSZ15DZMOD energy meter (through EVSE 2.0 Bricklet firmware 2.2.20)
+- Don't spuriously report contactor error when closing (through EVSE 2.0 Bricklet firmware 2.2.20)
+- Use charge mode color for charging animation (through EVSE 2.0 Bricklet firmware 2.2.21)
+
+2026-04-23: 2.10.1 (9c0329bc)
+- Fix OCPP authorization
+
+2026-05-08: 2.10.2 (1af788ea)
+- Fix charge log generation with date filter
+- Fix network interface priority
+- Fix support of ECDSA curve P-384
+- Improve graph readability: Removing confusing stacked series; explain where VAT is included
+- Modbus TCP: Fix Carlo Gavazzi EM270 and EM280 energy meter configuration
+- Restart all Bricklets when rebooting via system subpage
+- Update timezone database
+
+2026-05-13: 2.10.3 (2ca86775)
+- Fix support for TLS 1.3 signature algorithms in TLS 1.2
+- Disallow overriding known meter locations
+- Support Iskra WM3M4 (through EVSE 2.0 Bricklet firmware 2.2.23)
+
+2026-06-03: 2.11.0 (0db9f975)
+- Add "central management": Allows charge manager to track charges and manage users/NFC tags of all managed chargers
+- Move NFC tag configuration to user management
+- Improve charge manager responsiveness on vehicle plug in/out
+- Add Modbus TCP meter support: Q-Cells hybrid/string inverter
+- Add Modbus TCP battery control support: Kostal Plenticore G3, Plus G2
+- Improve hostname/IP address inputs
+- Improve OTA update speed
+- Modbus TCP: Fix missing battery value handling for SolarEdge inverters
+- Fix crash when detecting NFC tag after OCPP was deactivated without reboot
+- Fix crash with unstable Modbus TCP/SunSpec connection
+- Fix crash when another HTTP request arrives while rebooting
+- Improve translations
+
+2026-06-25: 2.12.0 (2613b535)
+- Support user and NFC tag configuration changes without reboot
+- Add state of charge to meter table collapsed values
+- Improve charge manager wake-up handling of vehicles that wake up on phase switch
+- Improve Modbus/TCP robustness against malformed packets
+- Improve display name of SunSpec model 160
+- Improve error message when firmware update is corrupted
+
+2026-07-09: 2.12.1 (e04a6ee0)
+- Expand calculation of meter values to single- and two-phase meters
+- Add CPU idling to reduce power consumption by 3 to 10%
+- Increase maximum certificate (chain) size to 10179 bytes
+- Fix last-seen of remote NFC tags
+- Fix cleaning up NFC tags of removed user
+- Fix renaming unknown user
+- Fix OCPP disconnect sometimes blocking forever
+- Fix "controlled chargers" charge log filter
+
+2026-09-10: 2.13.0 (6870f31b)
+- Add IPv6 support
+- Add country configuration
+- Add more components to MQTT discovery
+- Merge generic and Home Assistant MQTT discovery
+- Add Iskra WM3M4(C) backlight configuration
+- Remove "not set" text on Iskra WM3M4(C) meters
+- Add meter value automation triggers
+- Add reboot automation trigger
+- Add NFC automation trigger for managed chargers
+- Redirect HTTP to HTTPS when in https-only mode
+- Fix PDF charge log title
+- Fix web server returning 404 to all requests for a short time after reboot
+- Fix detection of stale meter values for dynamic load management
+- Don't accept broken modbus devices as working when only a part of the register set could be read
+- Fix charge limits automation trigger and action configuration
+- Fix validation and error display of number inputs and modal windows
+- Fix crash when receiving strange mDNS packets
+- Fix crash when reconnecting to Modbus TCP device
+- Improve JSON (de)serialization robustness
+- Improve Bricklet communication robustness
+- Improve WebSocket robustness
+- Improve password manager support
+- Improve translations
+- Update timezone database
+- Fix unplugging a vehicle sometimes stopping every other managed charger for one allocation interval (through EVSE 2.0 Bricklet firmware 2.2.25)
+
+2026-09-11: 2.13.1 (f2872dc4)
+- Fix crash during firmware update
+- Fix Home Assistant MQTT discovery of vehicle name and MAC address
+- Restore legacy Home Assistant meter entities and numeric charging status
+- Support all available charging modes in Home Assistant
+
+2026-09-15: 2.13.2 (dd63d453)
+- Battery control: Fix adding battery storage
+- Battery control: Fix undoing Sungrow charge/discharge blocking
+- Fix Home Assistant details for vehicle battery
+- Fix slow memory leak in mDNS result handling
+
+2026-09-16: 2.13.3 (b5f7bb9f)
+- Fix "Authorize" button being shown when managed charger is in error state
+- Make sure "not set" text on Iskra WM3M4(C) meters is really removed  (through EVSE 2.0 Bricklet firmware 2.2.26)
+- Fix EVSE crash caused by race condition between Iskra meter value and display configuration reads (through EVSE 2.0 Bricklet firmware 2.2.26)
+
+2026-09-17: 2.13.4 (c009b78f)
+- Improve Bricklet communication robustness
+- Fix emulated Bender holding registers 706 and 1000 always returning 0
+- Don't show country configuration in web interface; has no effect yet
+
+2026-10-01: 2.13.5 (098f202e)
+- Add support for Sonnenbatterie grid and battery meters
+- Modbus TCP: Improve network communication robustness
+- SunSpec: Improve device scan robustness
+- Charge Tracker: Fix missing charger name and wrong month in monthly PDF export
+- Charge Tracker: Improve CSV/PDF generation robustness
+- ISO 15118: Improve compatibility with BMW iX2 models (and others with Delta Electronics OBC) by tentatively accepting SLAC requests
+- Battery control: Add support for SunSpec model 124 (e.g. Fronius inverters)
+- Add §14a EnWG automation trigger
+- Update timezone database
+- Improve translations

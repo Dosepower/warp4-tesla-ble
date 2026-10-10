@@ -1,0 +1,104 @@
+/** @jsxImportSource preact */
+import { h } from "preact";
+import { __ } from "../../ts/translation";
+let x = {
+    "users": {
+        "status": {},
+        "navbar": {
+            "users": "User Management"
+        },
+        "content": {
+            "users": "User Management",
+
+            "enable_authentication": "Login enabled",
+            "enable_authentication_desc":
+                "A successful login as one of the configured users is required to open the Web interface or call the HTTP API",
+            "enable_authentication_invalid":
+                "To enable the login at least one user with a configured password is required.",
+
+            "authorized_users": "Authorized users",
+
+            "unknown_username": "Unknown user display name",
+
+            "table_username": "Username",
+            "table_display_name": "Display name",
+            "table_current": "Maximum charge current",
+            "table_password": "Password",
+
+            "nfc_table_assigned_user": "Assigned user",
+
+            "add_user_title": "Add user",
+            "add_user_message": /*SFN*/ (have: number, max: number) =>
+                `${have} of ${max} users configured` /*NF*/,
+            "add_user_user_ids_exhausted":
+                "The maximum number of users has tracked charges. To be able to add a new user, tracked charges or a user without tracked charges have to be removed.",
+
+            "edit_user_title": "Edit user",
+            "edit_user_username": "Username",
+            "edit_user_username_desc": "to log in to the web interface",
+            "edit_user_display_name": "Display name",
+            "edit_user_display_name_desc":
+                "shown in web interface and charge log",
+            "edit_user_current": "Maximum charge current",
+            "edit_user_password": "Password",
+            "edit_user_password_help": "Up to 64 characters. Do not use umlauts, accented characters or emoji.",
+
+            "evse_user_description": "Charge release",
+
+            "evse_user_enable": <>
+                    Requires a user authorization (via NFC tag) to charge
+                </>,
+            "evse_user_enable_invalid":
+                "At least one user is required for the charge release.",
+            "evse_user_enable_central_management_warning": /*FFN*/(manager_ip: string) => <>{__("This_device")} is managed by {manager_ip}. The (local) charge release can be used in parallel, but users and NFC tags have to be configured here as well as on the charge manager.</>/*NF*/,
+
+            "nfc_tags": "NFC tags",
+            "nfc_tag_id": "Tag ID",
+            "nfc_tag_type": "Tag type",
+            "nfc_no_tags_assigned": "No NFC tags assigned",
+            "nfc_no_seen_tags":  /*FFN*/(no_bricklet: boolean, central_management: boolean) =>
+                no_bricklet ?
+                    <>No NFC Bricklet connected. An NFC Bricklet can be purchased from our shop, or use the tag-injection API.</> :
+                    central_management ?
+                        <>No NFC tags seen recently. Hold a tag to one of the controlled chargers to detect it.</> :
+                        <>No NFC tags seen recently. Hold a tag to this charger to detect it.</>
+                 /*NF*/,
+            "nfc_tag_already_assigned": /*SFN*/ (other_name: string) =>
+                `Already assigned to user "${other_name}"` /*NF*/,
+            "nfc_add_tag": "Add NFC tag",
+            "nfc_add_tag_message": /*SFN*/ (
+                have: number,
+                max: number
+            ) =>
+                `${have} of ${max} tags configured` /*NF*/,
+            "nfc_seen_tags": "Seen tags",
+            "nfc_last_seen": "Last seen",
+            "nfc_add_tag_manually": "Add tag manually",
+            "nfc_tag_id_placeholder": "e.g. 01:23:45:67",
+            "nfc_tag_id_invalid":
+                "The tag ID must have four to ten groups separated by colons, each with a two-digit hexadecimal number. For example 01:23:45:67:89:AB",
+
+            "nfc_smartphone_this_device": "Smartphone (this device)",
+
+            "ev_macs": "Vehicles",
+            "ev_name": "Name",
+            "ev_mac": "MAC address",
+            "ev_mac_already_assigned": /*SFN*/ (other_name: string) => `Already assigned to user "${other_name}"` /*NF*/,
+            "ev_add_mac": "Add vehicle",
+            "ev_add_mac_message": /*SFN*/ (
+                haveForUser: number,
+                numConfigured: number
+            ) => `${haveForUser} of ${numConfigured} vehicles assigned to this user` /*NF*/,
+            "ev_available_evs": "Vehicles",
+            "ev_no_evs": <>No vehicles are configured. First configure <a href="#ev">Vehicles</a> to be able to assign them to users.</>
+        },
+        "script": {
+            "reboot_content_changed": "user settings",
+            "login_disabled": "Login disabled",
+            "save_failed": "Failed to save the user settings.",
+            "username_already_tracked": "Username is already in tracked charges",
+            "username_already_used": "Username is already in use",
+            "all_user_ids_in_use": "All user-ids in use."
+        }
+    }
+}

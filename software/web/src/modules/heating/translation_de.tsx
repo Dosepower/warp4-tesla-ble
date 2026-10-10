@@ -1,0 +1,135 @@
+/** @jsxImportSource preact */
+import { h } from "preact";
+import { __ } from "../../ts/translation";
+let x = {
+    "heating": {
+        "status": {
+            "heating": "Heizung"
+        },
+        "navbar": {
+            "heating": "Heizung"
+        },
+        "content": {
+            "heating": "Heizung",
+            "heating_disabled": <>Die Heizungssteuerung ist deaktiviert, da Automatisierungsregeln existieren, die die SG-Ready-Ausgänge schalten. Um die Heizungssteuerung zu nutzen, müssen alle Regeln der <a href="#automation">{__("automation.content.automation")}</a> entfernt werden, die SG-Ready-Ausgänge schalten.</>,
+            "override": "Aufheben",
+            "override_blocking": "Blockierenden Betrieb aufheben",
+            "discard_override": "Abbrechen",
+            "override_blocked_by_p14enwg": "Aufhebung durch §14a EnWG außer Kraft gesetzt",
+            "close_now": "Jetzt schließen",
+            "open_now": "Jetzt öffnen",
+            "toggle_now_failed": /*SFN*/(x: number) => `Konnte SG-Ready-Ausgang ${x} nicht umschalten`/*NF*/,
+            "minimum_holding_time": "Mindesthaltezeit",
+            "minimum_holding_time_muted": "für SG-Ready-Ausgang 1 und SG-Ready-Ausgang 2",
+            "remaining_holding_time": "Resthaltezeit",
+            "remaining_holding_time_muted": "",
+            "minutes": "Minuten",
+            "minute": "Minute",
+            "dpc_low": "Für günstigste",
+            "pv_excess_control": "Bei PV-Überschuss ab",
+            "pv_yield_forecast": "PV-Ertragsprognose unter",
+            "input": "Eingang",
+            "output": "Ausgang",
+            "output_active_closed": "Geschlossen, wenn aktiv",
+            "output_active_open": "Geöffnet, wenn aktiv",
+            "input_active_closed": "Aktiv, wenn geschlossen",
+            "input_active_open": "Aktiv, wenn geöffnet",
+            "meter_slot_grid_power": "Stromzähler",
+            "meter_slot_grid_power_muted": "typischerweise am Netzanschluss",
+            "meter_slot_grid_power_none": "Kein Stromzähler konfiguriert",
+            "sg_ready": "SG-Ready",
+            "sg_ready_output": "SG-Ready-Ausgang",
+            "sg_ready_output1_muted": "Ausgang 1 wird für den blockierenden Betrieb verwendet (SG-Ready-Zustand 1).",
+            "sg_ready_output1_help": "Im blockierenden Betrieb läuft die Heizung nicht. Dieser Betriebszustand ist abwärtskompatibel zur häufig zu festen Uhrzeiten geschalteten EVU-Sperre.",
+            "sg_ready_output2_muted": "Ausgang 2 wird für den erweiterten Betrieb verwendet (SG-Ready-Zustand 3).",
+            "sg_ready_output2_help": "In diesem Betriebszustand läuft die Wärmepumpe im erweiterten Betrieb für Raumheizung und Warmwasserbereitung. Es handelt sich dabei nicht um einen definitiven Anlaufbefehl, sondern um eine Einschaltempfehlung.",
+            "active": "Aktiv",
+            "inactive": "Inaktiv",
+            "watt": "W",
+            "price_based_heating_plan": "Preisbasierter Heizplan",
+            "price_based_heating_plan_muted": "Heizplan anhand dynamischer Preise inkl. MwSt und Netzentgelte",
+            "status_help": <>Der preisbasierte Heizplan zeigt den Heizplan anhand der konfigurierten günstigsten und teuersten Stunden an. Der Heizplan muss nicht der echten späteren Steuerung der Heizung entsprechen, da z.B. ein unerwartet hoher PV-Überschuss den blockierenden Betrieb verhindern kann.</>,
+            "blocked": "Blockiert",
+            "extended": "Erweitert",
+            "sg_ready_muted": "Ausgang 1 und Ausgang 2",
+            "average_price": "Durchschnittspreis",
+            "solar_forecast": "PV-Ertragsprognose",
+            "solar_forecast_needs_activation": <>Um den erwarteten PV-Überschuss in den Heizplan einbeziehen zu können, muss die <a href="#solar_forecast">PV-Ertragsprognose</a> aktiviert werden.</>,
+            "day_ahead_prices_needs_activation": <>Um den dynamischen Strompreis in den Heizplan einbeziehen zu können, müssen die <a href="#day_ahead_prices">dynamischen Strompreise</a> aktiviert werden.</>,
+            "meter_needs_activation": <>Um den PV-Überschuss in den Heizplan einbeziehen zu können, muss ein Stromzähler ausgewählt werden.</>,
+            "hours": /*SFN*/(h: number) => "" + h + " Stunden"/*NF*/,
+            "update_now": "Jetzt aktualisieren",
+            "extended_operation": "Erweiterter Betrieb",
+            "extended_operation_help": <>
+                <p>Diese Einstellungen steuern den erweiterten Betrieb (SG-Ready-Ausgang 2).</p>
+                <p>Wenn die PV-Überschuss-Steuerung aktiviert ist, wird die Heizung in den erweiterten Betrieb gebracht, sobald der Überschuss am Netzanschluss den eingestellten Wert überschreitet.</p>
+                <p>Wenn die Dynamische-Strompreis-Steuerung aktiviert ist, wird die Heizung zusätzlich für die günstigsten x Stunden am Tag in den erweiterten Betrieb gebracht.</p>
+                <p>Wenn die PV-Ertragsprognosen-Steuerung aktiviert ist und die Prognose größer als die eingestellte Energie ausfällt, entfällt die Dynamische-Strompreis-Steuerung und es wird ausschließlich der PV-Überschuss genutzt.</p>
+                <p>Beispiel-Konfiguration: Erweiterter Betrieb bei PV-Überschuss <b>ab 1200W</b> oder für <b>günstigste 4 Stunden pro Tag</b> aber nur wenn PV-Ertragsprognose <b>unter 10 kWh/Tag</b>.</p>
+                <p>In diesem Beispiel würde bei einem PV-Überschuss von 1200W, ungeachtet der folgenden Einstellungen, der erweiterte Betrieb aktiviert. Zusätzlich würde für die 4 günstigsten Stunden am Tag der erweiterte Betrieb aktiviert, aber nur falls die PV-Ertragsprognose weniger als 10 kWh für den Tag vorher gesagt hat. Falls ein höherer Ertrag erwartet wird, wird kein erweiterter Betrieb aktiviert.</p>
+                <p>Ziel dieser Einstellungen: Wenn ein hoher PV-Ertrag erwartet wird, wird kein Strom aus dem Netz für den erweiterten Betrieb bezogen, trotz dass der Strompreis günstig ist.</p>
+            </>,
+            "blocking_operation": "Blockierender Betrieb",
+            "blocking_operation_help": <>
+                <p>Diese Einstellungen steuern den blockierenden Betrieb (SG-Ready-Ausgang 1).</p>
+                <p>Bei Aktivierung wird die Heizung für die teuersten x Stunden am Tag in den blockierenden Betrieb gebracht.</p>
+                <p>Beispiel-Konfiguration: Blockierender Betrieb bei den teuersten 5 Stunden. Die Heizung wird für die 5 teuersten Stunden am Tag blockiert. Ausnahme: Wenn die PV-Überschuss-Steuerung aktiviert ist und der eingestellte Schwellwert überschritten wird, wird der blockierende Betrieb aufgehoben und der erweiterte Betrieb für die Heizung aktiviert.</p>
+            </>,
+            "normal_operation": "Normaler Betrieb",
+            "or": "oder",
+            "but_only_if": "aber nur wenn",
+            "kwh_per_day": "kWh/Tag",
+            "h_per_x": /*SFN*/(x: number) => x == 24 ? "h/Tag" : "h/" + x + "h"/*NF*/,
+            "for_the_most_expensive": "Bei den teuersten",
+            "hours_from_heating_curve": "Wert wird automatisch durch die Temperatur-Heizkurve bestimmt.",
+            "p14_enwg": "§14a EnWG",
+            "p14_enwg_help": <>
+                <p>Ab dem 1. Januar 2024 fordert der §14a des EnWG die Steuerbarkeit von Wärmepumpen. Konkret müssen neu verbaute Wärmepumpen über eine Kommunikationsschnittstelle zum Netzbetreiber verfügen, damit dieser in Ausnahmefällen die Leistung des Geräts anpassen kann.</p>
+                <p>Die Steuerung nach §14a EnWG kann hier aktiviert werden. Dazu wird ein Eingang vom Netzbetreiber gesteuert und im Gegenzug wird über den SG-Ready-Ausgang 1 die Wärmepumpe entsprechend des Eingangs gesteuert.</p>
+                <p>Hinweis: Die Steuerung nach §14a EnWG hat Priorität gegenüber der oben konfigurierten Heizungssteuerung.</p>
+            </>,
+            "control_period": "Regelzeitraum",
+            "control_period_help": <>
+                <p>Der Regelzeitraum bestimmt, für welchen Zeitraum die eingestellten Steuerregeln aktiv sind.</p>
+                <p>Beispielkonfiguration:</p>
+                <ul>
+                    <li>Regelzeitraum: 24 Stunden</li>
+                    <li>Erweiterter Betrieb: Günstigste 8 Stunden</li>
+                    <li>Blockierender Betrieb: Teuerste 8 Stunden</li>
+                </ul>
+                <p>In diesem Fall kann es passieren, dass bis zu 8 Stunden am Stück der erweiterte Betrieb und bis zu 8 Stunden am Stück der blockierende Betrieb geschaltet wird. Angenommen die Heizung muss mindestens 2x pro Tag laufen damit eine gewünschte Temperatur eingehalten wird, würde sich eventuell folgende Konfiguration anbieten:</p>
+                <ul>
+                    <li>Regelzeitraum: 12 Stunden</li>
+                    <li>Erweiterter Betrieb: Günstigste 4 Stunden</li>
+                    <li>Blockierender Betrieb: Teuerste 4 Stunden</li>
+                </ul>
+                <p>In dieser Konfiguration würde die Heizung auch pro Tag 8 Stunden in den erweiterten Betrieb sowie 8 Stunden in den blockierenden Betrieb gebracht.</p>
+                <p>Allerdings wird der Tag in zwei 12 Stunden Regelzeiträume geteilt in denen je die günstigsten/teuersten Stunden gesucht werden und entsprechend kann die Heizung pro 12 Stunden auch höchsten für 4 Stunden am Stück in den erweiterten oder blockierenden Betrieb gebracht werden.</p>
+            </>,
+            "control_period_muted": "Zeitraum in dem die günstigsten Stunden für den erweiterten und die teuersten Stunden für den blockierenden Betrieb bestimmt werden. Je besser die Speicherfähigkeit des Gebäudes, umso größer können die Zeiträume gewählt werden.",
+            "temperature_heating_curve": "Temperatur-Heizkurve",
+            "enable_heating_curve": "Heizkurve",
+            "enable_heating_curve_desc": "Erweiterte und blockierende Stunden anhand der Außentemperatur anpassen",
+            "temperatures_needs_activation": <>Um die Temperatur-Heizkurve nutzen zu können, muss das <a href="#temperatures">Außentemperatur</a>-Modul aktiviert werden.</>,
+            "temperature_heating_curve_help": <>
+                <p>Die Temperatur-Heizkurve ermöglicht es, die Anzahl der Stunden für den erweiterten und blockierenden Betrieb automatisch anhand der Tagesmitteltemperatur anzupassen.</p>
+                <p>Es werden zwei Temperaturpunkte verwendet: 20 °C (warm) und -10 °C (kalt). Die Stundenanzahl wird zwischen diesen beiden Endpunkten basierend auf der aktuellen Tagesmitteltemperatur linear interpoliert.</p>
+                <p>Beispiel: Wenn der erweiterte Betrieb für 2 Stunden bei 20 °C und 8 Stunden bei -10 °C konfiguriert ist und die aktuelle Tagesmitteltemperatur 5 °C beträgt, dann wird der erweiterte Betrieb für 5 Stunden aktiviert.</p>
+            </>,
+            "temperature_heating_curve_muted": "Stunden werden linear anhand der Tagesmitteltemperatur interpoliert",
+            "extended_hours_at_warm": "Erweiterte Stunden bei 20 °C",
+            "extended_hours_at_cold": "Erweiterte Stunden bei -10 °C",
+            "blocking_hours_at_warm": "Blockierende Stunden bei 20 °C",
+            "blocking_hours_at_cold": "Blockierende Stunden bei -10 °C",
+
+            "daytime_extension": "Luft-Wärmepumpe",
+            "daytime_extension_desc": "Wenn die Tagesmitteltemperatur unter 5 °C liegt, wird der erweiterte Betrieb auf 09:00–18:00 Uhr begrenzt. Empfohlen für Luft-Wärmepumpen, die bei niedrigen Außentemperaturen ineffizient arbeiten. So wird verhindert, dass der preisbasierte Plan den erweiterten Betrieb in den kältesten Stunden (Nacht/früher Morgen) aktiviert, wenn die Effizienz besonders schlecht ist.",
+            "legend_extended": "Erweiterter Betrieb",
+            "legend_suppressed": "Unterdrückt",
+            "legend_blocking": "Blockierender Betrieb"
+        },
+        "script": {
+            "save_failed": "Speichern der Heizungseinstellungen fehlgeschlagen"
+        }
+    }
+}

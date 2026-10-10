@@ -1,0 +1,27 @@
+import { AutomationTriggerID } from "./generated/automation_trigger_id.enum";
+import { AutomationActionID } from "./generated/automation_action_id.enum";
+{{{imports}}}
+
+export interface config {
+    tasks: Task[]
+}
+
+export interface state {
+    registered_triggers: number[]
+    registered_actions: number[]
+    enabled_triggers: number[]
+    enabled_actions: number[]
+    last_run: number[]
+}
+
+interface Task {
+    trigger: AutomationTrigger,
+    action: AutomationAction,
+    delay: number
+}
+
+type AutomationTrigger =
+    [AutomationTriggerID.None, null]{{{trigger_types}}};
+
+type AutomationAction =
+    [AutomationActionID.None, null]{{{action_types}}};

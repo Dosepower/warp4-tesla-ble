@@ -1,0 +1,247 @@
+/* esp32-firmware
+ * Copyright (C) 2020-2021 Erik Fleckstein <erik@tinkerforge.com>
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, write to the
+ * Free Software Foundation, Inc., 59 Temple Place - Suite 330,
+ * Boston, MA 02111-1307, USA.
+ */
+
+#pragma once
+
+#include "device_module.h"
+#include "config.h"
+#include "modules/evse_common/evse_common.h"
+#include "bindings/bricklet_evse_v2.h"
+#include "generated/module_available.h"
+
+#if MODULE_AUTOMATION_AVAILABLE()
+#include "modules/automation/automation_backend.h"
+#endif
+
+#define EVSEV2_PHASES_INFO_1P_CAR_MASK (1 << 0)
+
+struct EVSEV2MeterData {
+    bool phases_active[3];
+    bool phases_connected[3];
+    uint8_t meter_type;
+    float power;
+    float currents[3];
+    uint32_t error_count[6];
+};
+
+struct EVSEV2AllData {
+    // get_all_data_1
+    uint8_t iec61851_state;
+    uint8_t charger_state;
+    uint8_t contactor_state;
+    uint8_t contactor_error;
+    uint16_t allowed_charging_current;
+    uint8_t error_state;
+    uint8_t lock_state;
+    uint8_t dc_fault_current_state;
+    uint8_t jumper_configuration;
+    bool has_lock_switch;
+    uint8_t evse_version;
+    EVSEV2MeterData meter_data;
+
+    // get_all_data_2
+    uint8_t shutdown_input_configuration;
+    uint8_t input_configuration;
+    uint8_t output_configuration;
+    int16_t indication;
+    uint16_t duration;
+    uint16_t color_h;
+    uint8_t color_s;
+    uint8_t color_v;
+    uint8_t button_cfg;
+    uint32_t button_press_time;
+    uint32_t button_release_time;
+    bool button_pressed;
+    bool ev_wakeup_enabled;
+    bool cp_disconnect;
+    bool boost_mode_enabled;
+    int16_t temperature;
+    uint8_t phases_current;
+    uint8_t phases_requested;
+    uint8_t phases_state;
+    uint8_t phases_info;
+    bool phase_auto_switch_enabled;
+    uint8_t phases_connected;
+    uint8_t enumerate_value;
+    uint32_t enumerate_value_change_time;
+    uint8_t phase_switch_wait_time;
+    uint8_t ove_r37_state;
+    uint8_t ove_r37_trip_reason;
+    uint8_t ove_r37_flags;
+    uint8_t energy_meter_display_backlight;
+
+    // get_low_level_state
+    uint8_t led_state;
+    uint16_t cp_pwm_duty_cycle;
+    uint16_t adc_values[7];
+    int16_t voltages[7];
+    uint32_t resistances[2];
+    bool gpio[24];
+    bool car_stopped_charging;
+    uint32_t time_since_state_change;
+    uint32_t time_since_dc_fault_check;
+    uint32_t uptime;
+
+    // get_all_charging_slots
+    uint16_t max_current[20];
+    uint8_t active_and_clear_on_disconnect[20];
+
+    // get_charging_slot_default(CHARGING_SLOT_EXTERNAL)
+    uint16_t external_default_current;
+    bool external_default_enabled;
+    bool external_default_clear_on_disconnect;
+
+    // Set by fetch_all_data() on success, cleared on failure.
+    bool valid;
+};
+
+class EVSEV2 final : public DeviceModule<TF_EVSEV2,
+                                         tf_evse_v2_create,
+                                         tf_evse_v2_get_bootloader_mode,
+                                         tf_evse_v2_reset,
+                                         tf_evse_v2_destroy>,
+                     public IEvseBackend
+#if MODULE_AUTOMATION_AVAILABLE()
+                   , public IAutomationBackend
+#endif
+{
+public:
+    EVSEV2();
+
+    // IModule implementation (inherited through DeviceModule and IEvseBackend)
+    void pre_init() override;
+    void pre_setup() override;
+    void setup() override {}; // Override empty: Base method sets initialized to true, but we want EvseCommon to decide this.
+    void register_urls() override {this->DeviceModule::register_urls();};
+    void register_events() override;
+
+protected:
+    // IEvseBackend implementation
+    bool is_initialized() override { return initialized; }
+    void set_initialized(bool initialized) override { this->initialized = initialized; }
+
+    void post_setup() override;
+    void post_register_urls() override;
+
+    bool setup_device() override {return this->DeviceModule::setup_device();}
+    bool is_in_bootloader(int rc) override {return this->DeviceModule::is_in_bootloader(rc);}
+
+    void factory_reset() override;
+    void reset() override { this->DeviceModule::reset(); }
+
+    void set_data_storage(uint8_t page, const uint8_t *data) override;
+    void get_data_storage(uint8_t page, uint8_t *data) override;
+
+    void set_indicator_led(int16_t indication, uint16_t duration, uint16_t color_h, uint8_t color_s, uint8_t color_v, uint8_t *ret_status) override;
+
+    void set_control_pilot_disconnect(bool cp_disconnect, bool *cp_disconnected) override;
+    bool get_control_pilot_disconnect() override;
+
+    void set_boost_mode(bool enabled) override;
+
+    int get_charging_slot(uint8_t slot, uint16_t *ret_current, bool *ret_enabled, bool *ret_reset_on_dc) override;
+    int set_charging_slot(uint8_t slot, uint16_t current, bool enabled, bool reset_on_dc) override;
+    void set_charging_slot_max_current(uint8_t slot, uint16_t current) override;
+    void set_charging_slot_clear_on_disconnect(uint8_t slot, bool clear_on_disconnect) override;
+    void set_charging_slot_active(uint8_t slot, bool enabled) override;
+    int get_charging_slot_default(uint8_t slot, uint16_t *ret_max_current, bool *ret_enabled, bool *ret_clear_on_disconnect) override;
+    int set_charging_slot_default(uint8_t slot, uint16_t current, bool enabled, bool clear_on_disconnect) override;
+
+    [[gnu::const]] size_t get_debug_header_length() const override;
+    void get_debug_header(StringBuilder *sb) override;
+    [[gnu::const]] size_t get_debug_line_length() const override;
+    void get_debug_line(StringBuilder *sb) override;
+
+    // PhaseSwitcherBackend implementation
+    uint32_t get_phase_switcher_priority() override {return 12;}
+    bool phase_switching_capable() override;
+    bool can_switch_phases_now(uint32_t phases_wanted) override;
+    uint32_t get_phases() override;
+    PhaseSwitcherBackend::SwitchingState get_phase_switching_state() override;
+    bool switch_phases(uint32_t phases_wanted) override;
+    bool is_external_control_allowed() override;
+
+// To allow the meters_evse_v2 module to get/set energy meter values
+public:
+    void update_all_data() override;
+    void fetch_all_data() override;
+    void publish_all_data() override;
+    // End IEvseBackend implementation
+
+#if MODULE_AUTOMATION_AVAILABLE()
+    bool has_triggered(const Config *conf, void *data) override;
+#endif
+    uint16_t get_all_energy_meter_values(float *ret_values);
+    void start_polling_all_energy_meter_values(size_t id_count);
+    bool reset_energy_meter_relative_energy();
+    uint8_t get_energy_meter_type();
+
+    void set_charging_protocol(uint8_t charging_protocol, uint16_t cp_duty_cycle);
+    void set_plc_modem(bool enabled);
+
+    int set_enumerate_configuration(const uint16_t enumerator_h[8], const uint8_t enumerator_s[8], const uint8_t enumerator_v[8]);
+    int set_enumerate_value(uint8_t value);
+
+    int set_eichrecht_gateway_identification(const char gateway_identification[41], uint8_t *ret_eichrecht_state);
+    int set_eichrecht_gateway_serial(const char gateway_serial[25], uint8_t *ret_eichrecht_state);
+    int set_eichrecht_user_assignment(bool identification_status, const uint8_t identification_flags[4], uint8_t identification_type, const char identification_data[40], uint8_t *ret_eichrecht_state);
+    int set_eichrecht_charge_point(uint8_t identification_type, const char identification[20], uint8_t *ret_eichrecht_state);
+    int set_eichrecht_transaction(char transaction, uint32_t unix_time, int16_t utc_time_offset, uint16_t signature_format, uint8_t *ret_eichrecht_state);
+    int get_eichrecht_transaction_state(char *ret_transaction, uint8_t *ret_transaction_state, uint8_t *ret_transaction_inner_state, uint16_t *ret_measurement_status, uint16_t *ret_signature_status, uint8_t *ret_eichrecht_state);
+    int get_eichrecht_public_key(uint8_t ret_public_key[64]);
+    int register_eichrecht_dataset_callback(TF_EVSEV2_EichrechtDatasetHandler handler, char *message, void *user_data);
+    int register_eichrecht_signature_callback(TF_EVSEV2_EichrechtSignatureHandler handler, char *message, void *user_data);
+
+    // OVE R37 (grid support, WARP4 only)
+    int get_ove_r37_configuration(bool *ret_enabled, uint16_t *ret_undervoltage_threshold, uint16_t *ret_undervoltage_observation_time, uint16_t *ret_reconnect_wait_time, uint16_t *ret_start_delay);
+    int set_ove_r37_configuration(bool enabled, uint16_t undervoltage_threshold, uint16_t undervoltage_observation_time, uint16_t reconnect_wait_time, uint16_t start_delay);
+    int get_ove_r37_status(uint8_t *ret_state, uint8_t *ret_trip_reason, uint8_t *ret_flags);
+
+    bool is_shutdown_input_closed();
+
+private:
+    void get_debug_line_impl(StringBuilder *sb);
+
+    EVSEV2AllData all_data;
+
+    float *all_energy_meter_values = nullptr;
+    bool   all_energy_meter_values_valid = false;
+
+    ConfigRoot reset_dc_fault_current_state;
+    ConfigRoot gpio_configuration;
+    ConfigRoot gpio_configuration_update;
+    ConfigRoot button_configuration;
+    ConfigRoot button_configuration_update;
+    ConfigRoot ev_wakeup;
+    ConfigRoot ev_wakeup_update;
+    ConfigRoot phase_auto_switch;
+    ConfigRoot phase_auto_switch_update;
+    ConfigRoot phases_connected;
+    ConfigRoot phases_connected_update;
+    ConfigRoot control_pilot_disconnect;
+    ConfigRoot control_pilot_disconnect_update;
+    ConfigRoot gp_output;
+    ConfigRoot gp_output_update;
+    ConfigRoot phase_switch_wait_time;
+    ConfigRoot phase_switch_wait_time_update;
+    ConfigRoot energy_meter_display_backlight;
+    ConfigRoot energy_meter_display_backlight_update;
+};
+
+#include "generated/module_available_end.h"

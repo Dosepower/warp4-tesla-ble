@@ -1,0 +1,32 @@
+Idle
+In Progress
+Busy
+Internal Error
+No Update URL
+No Cert
+HTTP Client Init Failed
+No Response
+Download Error
+Version Malformed
+Firmware Too Small
+Flash Begin Failed
+Flash Short Write
+Flash Apply Failed
+Signature Begin Failed
+Signature Update Failed
+Signature Verify Failed
+Vehicle Connected
+Firmware Info Too Big
+Firmware Info Missing
+Firmware Info Corrupted
+Wrong Firmware Type
+Downgrade
+Aborted
+Rebooting
+Download Short Read
+Not Supported
+Firmware Size Unknown
+Receive Error
+Signature Info Corrupted
+Application Corrupted
+Secure Boot Signature Generation Failed
