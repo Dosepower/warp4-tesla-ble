@@ -1,0 +1,55 @@
+name: WARP Firmwares
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 0 * * *'
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        env: [warp4, warp3, warp2, warp, energy_manager_v2, energy_manager, eltako, smart_energy_broker, esp32_ethernet, esp32]
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/cache/restore@v5
+        with:
+          path: |
+            ~/.cache/uv
+            ~/.platformio
+            ./software/.pio
+            ./software/packages
+          key: ${{ matrix.os }}-${{ github.run_id }}
+          restore-keys: ${{ matrix.os }}-
+      - name: Install UV
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: false
+      - name: Sync UV
+        working-directory: ./software
+        run: uv sync
+      - name: Install Node.js
+        if: matrix.os == 'windows-latest'
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - name: 'Build Firmware: ${{ matrix.env }}'
+        working-directory: ./software
+        run: uv run pio run -e ${{ matrix.env }} -t clean && uv run pio run -e ${{ matrix.env }}
+      - name: Minimize UV cache
+        run: uv cache prune --ci
+      - name: 'Deleting Caches: ${{ matrix.os }}-'
+        if: matrix.env == 'warp4'
+        run: gh cache delete ${{ matrix.os }}- || true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+      - uses: actions/cache/save@v5
+        if: matrix.env == 'warp4'
+        with:
+          path: |
+            ~/.cache/uv
+            ~/.platformio
+            ./software/.pio
+            ./software/packages
+          key: ${{ matrix.os }}-${{ github.run_id }}

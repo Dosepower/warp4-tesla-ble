@@ -1,0 +1,63 @@
+[project]
+name = "esp32"
+dynamic = ["version"]
+requires-python = "==3.12.*"
+dependencies = [
+    "esptool",  # FIXME: moved from test-runner here for now. it's needed here, otherwise the platformio tool-esptoolpy package is broken
+    "platformio",
+    "pyphen",
+    "nodeenv",
+    "tinkerforge >= 2.1.31", # 2.1.31 adds Industrial Dual AC In Bricklet
+    "tinkerforge_util >= 1.6.0",
+    "tree-sitter == 0.25.*", # need to wait for this bug fix to released: https://github.com/tree-sitter/py-tree-sitter/issues/472
+    "tree-sitter-typescript",
+]
+
+[dependency-groups]
+ff = [
+    "pyserial",
+]
+
+web-server-proxy = [
+    "flask",
+    "flask_sock",
+    "websocket-client",
+]
+
+sun-spec-model-generator = [
+    "xlsx2csv",
+]
+
+# test_runner.py actually uses the tests group,
+# to make sure the first run of a test script starts
+# fast enough for the named pipe to connect)
+test-runner = [
+    "junit-xml",
+    #"esptool",  # FIXME: moved to main dependencies for now
+]
+
+tests = [
+    {include-group = "test-runner"},
+    # FIXME: add all test dependencies here
+    "scipy", # heating/plan
+    "numpy", # heating/plan
+    "requests", # web_server/connectivity
+    "amqtt", # mqtt/reconfigure
+    "ocpp", # ocpp/*
+    "websockets", # ocpp/*
+    "pikepdf", # charge_tracker/pdf_chargelog
+]
+
+iso15118 = [
+    "scapy"
+]
+
+[tool.pio-hooks]
+requires-node = "24.14.0"
+requires-npm = "11.12.0"
+
+[tool.pyright]
+pythonVersion = "3.12"
+venvPath = "."
+venv = ".venv"
+extraPaths = [".."]

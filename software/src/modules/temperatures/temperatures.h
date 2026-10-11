@@ -1,0 +1,108 @@
+/* esp32-firmware
+ * Copyright (C) 2026 Olaf Lüke <olaf@tinkerforge.com>
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, write to the
+ * Free Software Foundation, Inc., 59 Temple Place - Suite 330,
+ * Boston, MA 02111-1307, USA.
+ */
+
+#pragma once
+
+#include <ArduinoJson.h>
+
+#include "async_https_client.h"
+#include "module.h"
+#include "config.h"
+#include "generated/module_available.h"
+#include "generated/temperature_source.enum.h"
+
+#if MODULE_AUTOMATION_AVAILABLE()
+#include "modules/automation/automation_backend.h"
+#endif
+
+#define TEMPERATURES_MAX_JSON_LENGTH 1024
+#define TEMPERATURES_MAX_ARDUINO_JSON_BUFFER_SIZE 1536
+
+enum TemperaturesDownloadState {
+    TEMPERATURES_DOWNLOAD_STATE_OK,
+    TEMPERATURES_DOWNLOAD_STATE_PENDING,
+    TEMPERATURES_DOWNLOAD_STATE_ABORTED,
+    TEMPERATURES_DOWNLOAD_STATE_ERROR
+};
+
+class Temperatures final : public IModule
+#if MODULE_AUTOMATION_AVAILABLE()
+                        , public IAutomationBackend
+#endif
+{
+public:
+    Temperatures(){}
+    void pre_setup() override;
+    void setup() override;
+    void register_urls() override;
+
+    int16_t get_today_min();
+    int16_t get_today_max();
+    int16_t get_today_avg();
+    int16_t get_tomorrow_min();
+    int16_t get_tomorrow_max();
+    int16_t get_tomorrow_avg();
+    int16_t get_current();
+
+#if MODULE_AUTOMATION_AVAILABLE()
+    bool has_triggered(const Config *conf, void *data) override;
+#endif
+
+private:
+    void update();
+    void retry_update(millis_t delay);
+    String get_api_url_with_path();
+    void handle_new_data();
+    void handle_cleanup();
+    void compute_day_stats();
+#if MODULE_AUTOMATION_AVAILABLE()
+    void trigger_automation();
+#endif
+
+    char *json_buffer = nullptr;
+    uint32_t json_buffer_position = 0;
+    AsyncHTTPSClient https_client;
+    uint64_t task_id = 0;
+
+    TemperaturesDownloadState download_state = TEMPERATURES_DOWNLOAD_STATE_OK;
+
+    int16_t today_min    = INT16_MAX;
+    int16_t today_max    = INT16_MIN;
+    int16_t today_avg    = INT16_MAX;
+    int16_t tomorrow_min = INT16_MAX;
+    int16_t tomorrow_max = INT16_MIN;
+    int16_t tomorrow_avg = INT16_MAX;
+
+#if MODULE_AUTOMATION_AVAILABLE()
+    int16_t prev_current     = INT16_MAX;
+    int16_t prev_today_min   = INT16_MAX;
+    int16_t prev_today_max   = INT16_MIN;
+    int16_t prev_today_avg   = INT16_MAX;
+    int16_t prev_tomorrow_min = INT16_MAX;
+    int16_t prev_tomorrow_max = INT16_MIN;
+    int16_t prev_tomorrow_avg = INT16_MAX;
+#endif
+
+    ConfigRoot config;
+    ConfigRoot state;
+    ConfigRoot temperatures;
+    ConfigRoot temperatures_update;
+};
+
+#include "generated/module_available_end.h"

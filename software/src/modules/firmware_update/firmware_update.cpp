@@ -1,0 +1,2063 @@
+/* esp32-firmware
+ * Copyright (C) 2020-2021 Erik Fleckstein <erik@tinkerforge.com>
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, write to the
+ * Free Software Foundation, Inc., 59 Temple Place - Suite 330,
+ * Boston, MA 02111-1307, USA.
+ */
+
+#include "firmware_update.h"
+
+#include <esp_app_format.h>
+#include <esp_rom_crc.h>
+#include <spi_flash_mmap.h>
+#include <Update.h>
+#include <TFJson.h>
+
+#include "event_log_prefix.h"
+#include "generated/module_dependencies.h"
+#include "tools.h"
+#include "options.h"
+#include "build.h"
+#include "modules/esp32_common/secure_boot.h"
+#include "rollback_timing.h"
+#include "tools/hexdump.h"
+#include "tools/printf.h"
+#include "tools/semantic_version.h"
+#include "generated/check_state.enum.h"
+#include "generated/install_origin.enum.h"
+
+#include "gcc_warnings.h"
+
+static const SemanticVersion build_version{BUILD_VERSION_MAJOR, BUILD_VERSION_MINOR, BUILD_VERSION_PATCH, BUILD_VERSION_BETA, build_timestamp()};
+
+// Newer firmwares contain a firmware info
+#define FIRMWARE_INFO_OFFSET (0xd000 - 0x1000)
+#define FIRMWARE_INFO_LENGTH 0x1000
+
+static const uint8_t firmware_info_magic[BLOCK_READER_MAGIC_LENGTH] = {0x71, 0x21, 0xCE, 0x12, 0xF0, 0x12, 0x6E};
+
+#if signature_sodium_public_key_length != 0
+static const size_t options_product_id_length = constexpr_strlen(OPTIONS_PRODUCT_ID());
+
+// Signed firmwares contain a signature info
+#define SIGNATURE_INFO_OFFSET (0xc000 - 0x1000)
+#define SIGNATURE_INFO_LENGTH 0x1000
+
+static const uint8_t signature_info_magic[BLOCK_READER_MAGIC_LENGTH] = {0xE6, 0x21, 0x0F, 0x21, 0xEC, 0x12, 0x17};
+
+#define SIGNATURE_INFO_SIGNATURE_OFFSET (SIGNATURE_INFO_OFFSET + offsetof(signature_info_t, signature))
+#define SIGNATURE_INFO_SIGNATURE_LENGTH crypto_sign_BYTES
+#endif
+
+// The firmware files are merged with the bootloader, partition table, signature_info,
+// firmware_info and slot configuration bins.
+// The bootloader starts at offset 0x1000, which is the first byte in the firmware file.
+// The first application slot (i.e. the one that is flashed over USB) starts at 0x10000.
+// So we have to skip the first 0x10000 - 0x1000 bytes, after them the actual application starts.
+#define APPLICATION_OFFSET (0x10000 - 0x1000)
+
+#if !MODULE_CERTS_AVAILABLE()
+#define MAX_CERT_ID -1
+#endif
+
+#define ESP_OTA_IMG_ERROR 0xFFFFFFFDU
+
+#if signature_sodium_public_key_length != 0
+static_assert(signature_sodium_public_key_length == crypto_sign_PUBLICKEYBYTES);
+#endif
+
+#if OPTIONS_FIRMWARE_UPDATE_ENABLE_ROLLBACK()
+static const bool enable_rollback = true;
+#else
+static const bool enable_rollback = false;
+#endif
+
+// override weakly linked arduino-esp32 function to stop arduino-esp32
+// initArduino() from calling esp_ota_mark_app_valid_cancel_rollback()
+extern "C" bool verifyRollbackLater();
+extern "C" [[gnu::const]] bool verifyRollbackLater()
+{
+    return enable_rollback;
+}
+
+static const char *get_esp_ota_img_state_name(uint32_t ota_state)
+{
+    switch (ota_state) {
+    case ESP_OTA_IMG_NEW:            return "new";            // Monitor the first boot. In bootloader this state is changed to ESP_OTA_IMG_PENDING_VERIFY.
+    case ESP_OTA_IMG_PENDING_VERIFY: return "pending-verify"; // First boot for this app was. If while the second boot this state is then it will be changed to ABORTED.
+    case ESP_OTA_IMG_VALID:          return "valid";          // App was confirmed as workable. App can boot and work without limits.
+    case ESP_OTA_IMG_INVALID:        return "invalid";        // App was confirmed as non-workable. This app will not selected to boot at all.
+    case ESP_OTA_IMG_ABORTED:        return "aborted";        // App could not confirm the workable or non-workable. In bootloader IMG_PENDING_VERIFY state will be changed to IMG_ABORTED. This app will not selected to boot at all.
+    case ESP_OTA_IMG_UNDEFINED:      return "undefined";      // Undefined. App can boot and work without limits.
+    case ESP_OTA_IMG_ERROR:          return "<error>";
+    default:                         return "<unknown>";
+    }
+}
+
+static bool read_custom_app_desc_version(const esp_partition_t *partition, char *fw_version, size_t fw_version_len)
+{
+    union {
+        build_custom_app_desc_t custom_app_desc;
+        uint8_t partition_data[sizeof(build_custom_app_desc_t)];
+    };
+    esp_err_t err = esp_partition_read(partition,
+                                       sizeof(esp_image_header_t) + sizeof(esp_image_segment_header_t) + sizeof(esp_app_desc_t),
+                                       &custom_app_desc,
+                                       sizeof(build_custom_app_desc_t));
+
+    if (err != ESP_OK) {
+        logger.printfln("Could not read %s partition custom app description: %d", partition->label, err);
+        return false;
+    }
+
+    if (custom_app_desc.magic != BUILD_CUSTOM_APP_DESC_MAGIC) {
+        // Check if the partition is erased.
+        err = esp_partition_read_raw(partition,
+                                     0, // Check esp_image_header_t, not custom_app_desc_t.
+                                     partition_data,
+                                     sizeof(partition_data));
+
+        if (err != ESP_OK) {
+            logger.printfln("Could not read the frist %zu raw bytes of %s partition: %d", sizeof(partition_data), partition->label, err);
+            return false;
+        }
+
+        bool erased = true;
+
+        for (size_t i = 0; i < sizeof(partition_data); i++) {
+            if (partition_data[i] != 0xFF) {
+                erased = false;
+                break;
+            }
+        }
+
+        if (erased) {
+            snprintf(fw_version, fw_version_len, "erased");
+            return true;
+        }
+
+        logger.printfln("Custom app description of %s partition has wrong magic: 0x%08lx", partition->label, custom_app_desc.magic);
+        return false;
+    }
+
+    if (custom_app_desc.version < 1) {
+        logger.printfln("Custom app description of %s partition has unknown version: %u", partition->label, custom_app_desc.version);
+        return false;
+    }
+
+    SemanticVersion{custom_app_desc.fw_version_major, custom_app_desc.fw_version_minor, custom_app_desc.fw_version_patch,
+                    custom_app_desc.fw_version_beta, custom_app_desc.fw_build_timestamp}.to_string(fw_version, fw_version_len);
+
+    return true;
+}
+
+template <typename T>
+BlockReader<T>::BlockReader(size_t block_offset_, size_t block_len_, const uint8_t expected_magic_[BLOCK_READER_MAGIC_LENGTH]) : block_offset(block_offset_), block_len(block_len_)
+{
+    memcpy(expected_magic, expected_magic_, BLOCK_READER_MAGIC_LENGTH);
+
+    reset();
+}
+
+template <typename T>
+void BlockReader<T>::reset()
+{
+    block = T{};
+    read_block_len = 0;
+    block_found = false;
+    actual_checksum = 0;
+    expected_checksum = 0;
+    read_expected_checksum_len = 0;
+}
+
+template <typename T>
+bool BlockReader<T>::handle_chunk(size_t chunk_offset, uint8_t *chunk_data, size_t chunk_len)
+{
+    if (chunk_offset + chunk_len >= block_offset && chunk_offset < block_offset + block_len) {
+        uint8_t *start = chunk_data;
+        size_t len = chunk_len;
+
+        if (chunk_offset < block_offset) {
+            size_t to_skip = block_offset - chunk_offset;
+            start += to_skip;
+            len -= to_skip;
+        }
+
+        if (chunk_offset + chunk_len > block_offset + block_len - 4) {
+            len -= (chunk_offset + chunk_len) - (block_offset + block_len - 4); // -4 to not calculate the CRC of itself
+        }
+
+        if (read_block_len < sizeof(block)) {
+            size_t to_read = std::min(len, sizeof(block) - read_block_len);
+            memcpy(block_bytes + read_block_len, start, to_read);
+            read_block_len += to_read;
+        }
+
+        actual_checksum = esp_rom_crc32_le(actual_checksum, start, len);
+
+        const size_t expected_checksum_offset = block_offset + block_len - 4;
+
+        if (chunk_offset + chunk_len < expected_checksum_offset) {
+            return false;
+        }
+
+        if (chunk_offset < expected_checksum_offset) {
+            size_t to_skip = expected_checksum_offset - chunk_offset;
+            start = chunk_data + to_skip;
+            len = chunk_len - to_skip;
+        }
+
+        if (chunk_offset + chunk_len > expected_checksum_offset + 4) {
+            len -= (chunk_offset + chunk_len) - (expected_checksum_offset + 4);
+        }
+
+        if (read_expected_checksum_len < sizeof(expected_checksum)) {
+            size_t to_read = std::min(len, sizeof(expected_checksum) - read_expected_checksum_len);
+            memcpy(expected_checksum_bytes + read_expected_checksum_len, start, to_read);
+            read_expected_checksum_len += to_read;
+        }
+
+        block_found = read_expected_checksum_len == sizeof(expected_checksum) && memcmp(block.magic, expected_magic, BLOCK_READER_MAGIC_LENGTH) == 0;
+    }
+
+    return chunk_offset + chunk_len >= block_offset + block_len;
+}
+
+#if defined(__GNUC__)
+    #pragma GCC diagnostic push
+    #pragma GCC diagnostic ignored "-Weffc++"
+#endif
+
+FirmwareUpdate::FirmwareUpdate() :
+    firmware_info(FIRMWARE_INFO_OFFSET, FIRMWARE_INFO_LENGTH, firmware_info_magic)
+#if signature_sodium_public_key_length != 0
+    , signature_info(SIGNATURE_INFO_OFFSET, SIGNATURE_INFO_LENGTH, signature_info_magic)
+#endif
+{
+}
+
+#if defined(__GNUC__)
+    #pragma GCC diagnostic pop
+#endif
+
+void FirmwareUpdate::report_flash_firmware_progress_http_thread(bool force)
+{
+#if MODULE_WS_AVAILABLE()
+    if (!force && flash_firmware_state == flash_firmware_state_last_reported && flash_firmware_progress == flash_firmware_progress_last_reported) {
+        return;
+    }
+
+    char json_buf[128];
+    TFJsonSerializer json{json_buf, sizeof(json_buf)};
+
+    // keep in sync with install_state config
+    json.addObject();
+    json.addMemberString("topic", "firmware_update/install_state");
+    json.addMemberObject("payload");
+    json.addMemberNumber("origin", static_cast<uint8_t>(InstallOrigin::FlashFirmware));
+    json.addMemberNumber("state", static_cast<uint8_t>(flash_firmware_state));
+    json.addMemberNumber("progress", flash_firmware_progress);
+    json.endObject();
+    json.endObject();
+    json.end();
+
+    ws.web_sockets.sendToAllOwnedNoFreeBlocking_HTTPThread(json_buf, json.buf_strlen);
+
+    flash_firmware_state_last_reported = flash_firmware_state;
+    flash_firmware_progress_last_reported = flash_firmware_progress;
+
+    // the web server is in the middle of receiving the firmware file
+    // and does not handle other requests right now. this also means
+    // that web socket pongs are not received. fake the receiving of
+    // pongs while the firmware file is being received to avoid the
+    // web socket keep alive mechanism from assuming all web socket
+    // connections have died and closing the very connection that is
+    // used to send the flash firmware progress information
+    ws.web_sockets.fakeReceivedPongAll();
+#endif
+}
+
+void FirmwareUpdate::pre_setup()
+{
+    config = ConfigRoot{Config::Object({
+        {"update_url", Config::Str(OPTIONS_FIRMWARE_UPDATE_UPDATE_URL(), 0, 128)},
+        {"cert_id", Config::Int(-1, -1, MAX_CERT_ID)},
+    }), [this](Config &update, ConfigSource source) -> String {
+        const String &update_url_ = update.get("update_url")->asString();
+
+        if (update_url_.length() > 0 && !update_url_.startsWith("https://"))
+            return "HTTPS required for update URL";
+
+        return "";
+    }};
+
+    state = Config::Object({
+        {"publisher", Config::Str(signature_publisher, 0, static_cast<uint16_t>(strlen(signature_publisher)))},
+        {"check_timestamp", Config::Uint53(0)},
+        {"check_state", Config::Enum(CheckState::Idle)},
+        {"update_version", Config::Str("", 0, SEMANTIC_VERSION_MAX_STRING_LENGTH)},
+        {"running_partition", Config::Str("", 0, 16)},
+        {"app0_state", Config::Uint32(ESP_OTA_IMG_ERROR)},
+        {"app0_version", Config::Str("", 0, SEMANTIC_VERSION_MAX_STRING_LENGTH)},
+        {"app1_state", Config::Uint32(ESP_OTA_IMG_ERROR)},
+        {"app1_version", Config::Str("", 0, SEMANTIC_VERSION_MAX_STRING_LENGTH)},
+        {"rolled_back_version", Config::Str("", 0, SEMANTIC_VERSION_MAX_STRING_LENGTH)},
+    });
+
+    // keep in sync with report_flash_firmware_progress_http_thread
+    install_state = Config::Object({
+        {"origin", Config::Enum(InstallOrigin::None)},
+        {"state", Config::Enum(InstallState::Idle)},
+        {"progress", Config::Uint(0, 0, 100)},
+    });
+
+    install_firmware_config = ConfigRoot{Config::Object({
+        {"version", Config::Str("", 0, SEMANTIC_VERSION_MAX_STRING_LENGTH)},
+    }), [this](Config &update, ConfigSource source) -> String {
+        SemanticVersion version;
+
+        if (!version.from_string(update.get("version")->asString().c_str())) {
+            return "Version is malformed";
+        }
+
+        return "";
+    }};
+
+    override_signature = ConfigRoot{Config::Object({
+        {"cookie", Config::Uint32(0)},
+    })};
+}
+
+void FirmwareUpdate::setup()
+{
+    if (strlen(OPTIONS_FIRMWARE_UPDATE_UPDATE_URL()) > 0) {
+        api.restorePersistentConfig("firmware_update/config", &config);
+    }
+
+    update_url = config.get("update_url")->asString();
+
+    if (update_url.length() > 0 && !update_url.endsWith("/")) {
+        update_url += "/";
+    }
+
+    cert_id = config.get("cert_id")->asInt();
+
+#if signature_sodium_public_key_length != 0
+    logger.printfln("Running firmware is signed by: %s", signature_publisher);
+
+    if (update_url.length() > 0) {
+        api.addFeature("firmware_update");
+    }
+#else
+    logger.printfln("Running firmware is not signed");
+#endif
+
+    read_app_partition_state();
+
+    if (enable_rollback) {
+        task_scheduler.scheduleOnce([this]() {
+            change_running_partition_from_pending_verify_to_valid("delayed validate");
+        }, VALIDATE_FIRMWARE_DELAY);
+    }
+
+    initialized = true;
+}
+
+static void install_state_to_json_error(InstallState state, TFJsonSerializer *json_ptr)
+{
+    json_ptr->addObject();
+    json_ptr->addMemberNumber("error", static_cast<uint8_t>(state));
+    json_ptr->endObject();
+    json_ptr->end();
+}
+
+#if signature_sodium_public_key_length != 0
+
+InstallState FirmwareUpdate::check_signature_info()
+{
+    if (signature_info.block_found && signature_info.expected_checksum != signature_info.actual_checksum) {
+        logger.printfln("Failed to update: Signature info is corrupted; expected checksum %08lx, actual checksum %08lx",
+                        signature_info.expected_checksum, signature_info.actual_checksum);
+
+        return InstallState::SignatureInfoCorrupted;
+    }
+
+    signature_info.block.publisher[std::size(signature_info.block.publisher) - 1] = '\0';
+
+    return InstallState::InProgress;
+}
+
+#endif
+
+InstallState FirmwareUpdate::check_firmware_info(bool detect_downgrade, bool log, TFJsonSerializer *json_ptr)
+{
+    if (!firmware_info.block_found && OPTIONS_FIRMWARE_UPDATE_REQUIRE_FIRMWARE_INFO()) {
+        if (log) {
+            logger.printfln("Failed to update: Firmware info is missing");
+        }
+
+        return InstallState::FirmwareInfoMissing;
+    }
+
+    if (firmware_info.block_found) {
+        if (firmware_info.expected_checksum != firmware_info.actual_checksum) {
+            if (log) {
+                logger.printfln("Failed to update: Firmware info corrupted; expected checksum 0x%08lx, actual checksum 0x%08lx",
+                                firmware_info.expected_checksum, firmware_info.actual_checksum);
+            }
+
+            return InstallState::FirmwareInfoCorrupted;
+        }
+
+        firmware_info.block.product_name[ARRAY_SIZE(firmware_info.block.product_name) - 1] = '\0';
+        firmware_info.block.product_id[ARRAY_SIZE(firmware_info.block.product_id) - 1] = '\0';
+
+        if (firmware_info.block.version >= 3) {
+            const char *expected_product_id = OPTIONS_PRODUCT_ID();
+
+            if (strlen(OPTIONS_FIRMWARE_INFO_PRODUCT_ID_OVERRIDE()) > 0) {
+                expected_product_id = OPTIONS_FIRMWARE_INFO_PRODUCT_ID_OVERRIDE();
+            }
+
+            if (strcmp(firmware_info.block.product_id, expected_product_id) != 0) {
+                if (log) {
+                    logger.printfln("Failed to update: Firmware is for %s, but this is %s",
+                                    firmware_info.block.product_id, expected_product_id);
+                }
+
+                return InstallState::WrongFirmwareType;
+            }
+        }
+        else {
+            const char *expected_product_name = OPTIONS_PRODUCT_NAME();
+
+            if (strlen(OPTIONS_FIRMWARE_INFO_PRODUCT_NAME_OVERRIDE()) > 0) {
+                expected_product_name = OPTIONS_FIRMWARE_INFO_PRODUCT_NAME_OVERRIDE();
+            }
+
+            if (strcmp(firmware_info.block.product_name, expected_product_name) != 0) {
+                if (log) {
+                    logger.printfln("Failed to update: Firmware is for a %s, but this is a %s",
+                                    firmware_info.block.product_name, expected_product_name);
+                }
+
+                return InstallState::WrongFirmwareType;
+            }
+        }
+
+        SemanticVersion fw_version{firmware_info.block.fw_version_major, firmware_info.block.fw_version_minor, firmware_info.block.fw_version_patch,
+                                   firmware_info.block.fw_version_beta, firmware_info.block.fw_build_timestamp};
+
+        if (detect_downgrade && fw_version.compare(build_version) < 0) {
+            if (log) {
+                logger.printfln("Firmware update is a downgrade");
+            }
+
+            if (json_ptr != nullptr) {
+                char fw_version_str[SEMANTIC_VERSION_MAX_STRING_LENGTH] = "<unknown>";
+
+                fw_version.to_string(fw_version_str, ARRAY_SIZE(fw_version_str));
+
+                json_ptr->addObject();
+                json_ptr->addMemberNumber("error", static_cast<uint8_t>(InstallState::Downgrade));
+                json_ptr->addMemberString("firmware_version", fw_version_str);
+                json_ptr->addMemberString("installed_version", build_version_full_str());
+                json_ptr->endObject();
+                json_ptr->end();
+            }
+
+            return InstallState::Downgrade;
+        }
+    }
+
+    return InstallState::InProgress;
+}
+
+InstallState FirmwareUpdate::handle_firmware_chunk(size_t chunk_offset, uint8_t *chunk_data, size_t chunk_len, size_t complete_len, bool is_complete, TFJsonSerializer *json_ptr)
+{
+    if (chunk_offset == 0) {
+        application_len = complete_len - APPLICATION_OFFSET;
+        padded_application_len = (application_len + 4095) & ~static_cast<size_t>(4095); // pad to a multiple of 4096
+
+        size_t total_application_len = padded_application_len;
+#ifdef CONFIG_SECURE_BOOT
+        total_application_len += sizeof(ets_secure_boot_sig_block_t);
+#endif
+
+#if signature_sodium_public_key_length != 0
+        if (signature_override_cookie != 0) {
+            signature_override_cookie = 0;
+            Update.abort();
+        }
+#endif
+
+        if (!Update.begin(total_application_len, U_FLASH)) {
+            logger.printfln("Failed to update: Could not initialize flash writer: %s", Update.errorString());
+            Update.abort();
+            return InstallState::FlashBeginFailed;
+        }
+
+        mark_update_partition_invalid = true;
+
+        firmware_info.reset();
+
+        mbedtls_sha256_init(&sha256_ctx);
+        mbedtls_sha256_starts(&sha256_ctx, 0);
+
+#if signature_sodium_public_key_length != 0
+        if (sodium_init() < 0 || crypto_sign_init(&signature_state) < 0) {
+            logger.printfln("Failed to update: Could not initialize signature verification");
+            Update.abort();
+            return InstallState::SignatureBeginFailed;
+        }
+
+        signature_info.reset();
+#endif
+    }
+
+#if signature_sodium_public_key_length != 0
+    if (chunk_offset + chunk_len >= SIGNATURE_INFO_SIGNATURE_OFFSET && chunk_offset < SIGNATURE_INFO_SIGNATURE_OFFSET + SIGNATURE_INFO_SIGNATURE_LENGTH) {
+        uint8_t *start = chunk_data;
+        size_t len = chunk_len;
+        size_t to_skip = 0;
+        size_t offset = 0;
+
+        if (chunk_offset < SIGNATURE_INFO_SIGNATURE_OFFSET) {
+            to_skip = SIGNATURE_INFO_SIGNATURE_OFFSET - chunk_offset;
+            start += to_skip;
+            len -= to_skip;
+        }
+        else {
+            offset = chunk_offset - SIGNATURE_INFO_SIGNATURE_OFFSET;
+        }
+
+        if (chunk_offset + chunk_len > SIGNATURE_INFO_SIGNATURE_OFFSET + SIGNATURE_INFO_SIGNATURE_LENGTH) {
+            len -= (chunk_offset + chunk_len) - (SIGNATURE_INFO_SIGNATURE_OFFSET + SIGNATURE_INFO_SIGNATURE_LENGTH);
+        }
+
+        memcpy(signature_info_signature + offset, start, len);
+        memset(start, 0x55, len);
+    }
+
+    if (signature_info.handle_chunk(chunk_offset, chunk_data, chunk_len)) {
+        InstallState result = check_signature_info();
+
+        if (result != InstallState::InProgress) {
+            Update.abort();
+            return result;
+        }
+    }
+
+    if (crypto_sign_update(&signature_state, chunk_data, chunk_len) < 0) {
+        logger.printfln("Failed to update: Could not continue signature verification");
+        Update.abort();
+        return InstallState::SignatureUpdateFailed;
+    }
+#endif
+
+    if (firmware_info.handle_chunk(chunk_offset, chunk_data, chunk_len)) {
+        InstallState result = check_firmware_info(false, true, json_ptr);
+
+        if (result != InstallState::InProgress) {
+            Update.abort();
+            return result;
+        }
+    }
+
+    if (chunk_offset + chunk_len < APPLICATION_OFFSET) {
+        return InstallState::InProgress;
+    }
+
+    uint8_t *start = chunk_data;
+    size_t len = chunk_len;
+
+    if (chunk_offset < APPLICATION_OFFSET) {
+        size_t to_skip = APPLICATION_OFFSET - chunk_offset;
+        start += to_skip;
+        len -= to_skip;
+    }
+
+    if (mark_update_partition_invalid) {
+        // URL downloads run in the main task while file uploads run in the HTTP thread.
+        if (running_in_main_task()) {
+            this->change_update_partition_to_invalid("preparing firmware update");
+        } else {
+            // Even if we don't fail to mark the partition as invalid,
+            // we will probably overwrite the first 16 bytes soon.
+            // This only fixes a confusing event log message, so it's
+            // fine to ignore await errors here.
+            (void)task_scheduler.await([this](){ this->change_update_partition_to_invalid("preparing firmware update"); });
+        }
+        mark_update_partition_invalid = false;
+    }
+
+    mbedtls_sha256_update(&sha256_ctx, start, len);
+
+    size_t written = Update.write(start, len);
+
+    if (written != len) {
+        logger.printfln("Failed to update: Could not write data with length %u; written %u, error: %s", len, written, Update.errorString());
+        Update.abort();
+        return InstallState::FlashShortWrite;
+    }
+
+    if (is_complete) {
+        size_t padding_len = padded_application_len - application_len;
+        uint8_t padding_block[64];
+
+        memset(padding_block, 0xFF, sizeof(padding_block));
+
+        while (padding_len > 0) {
+            size_t padding_block_len = std::min(padding_len, sizeof(padding_block));
+
+            mbedtls_sha256_update(&sha256_ctx, padding_block, padding_block_len);
+
+            written = Update.write(padding_block, padding_block_len);
+
+            if (written != padding_block_len) {
+                logger.printfln("Failed to update: Could not write padding with length %u; written %u, error: %s", padding_block_len, written, Update.errorString());
+                Update.abort();
+                return InstallState::FlashShortWrite;
+            }
+
+            padding_len -= padding_block_len;
+        }
+
+        uint8_t actual_padded_application_sha256sum[32];
+        mbedtls_sha256_finish(&sha256_ctx, actual_padded_application_sha256sum);
+
+        if (firmware_info.block.version >= 4 && memcmp(firmware_info.block.padded_application_sha256sum, actual_padded_application_sha256sum, 32) != 0) {
+            char padded_application_sha256sum_str[64 + 1];
+            char actual_padded_application_sha256sum_str[64 + 1];
+
+            hexdump(firmware_info.block.padded_application_sha256sum, 32, padded_application_sha256sum_str, std::size(padded_application_sha256sum_str), HexdumpCase::Lower);
+            hexdump(actual_padded_application_sha256sum, 32, actual_padded_application_sha256sum_str, std::size(actual_padded_application_sha256sum_str), HexdumpCase::Lower);
+
+            logger.printfln("Failed to update: Application is corrupted; expected checksum %s, actual checksum %s", padded_application_sha256sum_str, actual_padded_application_sha256sum_str);
+            Update.abort();
+            return InstallState::ApplicationCorrupted;
+        }
+
+#if signature_sodium_public_key_length != 0
+        if (!signature_info.block_found || crypto_sign_final_verify(&signature_state, signature_info_signature, signature_sodium_public_key_data) < 0) {
+            signature_override_cookie = esp_random();
+
+            if (signature_override_cookie == 0) {
+                signature_override_cookie = 1;
+            }
+
+            if (json_ptr != nullptr) {
+                json_ptr->addObject();
+                json_ptr->addMemberNumber("error", static_cast<uint8_t>(InstallState::SignatureVerifyFailed));
+
+                if (!signature_info.block_found) {
+                    json_ptr->addMemberNull("actual_publisher");
+                }
+                else {
+                    json_ptr->addMemberString("actual_publisher", signature_info.block.publisher);
+                }
+
+                json_ptr->addMemberString("expected_publisher", signature_publisher);
+                json_ptr->addMemberNumber("cookie", signature_override_cookie);
+                json_ptr->endObject();
+                json_ptr->end();
+            }
+
+            logger.printfln(!signature_info.block_found ? "Signature info is missing" : "Update signature is not valid");
+            return InstallState::SignatureVerifyFailed;
+        }
+
+        logger.printfln("Update signature is valid, published by %s", signature_info.block.publisher);
+#endif
+
+#ifdef CONFIG_SECURE_BOOT
+        if (!sbv2_sign_app(chunk_data, chunk_len)) {
+            Update.end();
+            return InstallState::SecureBootSignatureGenerationFailed;
+        }
+#endif
+
+        if (!Update.end(true) || Update.hasError()) {
+            logger.printfln("Failed to apply update: %s", Update.errorString());
+            return InstallState::FlashApplyFailed;
+        }
+    }
+
+    return InstallState::InProgress;
+}
+
+#if signature_sodium_public_key_length != 0
+static const char *firmware_url_infix = "_firmware_";
+static size_t firmware_url_infix_len = strlen(firmware_url_infix);
+static size_t firmware_url_version_len = strlen("MAJ_MIN_PAT_beta_BET_TIMESTAM");
+#if OPTIONS_FIRMWARE_UPDATE_INDEX_VERSION() == 1
+static const char *firmware_url_suffix = "_merged.bin";
+#elif OPTIONS_FIRMWARE_UPDATE_INDEX_VERSION() == 3
+static const char *firmware_url_suffix = "_ota.bin";
+#else
+#error "Unknown index version"
+#endif
+static size_t firmware_url_suffix_len = strlen(firmware_url_suffix);
+#endif
+
+static void boot_other_partition(const char *other_partition_label, String &errmsg)
+{
+    const esp_partition_t *running_partition = esp_ota_get_running_partition();
+
+    if (running_partition == nullptr) {
+        errmsg = "Could not get running partition";
+        return;
+    }
+
+    if (other_partition_label != nullptr) {
+        if (strcmp(running_partition->label, other_partition_label) == 0) {
+            errmsg = string_printf<48>("Partition %s is already running", running_partition->label);
+            return;
+        }
+    }
+    else if (strcmp(running_partition->label, "app0") == 0) {
+        other_partition_label = "app1";
+    }
+    else if (strcmp(running_partition->label, "app1") == 0) {
+        other_partition_label = "app0";
+    }
+    else {
+        errmsg = string_printf<48>("Unexpected running partition: %s", running_partition->label);
+        return;
+    }
+
+    const esp_partition_t *other_partition = esp_partition_find_first(ESP_PARTITION_TYPE_APP,
+                                                                      ESP_PARTITION_SUBTYPE_ANY,
+                                                                      other_partition_label);
+
+    if (other_partition == nullptr) {
+        errmsg = string_printf<48>("Other partition not found: %s", other_partition_label);
+        return;
+    }
+
+    esp_err_t err = esp_ota_set_boot_partition(other_partition);
+
+    if (err == ESP_ERR_OTA_VALIDATE_FAILED) {
+        errmsg = string_printf<96>("Could not set %s as boot partition: firmware is missing or invalid", other_partition->label);
+        return;
+    }
+
+    if (err != ESP_OK) {
+        errmsg = string_printf<64>("Could not set %s as boot partition: %u", other_partition->label, static_cast<unsigned>(err));
+        return;
+    }
+
+    logger.printfln("Booting %s partition", other_partition_label);
+    trigger_reboot("booting other partition", 1_s);
+}
+
+[[gnu::noinline]]
+static uint32_t find_used_size(const esp_partition_t *partition)
+{
+    uint32_t buf[2048 / sizeof(uint32_t)];
+    const uint32_t partition_size = partition->size;
+
+    if (partition_size % sizeof(buf) != 0) {
+        logger.printfln("Partition size not a multiple of the buffer size: %lu", partition_size);
+        return partition_size;
+    }
+
+    uint32_t offset = partition_size;
+
+    while (offset > 0) {
+        offset -= sizeof(buf);
+
+        esp_err_t err = esp_partition_read_raw(partition, offset, buf, sizeof(buf));
+
+        if (err != ESP_OK) {
+            logger.printfln("Partition read failed @ %lu: 0x%x", offset, static_cast<unsigned>(err));
+            return partition_size;
+        }
+
+        for (size_t i = 0; i < std::size(buf); i++) {
+            if (buf[i] == 0xFFFFFFFFUL) {
+                continue;
+            }
+
+            // Block not empty
+            return ALIGNUP(64UL * 1024UL, offset + sizeof(buf) - 1);
+        }
+    }
+
+    return 0;
+}
+
+bool FirmwareUpdate::erase_other_partition(String &msg, EraseType erase_type)
+{
+    const esp_partition_t *running_partition = esp_ota_get_running_partition();
+
+    if (running_partition == nullptr) {
+        msg = "Could not get running partition";
+        return false;
+    }
+
+    const char *other_partition_label;
+
+    if (strcmp(running_partition->label, "app0") == 0) {
+        other_partition_label = "app1";
+    }
+    else if (strcmp(running_partition->label, "app1") == 0) {
+        other_partition_label = "app0";
+    }
+    else {
+        msg = string_printf<48>("Unexpected running partition: %s", running_partition->label);
+        return false;
+    }
+
+    const esp_partition_t *other_partition = esp_partition_find_first(ESP_PARTITION_TYPE_APP,
+                                                                      ESP_PARTITION_SUBTYPE_ANY,
+                                                                      other_partition_label);
+
+    if (other_partition == nullptr) {
+        msg = string_printf<48>("Other partition %s not found", other_partition_label);
+        return false;
+    }
+
+    if (!change_partition_ota_state_from_to(other_partition, ESP_OTA_IMG_UNDEFINED, ESP_OTA_IMG_INVALID, "erasing partition", true)) {
+        msg = string_printf<64>("Could not change OTA state of partition %s to invalid", other_partition_label);
+        return false;
+    }
+
+    uint32_t to_erase;
+    esp_err_t err;
+    const micros_t t_start = now_us();
+
+    if (erase_type == EraseType::Beginning) {
+        // Erase only minimum erase size
+        to_erase = other_partition->erase_size;
+    } else if (erase_type == EraseType::InUse) {
+        to_erase = find_used_size(other_partition);
+
+        if (to_erase == 0) {
+            msg = string_printf<64>("Partition %s already erased", other_partition_label);
+            return true;
+        }
+    } else {
+        // Erase everything
+        to_erase = other_partition->size;
+    }
+
+    uint32_t offset = 0;
+
+    while (offset < to_erase) {
+        constexpr uint32_t max_block_size = 512UL * 1024UL;
+        const uint32_t block_size = std::min(to_erase - offset, max_block_size);
+
+        err = esp_partition_erase_range(other_partition, offset, block_size);
+
+        if (err != ESP_OK) {
+            break;
+        }
+
+        if (block_size == max_block_size) {
+            vTaskDelay(1);
+        }
+
+        offset += block_size;
+    }
+
+    const uint32_t runtime_us = (now_us() - t_start).as<uint32_t>();
+
+    if (err != ESP_OK) {
+        msg = string_printf<64>("Could not erase partition %s: %s (0x%04x)", other_partition_label, esp_err_to_name(err), static_cast<unsigned>(err));
+        return false;
+    }
+
+    const uint32_t runtime_ms = runtime_us / 1000;
+    msg = string_printf<64>("Erased %lu KiB of partition %s in %lu.%03lus", to_erase / 1024, other_partition_label, runtime_ms / 1000, runtime_ms % 1000);
+    return true;
+}
+
+void FirmwareUpdate::register_urls()
+{
+    if (strlen(OPTIONS_FIRMWARE_UPDATE_UPDATE_URL()) > 0) {
+        api.addPersistentConfig("firmware_update/config", &config);
+    }
+    else {
+        api.addState("firmware_update/config", &config);
+    }
+
+    api.addState("firmware_update/state", &state);
+    api.addState("firmware_update/install_state", &install_state, {}, {}, true);
+
+    api.addCommand("firmware_update/check_for_update", Config::Null(), {}, [this](Language /*language*/, String &/*errmsg*/) {
+        check_for_update();
+    }, true);
+
+    api.addCommand("firmware_update/install_firmware", &install_firmware_config, {}, [this](Language /*language*/, String &/*errmsg*/) {
+        install_state.get("origin")->updateEnum(InstallOrigin::InstallFirmware);
+        install_state.get("progress")->updateUint(0);
+
+#if signature_sodium_public_key_length == 0
+        logger.printfln("Installing firmware from URL is not supported (running firmware is unsigned)");
+
+        install_state.get("state")->updateEnum(InstallState::NotSupported);
+#else
+        const String &version_str = install_firmware_config.get("version")->asString();
+        SemanticVersion version;
+
+        if (!version.from_string(version_str.c_str())) {
+            logger.printfln("Version is malformed: %s", version_str.c_str());
+            install_state.get("state")->updateEnum(InstallState::VersionMalformed);
+            return;
+        }
+
+        if (update_url.length() == 0) {
+            logger.printfln("No update URL configured");
+            install_state.get("state")->updateEnum(InstallState::NoUpdateURL);
+            return;
+        }
+
+        StringBuilder firmware_url;
+
+        if (firmware_url.setCapacity(update_url.length() + options_product_id_length + firmware_url_infix_len + firmware_url_version_len + firmware_url_suffix_len) == 0) {
+            logger.printfln("Could not build firmware URL");
+            install_state.get("state")->updateEnum(InstallState::InternalError);
+            return;
+        }
+
+        firmware_url.puts(update_url);
+        firmware_url.puts(OPTIONS_PRODUCT_ID(), options_product_id_length);
+        firmware_url.puts(firmware_url_infix, firmware_url_infix_len);
+        firmware_url.printf("%u_%u_%u", version.major, version.minor, version.patch);
+
+        if (version.beta != 255) {
+            firmware_url.printf("_beta_%u", version.beta);
+        }
+
+        firmware_url.printf("_%lx", version.timestamp);
+        firmware_url.puts(firmware_url_suffix, firmware_url_suffix_len);
+
+        char *firmware_url_ptr = firmware_url.take();
+
+        install_firmware(firmware_url_ptr);
+
+        free(firmware_url_ptr);
+#endif
+    }, true);
+
+    api.addCommand("firmware_update/override_signature", &override_signature, {}, [this](Language /*language*/, String &errmsg) {
+#if signature_sodium_public_key_length != 0
+        char json_buf[64] = "";
+        TFJsonSerializer json{json_buf, sizeof(json_buf)};
+
+        if (signature_override_cookie == 0) {
+            errmsg = "No update pending";
+            return;
+        }
+
+        uint32_t cookie = override_signature.get("cookie")->asUint();
+
+        if (signature_override_cookie != cookie) {
+            errmsg = "Wrong signature override cookie";
+            return;
+        }
+
+        logger.printfln("Overriding failed signature verification");
+
+        signature_override_cookie = 0;
+
+#ifdef CONFIG_SECURE_BOOT
+        if (!sbv2_sign_app(nullptr, 0)) {
+            Update.end();
+            errmsg = "Failed to sign update";
+            return;
+        }
+#endif
+
+        if (!Update.end(true) || Update.hasError()) {
+            errmsg = "Failed to apply update";
+            logger.printfln("%s: %s", errmsg.c_str(), Update.errorString());
+            return;
+        }
+
+        trigger_reboot("firmware update", 1_s);
+#else
+        errmsg = "Signature verification is disabled";
+#endif
+    }, true);
+
+    api.addCommand("firmware_update/reboot_app0", Config::Null(), {}, [this](Language /*language*/, String &errmsg) {
+        boot_other_partition("app0", errmsg);
+    }, true);
+
+    api.addCommand("firmware_update/reboot_app1", Config::Null(), {}, [this](Language /*language*/, String &errmsg) {
+        boot_other_partition("app1", errmsg);
+    }, true);
+
+    api.addCommand("firmware_update/reboot_other", Config::Null(), {}, [this](Language /*language*/, String &errmsg) {
+        boot_other_partition(nullptr, errmsg);
+    }, true);
+
+    api.addCommand("firmware_update/clear_rolled_back_version", Config::Null(), {}, [this](Language /*language*/, String &errmsg) {
+        if (change_update_partition_from_aborted_to_invalid("clearing rollback") > 0) {
+            state.get("rolled_back_version")->updateString("");
+        }
+    }, true);
+
+    api.addCommand("firmware_update/validate", Config::Null(), {}, [this](Language /*language*/, String &errmsg) {
+        change_running_partition_from_pending_verify_to_valid("forced validate");
+    }, true);
+
+    // Completely erase other firmware in HTTP thread because it takes a while.
+    server.on_HTTPThread("/firmware_update/erase_other", HTTP_GET, [this](WebServerRequest request) {
+        String msg;
+        const bool success = erase_other_partition(msg, EraseType::InUse);
+        return request.send_plain(success ? 200 : 500, msg);
+    });
+
+#ifdef DEBUG_FS_ENABLE
+    server.on_HTTPThread("/firmware_update/erase_other_force", HTTP_GET, [this](WebServerRequest request) {
+        String msg;
+        const bool success = erase_other_partition(msg, EraseType::All);
+        return request.send_plain(success ? 200 : 500, msg);
+    });
+#endif
+
+    server.on_HTTPThread("/check_firmware", HTTP_POST, [this](WebServerRequest request) {
+        char json_buf[256] = "";
+        TFJsonSerializer json{json_buf, sizeof(json_buf)};
+        InstallState result = check_firmware_info(true, false, &json);
+
+        check_firmware_in_progress = false;
+
+        if (result != InstallState::InProgress) {
+            if (json_buf[0] == '\0') {
+                install_state_to_json_error(result, &json);
+            }
+
+            return request.send_json(400, json);
+        }
+
+        return request.send_plain(200, "Check OK");
+    },
+    [this](WebServerRequest request, String filename, size_t offset, uint8_t *data, size_t data_len, size_t remaining) {
+        if (is_vehicle_blocking_update()) {
+            char json_buf[64] = "";
+            TFJsonSerializer json{json_buf, sizeof(json_buf)};
+
+            install_state_to_json_error(InstallState::VehicleConnected, &json);
+            request.send_json(400, json);
+            return false;
+        }
+
+        if (offset == 0) {
+            bool ready = false;
+
+            while (!ready) {
+                auto result = task_scheduler.await([this, &ready](){
+                    check_firmware_in_progress = true;
+                    ready = true;
+
+                    if (check_for_update_in_progress || install_firmware_in_progress) {
+                        https_client.abort_async();
+                        ready = false;
+                    }
+                });
+
+                if (!result) {
+                    return false;
+                }
+
+                delay(100); // wait for other operations to react
+            }
+
+            firmware_info.reset();
+        }
+
+        if (offset + data_len > FIRMWARE_INFO_LENGTH) {
+            char json_buf[64] = "";
+            TFJsonSerializer json{json_buf, sizeof(json_buf)};
+
+            install_state_to_json_error(InstallState::FirmwareInfoTooBig, &json);
+            request.send_json(400, json);
+            check_firmware_in_progress = false;
+            return false;
+        }
+
+        firmware_info.handle_chunk(FIRMWARE_INFO_OFFSET + offset, data, data_len);
+        return true;
+    },
+    [this](WebServerRequest request, int error_code) {
+        logger.printfln("File reception failed: %s (%d)", strerror(error_code), error_code);
+        check_firmware_in_progress = false;
+        return request.send_plain(500, "Failed to receive file");
+    });
+
+    server.on_HTTPThread("/flash_firmware", HTTP_POST, [this](WebServerRequest request) {
+        logger.printfln("Firmware successfully installed");
+
+        flash_firmware_state = InstallState::Rebooting;
+
+        report_flash_firmware_progress_http_thread();
+
+        // Discarding the result is fine: We are rebooting directly afterwards.
+        (void)task_scheduler.await([this]() {
+            flash_firmware_in_progress = false;
+            update_install_state();
+        });
+
+        trigger_reboot("firmware update", 1_s);
+        return request.send_plain(200, "Update OK");
+    },
+    [this](WebServerRequest request, String filename, size_t offset, uint8_t *data, size_t data_len, size_t remaining) {
+        if (offset == 0) {
+            bool ready = false;
+
+            while (!ready) {
+                auto result = task_scheduler.await([this, &ready]() {
+                    flash_firmware_in_progress = true;
+                    ready = true;
+
+                    if (check_for_update_in_progress || install_firmware_in_progress) {
+                        https_client.abort_async();
+                        ready = false;
+                    }
+                });
+
+                if (!result) {
+                    return false;
+                }
+
+                delay(100); // wait for other operations to react
+            }
+
+            logger.printfln("Installing firmware from file upload");
+
+            flash_firmware_state = InstallState::InProgress;
+            flash_firmware_progress = 0;
+
+            report_flash_firmware_progress_http_thread(true);
+        }
+
+        size_t complete_len = request.contentLength();
+        char json_buf[256] = "";
+        TFJsonSerializer json{json_buf, sizeof(json_buf)};
+
+        flash_firmware_state = handle_firmware_chunk(offset, data, data_len, complete_len, remaining == 0, &json);
+
+        if (flash_firmware_state != InstallState::InProgress) {
+            report_flash_firmware_progress_http_thread();
+
+            if (json_buf[0] == '\0') {
+                install_state_to_json_error(flash_firmware_state, &json);
+            }
+
+            flash_firmware_in_progress = false;
+            // Discarding the result is fine: We are sending an error anyway.
+            (void)task_scheduler.await([this]() { update_install_state(); });
+
+            request.send_json(400, json);
+            return false;
+        }
+
+        flash_firmware_progress = (offset + data_len) * 100 / complete_len;
+
+        report_flash_firmware_progress_http_thread();
+        return true;
+    },
+    [this](WebServerRequest request, int error_code) {
+        logger.printfln("File reception failed: %s (%d)", strerror(error_code), error_code);
+        Update.abort();
+
+        flash_firmware_state = InstallState::ReceiveError;
+
+        report_flash_firmware_progress_http_thread();
+
+        flash_firmware_in_progress = false;
+        // Discarding the result is fine: We are sending an error anyway.
+        (void)task_scheduler.await([this]() { update_install_state(); });
+
+        return request.send_plain(500, "Failed to receive file");
+    });
+}
+
+void FirmwareUpdate::pre_reboot()
+{
+    change_running_partition_from_pending_verify_to_new("rebooting");
+}
+
+static bool read_ota_data(size_t ota_index, esp_ota_select_entry_t *ota_data, bool silent)
+{
+    const esp_partition_t *ota_partition = esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_OTA, nullptr);
+
+    if (ota_partition == nullptr) {
+        if (!silent) {
+            logger.printfln("Could not find OTA data for app%zu partition", ota_index);
+        }
+
+        return false;
+    }
+
+    esp_err_t err = esp_partition_read(ota_partition, SPI_FLASH_SEC_SIZE * ota_index, ota_data, sizeof(esp_ota_select_entry_t));
+
+    if (err != ESP_OK) {
+        if (!silent) {
+            logger.printfln("Could not read OTA data for app%zu partition: %d", ota_index, err);
+        }
+
+        return false;
+    }
+
+    return true;
+}
+
+static bool write_ota_data(size_t ota_index, esp_ota_select_entry_t *ota_data, bool silent)
+{
+    const esp_partition_t *ota_partition = esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_OTA, nullptr);
+
+    if (ota_partition == nullptr) {
+        if (!silent) {
+            logger.printfln("Could not find OTA partition");
+        }
+
+        return false;
+    }
+
+    esp_err_t err = esp_partition_erase_range(ota_partition, SPI_FLASH_SEC_SIZE * ota_index, SPI_FLASH_SEC_SIZE);
+
+    if (err != ESP_OK) {
+        if (!silent) {
+            logger.printfln("Could not erase OTA partition data %zu: %d", ota_index, err);
+        }
+
+        return false;
+    }
+
+    err = esp_partition_write(ota_partition, SPI_FLASH_SEC_SIZE * ota_index, ota_data, sizeof(esp_ota_select_entry_t));
+
+    if (err != ESP_OK) {
+        if (!silent) {
+            logger.printfln("Could not write OTA partition data %zu: %d", ota_index, err);
+        }
+
+        return false;
+    }
+
+    return true;
+}
+
+// return: -1 (error), 0 (expected state not matching), 1 (new state applied)
+int FirmwareUpdate::change_partition_ota_state_from_to(const esp_partition_t *partition, esp_ota_img_states_t expected_ota_state, esp_ota_img_states_t new_ota_state, const char *reason, bool silent)
+{
+    size_t ota_index;
+    const char *app_state_key;
+
+    if (strcmp(partition->label, "app0") == 0) {
+        ota_index = 0;
+        app_state_key = "app0_state";
+    }
+    else if (strcmp(partition->label, "app1") == 0) {
+        ota_index = 1;
+        app_state_key = "app1_state";
+    }
+    else {
+        if (!silent) {
+            logger.printfln("Unexpected partition: %s", partition->label);
+        }
+
+        return -1;
+    }
+
+    esp_ota_select_entry_t ota_data;
+
+    if (!read_ota_data(ota_index, &ota_data, silent)) {
+        return -1;
+    }
+
+    uint32_t previous_ota_state = ota_data.ota_state;
+
+    if (previous_ota_state == new_ota_state) {
+        return 1;
+    }
+
+    if (expected_ota_state != ESP_OTA_IMG_UNDEFINED && previous_ota_state != expected_ota_state) {
+        return 0;
+    }
+
+    ota_data.ota_state = new_ota_state;
+
+    if (!write_ota_data(ota_index, &ota_data, silent)) {
+        if (!silent) {
+            logger.printfln("Could not change %s partition OTA state from %s to %s (%s)",
+                            partition->label,
+                            get_esp_ota_img_state_name(previous_ota_state),
+                            get_esp_ota_img_state_name(new_ota_state),
+                            reason);
+        }
+
+        return -1;
+    }
+
+    // This function can be called during pre_init when 'state' doesn't exist yet.
+    // It's initialized during setup, so there's no point in setting it earlier.
+    if (boot_stage > BootStage::PRE_SETUP) {
+        if (running_in_main_task()) {
+            state.get(app_state_key)->updateUint(new_ota_state);
+        } else {
+            task_scheduler.scheduleOnce([this, app_state_key, new_ota_state]() {
+                state.get(app_state_key)->updateUint(new_ota_state);
+            });
+        }
+    }
+
+    if (!silent) {
+        logger.printfln("Changed %s partition OTA state from %s to %s (%s)",
+                        partition->label,
+                        get_esp_ota_img_state_name(previous_ota_state),
+                        get_esp_ota_img_state_name(new_ota_state),
+                        reason);
+    }
+
+    return 1;
+}
+
+int FirmwareUpdate::change_running_partition_from_pending_verify_to_valid(const char *reason, bool silent)
+{
+    const esp_partition_t *running_partition = esp_ota_get_running_partition();
+
+    if (running_partition == nullptr) {
+        if (!silent) {
+            logger.printfln("Could not get running partition");
+        }
+
+        return -1;
+    }
+
+    return change_partition_ota_state_from_to(running_partition, ESP_OTA_IMG_PENDING_VERIFY, ESP_OTA_IMG_VALID, reason, silent);
+}
+
+int FirmwareUpdate::change_running_partition_from_pending_verify_to_new(const char *reason, bool silent)
+{
+    const esp_partition_t *running_partition = esp_ota_get_running_partition();
+
+    if (running_partition == nullptr) {
+        if (!silent) {
+            logger.printfln("Could not get running partition");
+        }
+
+        return -1;
+    }
+
+    return change_partition_ota_state_from_to(running_partition, ESP_OTA_IMG_PENDING_VERIFY, ESP_OTA_IMG_NEW, reason, silent);
+}
+
+int FirmwareUpdate::change_update_partition_from_aborted_to_invalid(const char *reason, bool silent)
+{
+    const esp_partition_t *update_partition = esp_ota_get_next_update_partition(nullptr);
+
+    if (update_partition == nullptr) {
+        if (!silent) {
+            logger.printfln("Could not get update partition");
+        }
+
+        return -1;
+    }
+
+    return change_partition_ota_state_from_to(update_partition, ESP_OTA_IMG_ABORTED, ESP_OTA_IMG_INVALID, reason, silent);
+}
+
+int FirmwareUpdate::change_update_partition_to_invalid(const char *reason, bool silent)
+{
+    const esp_partition_t *update_partition = esp_ota_get_next_update_partition(nullptr);
+
+    if (update_partition == nullptr) {
+        if (!silent) {
+            logger.printfln("Could not get update partition");
+        }
+
+        return -1;
+    }
+
+    return change_partition_ota_state_from_to(update_partition, ESP_OTA_IMG_UNDEFINED, ESP_OTA_IMG_INVALID, reason, silent);
+}
+
+bool FirmwareUpdate::is_vehicle_blocking_update() const
+{
+#if MODULE_EM_V1_AVAILABLE() && !MODULE_EVSE_COMMON_AVAILABLE()
+    bool block_firmware_update_with_vehicle_connected = em_v1.block_firmware_update_with_vehicle_connected();
+#else
+    bool block_firmware_update_with_vehicle_connected = true;
+#endif
+
+    return block_firmware_update_with_vehicle_connected && vehicle_connected;
+}
+
+#if OPTIONS_FIRMWARE_UPDATE_INDEX_VERSION() == 1
+static const char *index_url_suffix = "_firmware_v1.txt";
+#elif OPTIONS_FIRMWARE_UPDATE_INDEX_VERSION() == 3
+static const char *index_url_suffix = "_firmware_v3.txt";
+#else
+#error "Unknown index version"
+#endif
+
+static size_t index_url_suffix_len = strlen(index_url_suffix);
+
+// index files are not signed to allow customer fleet update managment, firmwares are signed
+void FirmwareUpdate::check_for_update()
+{
+    struct timeval now;
+
+    if (!rtc.clock_synced(&now)) {
+        now.tv_sec = 0;
+    }
+
+    state.get("check_timestamp")->updateUint53(static_cast<uint64_t>(now.tv_sec));
+    state.get("update_version")->updateString("");
+
+#if signature_sodium_public_key_length == 0
+    logger.printfln("Checking for firmware update is not supported (installed firmware is unsigned)");
+
+    state.get("check_state")->updateEnum(CheckState::NotSupported);
+#else
+    logger.printfln("Checking for firmware update");
+    state.get("check_state")->updateEnum(CheckState::InProgress);
+
+    if (check_firmware_in_progress || flash_firmware_in_progress || install_firmware_in_progress) {
+        logger.printfln("Firmware install in progress");
+        state.get("check_state")->updateEnum(CheckState::Busy);
+        return;
+    }
+
+    install_state.get("origin")->updateEnum(InstallOrigin::None);
+    install_state.get("state")->updateEnum(InstallState::Idle);
+    install_state.get("progress")->updateUint(0);
+
+    if (https_client.is_busy()) {
+        logger.printfln("HTTP client is already in use");
+        state.get("check_state")->updateEnum(CheckState::Busy);
+        return;
+    }
+
+    if (update_url.length() == 0) {
+        logger.printfln("No update URL configured");
+        state.get("check_state")->updateEnum(CheckState::NoUpdateURL);
+        return;
+    }
+
+    StringBuilder index_url;
+
+    if (index_url.setCapacity(update_url.length() + options_product_id_length + index_url_suffix_len) == 0) {
+        logger.printfln("Could not build firmware index URL");
+        state.get("check_state")->updateEnum(CheckState::InternalError);
+        return;
+    }
+
+    index_url.puts(update_url);
+    index_url.puts(OPTIONS_PRODUCT_ID(), options_product_id_length);
+    index_url.puts(index_url_suffix, index_url_suffix_len);
+
+    char *index_url_ptr = index_url.take();
+
+    index_buf_used = 0;
+    //last_version_timestamp = time(nullptr);
+    check_for_update_in_progress = true;
+
+    https_client.download_async(index_url_ptr, cert_id, [this](AsyncHTTPSClientEvent *event) {
+        switch (event->type) {
+        case AsyncHTTPSClientEventType::Error:
+            switch (event->error) {
+            case AsyncHTTPSClientError::NoHTTPSURL:
+                logger.printfln("No HTTPS update URL");
+                state.get("check_state")->updateEnum(CheckState::InternalError);
+                break;
+
+            case AsyncHTTPSClientError::Busy:
+                logger.printfln("HTTP client is busy");
+                state.get("check_state")->updateEnum(CheckState::Busy);
+                break;
+
+            case AsyncHTTPSClientError::NoCert:
+                logger.printfln("Certificate with ID %d is not available", cert_id);
+                state.get("check_state")->updateEnum(CheckState::NoCert);
+                break;
+
+            case AsyncHTTPSClientError::Timeout:
+                logger.printfln("Update server %s did not respond", update_url.c_str());
+                state.get("check_state")->updateEnum(CheckState::NoResponse);
+                break;
+
+            case AsyncHTTPSClientError::ShortRead:
+                logger.printfln("Firmware index download ended prematurely");
+                state.get("check_state")->updateEnum(CheckState::DownloadShortRead);
+                break;
+
+            case AsyncHTTPSClientError::HTTPError: {
+                char buf[204];
+                translate_HTTPError_detailed(event->error_handle, buf, ARRAY_SIZE(buf), true);
+                logger.printfln("Firmware index download failed: %s", buf);
+                state.get("check_state")->updateEnum(CheckState::DownloadError);
+                break;
+            }
+            case AsyncHTTPSClientError::HTTPClientInitFailed:
+                logger.printfln("Error while creating HTTP client");
+                state.get("check_state")->updateEnum(CheckState::HTTPClientInitFailed);
+                break;
+
+            case AsyncHTTPSClientError::HTTPClientSetCookieFailed:
+                logger.printfln("Error while setting request-cookie");
+                state.get("check_state")->updateEnum(CheckState::InternalError);
+                break;
+
+            case AsyncHTTPSClientError::HTTPClientSetHeaderFailed:
+                logger.printfln("Error while setting request-header");
+                state.get("check_state")->updateEnum(CheckState::InternalError);
+                break;
+
+            case AsyncHTTPSClientError::HTTPClientSetBodyFailed:
+                logger.printfln("Error while setting request-body");
+                state.get("check_state")->updateEnum(CheckState::InternalError);
+                break;
+
+            case AsyncHTTPSClientError::HTTPClientError:
+                logger.printfln("Error while downloading firmware index: %s (0x%lX)", esp_err_to_name(event->error_http_client), static_cast<uint32_t>(event->error_http_client));
+                state.get("check_state")->updateEnum(CheckState::DownloadError);
+                break;
+
+            case AsyncHTTPSClientError::HTTPStatusError:
+                logger.printfln("HTTP error while downloading firmware index: %d", event->error_http_status);
+                state.get("check_state")->updateEnum(CheckState::DownloadError);
+                break;
+
+            default:
+                logger.printfln("Unknown HTTPS client error while downloading firmware index: %d", static_cast<int>(event->error));
+                state.get("check_state")->updateEnum(CheckState::InternalError);
+                break;
+            }
+
+            check_for_update_in_progress = false;
+            break;
+
+        case AsyncHTTPSClientEventType::Data:
+            handle_index_data(event->data_chunk, event->data_chunk_len);
+            break;
+
+        case AsyncHTTPSClientEventType::Aborted:
+            if (state.get("check_state")->asEnum<CheckState>() == CheckState::InProgress) {
+                logger.printfln("Update check aborted");
+                state.get("check_state")->updateEnum(CheckState::Aborted);
+            }
+
+            check_for_update_in_progress = false;
+            break;
+
+        case AsyncHTTPSClientEventType::Finished:
+            handle_index_data("\n", 1);
+
+            if (state.get("check_state")->asEnum<CheckState>() == CheckState::InProgress) {
+                logger.printfln("No firmware update available");
+                state.get("check_state")->updateEnum(CheckState::Idle);
+                state.get("update_version")->updateString("");
+            }
+
+            check_for_update_in_progress = false;
+            break;
+
+        case AsyncHTTPSClientEventType::Redirect:
+            break;
+
+        default:
+            logger.printfln("Unknown HTTPS client event while downloading firmware index: %d", static_cast<int>(event->type));
+            break;
+        }
+    });
+
+    free(index_url_ptr);
+#endif
+}
+
+void FirmwareUpdate::handle_index_data(const void *data, size_t data_len)
+{
+    const char *data_start = static_cast<const char *>(data);
+    const char *data_end = data_start + data_len;
+
+    while (data_start < data_end) {
+        // fill buffer with new data
+        char *index_buf_free_start = index_buf + index_buf_used;
+        char *index_buf_free_end = index_buf + sizeof(index_buf) - 1;
+
+        if (index_buf_free_start == index_buf_free_end) {
+            logger.printfln("Firmware index is malformed");
+            state.get("check_state")->updateEnum(CheckState::IndexMalformed);
+            https_client.abort_async();
+            return;
+        }
+
+        while (index_buf_free_start < index_buf_free_end && data_start < data_end) {
+            if (*data_start != ' ' && *data_start != '\t' && *data_start != '\r') {
+                *index_buf_free_start++ = *data_start;
+            }
+
+            ++data_start;
+        }
+
+        *index_buf_free_start = '\0';
+        index_buf_used = static_cast<size_t>(index_buf_free_start - index_buf);
+
+        // parse version
+        char *p = strchr(index_buf, '\n');
+
+        while (p != nullptr) {
+            *p = '\0';
+
+            if (index_buf[0] != '\0') {
+                SemanticVersion version;
+
+                if (!version.from_string(index_buf)) {
+                    logger.printfln("Firmware index entry is malformed: %s", index_buf);
+                    state.get("check_state")->updateEnum(CheckState::VersionMalformed);
+                    https_client.abort_async();
+                    return;
+                }
+
+                // ignore all versions that are older than the current version
+                if (version.compare(build_version) <= 0) {
+                    logger.printfln("No firmware update available");
+                    state.get("check_state")->updateEnum(CheckState::Idle);
+                    state.get("update_version")->updateString("");
+                    https_client.abort_async();
+                    return;
+                }
+
+                logger.printfln("Firmware update available: %s", index_buf);
+                state.get("check_state")->updateEnum(CheckState::Idle);
+                state.get("update_version")->updateString(index_buf);
+                https_client.abort_async();
+                return;
+            }
+
+            size_t index_buf_consumed = static_cast<size_t>(p + 1 - index_buf);
+
+            memmove(index_buf, p + 1, index_buf_used - index_buf_consumed);
+
+            index_buf_used -= index_buf_consumed;
+            index_buf[index_buf_used] = '\0';
+
+            p = strchr(index_buf, '\n');
+        }
+    }
+}
+
+void FirmwareUpdate::install_firmware(const char *url)
+{
+    install_state.get("origin")->updateEnum(InstallOrigin::InstallFirmware);
+    install_state.get("progress")->updateUint(0);
+
+#if signature_sodium_public_key_length == 0
+    logger.printfln("Installing firmware from URL is not supported (running firmware is unsigned)");
+
+    install_state.get("state")->updateEnum(InstallState::NotSupported);
+#else
+    logger.printfln("Installing firmware from URL: %s", url);
+
+    if (check_firmware_in_progress || flash_firmware_in_progress || check_for_update_in_progress) {
+        logger.printfln("Firmware install or check for update in progress");
+        install_state.get("state")->updateEnum(InstallState::Busy);
+        return;
+    }
+
+    if (is_vehicle_blocking_update()) {
+        logger.printfln("Cannot install firmware while a vehicle is connected");
+        install_state.get("state")->updateEnum(InstallState::VehicleConnected);
+        return;
+    }
+
+    if (https_client.is_busy()) {
+        logger.printfln("HTTP client is busy");
+        install_state.get("state")->updateEnum(InstallState::Busy);
+        return;
+    }
+
+    install_firmware_in_progress = true;
+
+    install_state.get("state")->updateEnum(InstallState::InProgress);
+
+    https_client.download_async(url, cert_id, [this](AsyncHTTPSClientEvent *event) {
+        InstallState result;
+        size_t progress;
+
+        switch (event->type) {
+        case AsyncHTTPSClientEventType::Error:
+            switch (event->error) {
+            case AsyncHTTPSClientError::NoHTTPSURL:
+                logger.printfln("No HTTPS update URL");
+                install_state.get("state")->updateEnum(InstallState::InternalError);
+                break;
+
+            case AsyncHTTPSClientError::Busy:
+                logger.printfln("HTTP client is busy");
+                install_state.get("state")->updateEnum(InstallState::Busy);
+                break;
+
+            case AsyncHTTPSClientError::NoCert:
+                logger.printfln("Certificate with ID %d is not available", cert_id);
+                install_state.get("state")->updateEnum(InstallState::NoCert);
+                break;
+
+            case AsyncHTTPSClientError::Timeout:
+                logger.printfln("Update server %s did not respond", update_url.c_str());
+                install_state.get("state")->updateEnum(InstallState::NoResponse);
+                break;
+
+            case AsyncHTTPSClientError::ShortRead:
+                logger.printfln("Firmware download ended prematurely");
+                install_state.get("state")->updateEnum(InstallState::DownloadShortRead);
+                break;
+
+            case AsyncHTTPSClientError::HTTPError:
+                logger.printfln("HTTP error while downloading firmware");
+                install_state.get("state")->updateEnum(InstallState::DownloadError);
+                break;
+
+            case AsyncHTTPSClientError::HTTPClientInitFailed:
+                logger.printfln("Error while creating HTTP client");
+                install_state.get("state")->updateEnum(InstallState::HTTPClientInitFailed);
+                break;
+
+            case AsyncHTTPSClientError::HTTPClientSetCookieFailed:
+                logger.printfln("Error while setting request-cookie");
+                install_state.get("state")->updateEnum(InstallState::InternalError);
+                break;
+
+            case AsyncHTTPSClientError::HTTPClientSetHeaderFailed:
+                logger.printfln("Error while setting request-header");
+                install_state.get("state")->updateEnum(InstallState::InternalError);
+                break;
+
+            case AsyncHTTPSClientError::HTTPClientSetBodyFailed:
+                logger.printfln("Error while setting request-body");
+                install_state.get("state")->updateEnum(InstallState::InternalError);
+                break;
+
+            case AsyncHTTPSClientError::HTTPClientError:
+                logger.printfln("Error while downloading firmware: %s", esp_err_to_name(event->error_http_client));
+                install_state.get("state")->updateEnum(InstallState::DownloadError);
+                break;
+
+            case AsyncHTTPSClientError::HTTPStatusError:
+                logger.printfln("HTTP error while downloading firmware: %d", event->error_http_status);
+                install_state.get("state")->updateEnum(InstallState::DownloadError);
+                break;
+
+            default:
+                logger.printfln("Unknown HTTPS client error while downloading firmware: %d", static_cast<int>(event->error));
+                install_state.get("state")->updateEnum(InstallState::InternalError);
+                break;
+            }
+
+            Update.abort();
+            install_firmware_in_progress = false;
+            break;
+
+        case AsyncHTTPSClientEventType::Data:
+            if (event->data_complete_len < 0) {
+                logger.printfln("Firmware file size is unknown");
+                install_state.get("state")->updateEnum(InstallState::FirmwareSizeUnknown);
+                https_client.abort_async();
+                return;
+            }
+
+            if (event->data_complete_len <= APPLICATION_OFFSET) {
+                logger.printfln("Firmware file is too small: %zd", event->data_complete_len);
+                install_state.get("state")->updateEnum(InstallState::FirmwareTooSmall);
+                https_client.abort_async();
+                return;
+            }
+
+            result = handle_firmware_chunk(event->data_chunk_offset, const_cast<uint8_t *>(static_cast<const uint8_t *>(event->data_chunk)), event->data_chunk_len, static_cast<size_t>(event->data_complete_len), event->data_is_complete, nullptr);
+
+            if (result != InstallState::InProgress) {
+                https_client.abort_async();
+            }
+
+            install_state.get("state")->updateEnum(result);
+
+            if (result == InstallState::InProgress) {
+                progress = (event->data_chunk_offset + event->data_chunk_len) * 100 / static_cast<size_t>(event->data_complete_len);
+
+                install_state.get("progress")->updateUint(progress);
+
+#if MODULE_WS_AVAILABLE()
+                if (progress == 100) {
+                    // manually push state update to ensure web interface shows 100% progress
+                    ws.pushRawStateUpdate(state.to_string(), "firmware_update/install_state");
+                }
+#endif
+            }
+
+            break;
+
+        case AsyncHTTPSClientEventType::Aborted:
+            if (install_state.get("state")->asEnum<InstallState>() == InstallState::InProgress) {
+                logger.printfln("Firmware install aborted");
+                install_state.get("state")->updateEnum(InstallState::Aborted);
+                Update.abort();
+            }
+
+            install_firmware_in_progress = false;
+            break;
+
+        case AsyncHTTPSClientEventType::Finished:
+            logger.printfln("Firmware successfully installed");
+            install_state.get("state")->updateEnum(InstallState::Rebooting);
+            trigger_reboot("firmware update", 1_s);
+            install_firmware_in_progress = false;
+            break;
+
+        case AsyncHTTPSClientEventType::Redirect:
+            break;
+
+        default:
+            logger.printfln("Unknown HTTPS client event while downloading firmware: %d", static_cast<int>(event->type));
+            break;
+        }
+    });
+#endif
+}
+
+void FirmwareUpdate::read_app_partition_state()
+{
+    const esp_partition_t *app0_partition = nullptr;
+    bool app0_running = false;
+    uint32_t app0_state;
+    const char *app0_state_name = "<missing>";
+    char app0_version[SEMANTIC_VERSION_MAX_STRING_LENGTH] = "<missing>";
+
+    const esp_partition_t *app1_partition = nullptr;
+    bool app1_running = false;
+    uint32_t app1_state;
+    const char *app1_state_name = "<missing>";
+    char app1_version[SEMANTIC_VERSION_MAX_STRING_LENGTH] = "<missing>";
+
+    const esp_partition_t *running_partition = esp_ota_get_running_partition();
+
+    if (running_partition == nullptr) {
+        // If the running partition can't be found, the partition table is probably not readable/valid.
+        // The OTA functions don't handle this gracefully, so abort here.
+        logger.printfln("Could not get running partition");
+        return;
+    }
+    else {
+        state.get("running_partition")->updateString(running_partition->label);
+
+        if (strcmp(running_partition->label, "app0") == 0) {
+            app0_partition = running_partition;
+            app0_running = true;
+        }
+        else if (strcmp(running_partition->label, "app1") == 0) {
+            app1_partition = running_partition;
+            app1_running = true;
+        }
+        else {
+            logger.printfln("Unexpected running partition: %s", running_partition->label);
+        }
+    }
+
+    const esp_partition_t *update_partition = esp_ota_get_next_update_partition(nullptr);
+
+    if (update_partition == nullptr) {
+        logger.printfln("Could not get update partition");
+    }
+    else if (strcmp(update_partition->label, "app0") == 0) {
+        app0_partition = update_partition;
+    }
+    else if (strcmp(update_partition->label, "app1") == 0) {
+        app1_partition = update_partition;
+    }
+    else {
+        logger.printfln("Unexpected update partition: %s", update_partition->label);
+    }
+
+    esp_ota_select_entry_t ota_data;
+
+    if (!read_ota_data(0, &ota_data, false)) {
+        app0_state = ESP_OTA_IMG_ERROR;
+    }
+    else {
+        app0_state = ota_data.ota_state;
+    }
+
+    state.get("app0_state")->updateUint(app0_state);
+    app0_state_name = get_esp_ota_img_state_name(app0_state);
+
+    if (app0_partition != nullptr) {
+        read_custom_app_desc_version(app0_partition, app0_version, ARRAY_SIZE(app0_version));
+        state.get("app0_version")->updateString(app0_version);
+    }
+
+    if (!read_ota_data(1, &ota_data, false)) {
+        app1_state = ESP_OTA_IMG_ERROR;
+    }
+    else {
+        app1_state = ota_data.ota_state;
+    }
+
+    state.get("app1_state")->updateUint(app1_state);
+    app1_state_name = get_esp_ota_img_state_name(app1_state);
+
+    if (app1_partition != nullptr) {
+        read_custom_app_desc_version(app1_partition, app1_version, ARRAY_SIZE(app1_version));
+        state.get("app1_version")->updateString(app1_version);
+    }
+
+    const char *rolled_back_version = nullptr;
+
+    if (update_partition != nullptr) {
+        if (strcmp(update_partition->label, "app0") == 0 && app0_state == ESP_OTA_IMG_ABORTED) {
+            rolled_back_version = app0_version;
+        }
+        else if (strcmp(update_partition->label, "app1") == 0 && app1_state == ESP_OTA_IMG_ABORTED) {
+            rolled_back_version = app1_version;
+        }
+    }
+
+    logger.printfln("Partitions: app0 (%s%s, %s), app1 (%s%s, %s)",
+                    app0_state_name,
+                    app0_running ? ", running" : "",
+                    app0_version,
+                    app1_state_name,
+                    app1_running ? ", running" : "",
+                    app1_version);
+
+    if (rolled_back_version != nullptr) {
+        logger.printfln("Firmware %s rolled back to %s", rolled_back_version, build_version_full_str());
+        state.get("rolled_back_version")->updateString(rolled_back_version);
+    }
+
+    // if a power cycle happens while the running app partition is in pending-verify state then it gets
+    // marked as aborted, even if the firmware is actually stable. this can happen to both app partitions.
+    // in this case the bootloader will boot the aborted app partition anyway, as it doesn't have a better
+    // choice. but the system is now stuck on one of the app partitions. if the firmware in the running app
+    // partition is unstable and crashes the bootloader will not try the other app partition, even if that
+    // one might actually contain a stable firmware. changing from aborted/aborted app partition state to
+    // pending-verify/new results in the bootloader chosing the other partition if the running app partition
+    // crashes. this way the system can find the stable firmware, if there is one.
+    //
+    // We now also mark the update partition as invalid as soon as the first byte of an OTA update is written.
+    // (Technically cleared, because the OTA mechanism clears the first bytes (i.e. the checksum) when starting
+    // the update but writes them in the end).
+    // If the update is aborted, the update partition stays invalid. If the running partition is still in
+    // pending-verify and then crashes, it changes to invalid. The bootloader will then either attempt to boot
+    // the invalid partition and fail (because the checksum is wrong) and the boot the aborted partition, or
+    // will boot the aborted partition again. In this case the code below changes the (now again) running
+    // partition from aborted to pending-verify but will leave the invalid partition as is.
+    // Note that we don't explicitly check for aborted/invalid but only whether the running partition is aborted.
+    // This is sufficient because the bootloader will never boot an aborted partition if there is another one
+    // that is new, pending-verify or valid.
+    if ((app0_running && app0_state == ESP_OTA_IMG_ABORTED) || (app1_running && app1_state == ESP_OTA_IMG_ABORTED)) {
+        logger.printfln("Running app partition in aborted state, trying to recover");
+
+        // FIXME: add state flag to indicate this situation in a debug report and add a frontend warning for it
+
+        if (running_partition != nullptr) {
+            change_partition_ota_state_from_to(running_partition, ESP_OTA_IMG_ABORTED, ESP_OTA_IMG_PENDING_VERIFY, "recovering running app partition state", false);
+        }
+
+        if (update_partition != nullptr) {
+            change_partition_ota_state_from_to(update_partition, ESP_OTA_IMG_ABORTED, ESP_OTA_IMG_NEW, "recovering other app partition state", false);
+        }
+    }
+
+    // it has been observed in the wild that the bootloader left the running app partition in new state.
+    // this is not allowed. the bootloader should change the running app partition from new state to
+    // pending-verify state to advance the rollback logic. due to the app partition staying in new state
+    // rollback never happens. try to recover from this situation by changing the running app partition
+    // from new state to pending-verify state hoping that the bootloader would do it's job for the
+    // pending-verify state to aborted state transition.
+    if ((app0_running && app0_state == ESP_OTA_IMG_NEW) || (app1_running && app1_state == ESP_OTA_IMG_NEW)) {
+        logger.printfln("Running app partition in new state, trying to recover");
+
+        // FIXME: add state flag to indicate this situation in a debug report and add a frontend warning for it
+
+        if (running_partition != nullptr) {
+            change_partition_ota_state_from_to(running_partition, ESP_OTA_IMG_NEW, ESP_OTA_IMG_PENDING_VERIFY, "recovering running app partition state", false);
+        }
+    }
+
+    // in case the boot partition is not bootable due to its state (invalid or aborted) or its content (missing
+    // magic number or checksum error) the bootloader might choose the other app partition even if its state would
+    // normally not allowed it to be booted. if the running partition is marked as invalid then mark it as
+    // pending-verify to (re-)start the verification process.
+    if ((app0_running && app0_state == ESP_OTA_IMG_INVALID) || (app1_running && app1_state == ESP_OTA_IMG_INVALID)) {
+        logger.printfln("Running app partition in invalid state, trying to recover");
+
+        // FIXME: add state flag to indicate this situation in a debug report and add a frontend warning for it
+
+        if (running_partition != nullptr) {
+            change_partition_ota_state_from_to(running_partition, ESP_OTA_IMG_INVALID, ESP_OTA_IMG_PENDING_VERIFY, "recovering running app partition state", false);
+        }
+    }
+}
+
+// ensure the state is marked as updated to make the API push
+// the latest values even if they didn't change from the view
+// point of the API because the intermediate changes were only
+// pushed by report_flash_firmware_progress_http_thread
+void FirmwareUpdate::update_install_state()
+{
+    auto origin = install_state.get("origin");
+    auto state_ = install_state.get("state");
+    auto progress = install_state.get("progress");
+
+    origin->updateEnum(InstallOrigin::FlashFirmware);
+    origin->set_updated(0xFF);
+
+    state_->updateEnum(flash_firmware_state);
+    state_->set_updated(0xFF);
+
+    progress->updateEnum(flash_firmware_progress);
+    progress->set_updated(0xFF);
+}
+
+#ifdef CONFIG_SECURE_BOOT
+
+static_assert(alignof(ets_secure_boot_sig_block_t) <= 4);
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wcast-align"
+
+bool FirmwareUpdate::sbv2_sign_app(uint8_t *scratch_buffer, size_t scratch_buffer_len)
+{
+    const constexpr size_t SIG_BLOCK_LEN = sizeof(ets_secure_boot_sig_block_t);
+    uint8_t *sig_block;
+    std::unique_ptr<uint8_t[]> local_buffer;
+
+    if (scratch_buffer_len >= SIG_BLOCK_LEN) {
+        sig_block = scratch_buffer;
+    } else {
+        local_buffer = heap_alloc_array<uint8_t>(SIG_BLOCK_LEN);
+        sig_block = local_buffer.get();
+    }
+
+    if (!ESP32CommonSecureBoot::sb_sign_image_or_skip(reinterpret_cast<ets_secure_boot_sig_block_t *>(sig_block), firmware_info.block.padded_application_sha256sum)) {
+        return false;
+    }
+
+    const size_t written = Update.write(sig_block, SIG_BLOCK_LEN);
+
+    if (written != SIG_BLOCK_LEN) {
+        logger.printfln("Failed to append SBv2 signature: %zu/%zu", written, SIG_BLOCK_LEN);
+        return false;
+    }
+
+    return true;
+}
+
+#pragma GCC diagnostic pop
+#endif

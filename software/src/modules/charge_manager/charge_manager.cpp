@@ -1,0 +1,1733 @@
+/* esp32-firmware
+ * Copyright (C) 2020-2021 Erik Fleckstein <erik@tinkerforge.com>
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, write to the
+ * Free Software Foundation, Inc., 59 Temple Place - Suite 330,
+ * Boston, MA 02111-1307, USA.
+ */
+
+#include "charge_manager.h"
+
+#include <algorithm>
+#include <esp_http_client.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+#include <time.h>
+#include <LittleFS.h>
+
+#include "TFTools/Micros.h"
+#include "bindings/base58.h"
+
+#include "event_log_prefix.h"
+#include "generated/module_dependencies.h"
+#include "current_allocator.h"
+#include "build.h"
+#include "modules/cm_networking/generated/cm_auth_feedback.enum.h"
+#include "options.h"
+#include "tools.h"
+#include "tools/malloc.h"
+#include "tools/hexdump.h"
+#include "generated/cm_phase_rotation.enum.h"
+#include "modules/cm_networking/generated/client_error.enum.h"
+#include "modules/cm_networking/cm_networking_defs.h"
+#include <TFJson.h>
+
+#include "modules/users/users.h" // For USERS_AUTH_TYPE_* constants
+
+static constexpr micros_t WATCHDOG_TIMEOUT = 30_s;
+
+// Forward declarations of static functions for charger names file
+static int find_charger_entry(File &f, uint32_t uid);
+static int find_empty_slot(File &f);
+static void create_charger_names_file();
+
+// If this is an energy manager, we have exactly one charger and the margin is still the default,
+// double it to react faster if more current is available.
+#define REQUESTED_CURRENT_MARGIN_DEFAULT 3000
+
+#if MODULE_AUTOMATION_AVAILABLE()
+bool ChargeManager::has_triggered(const Config *conf, void *data)
+{
+    switch (conf->getTag<AutomationTriggerID>()) {
+        case AutomationTriggerID::ChargeManagerWd:
+            return true;
+
+        default:
+            return false;
+    }
+}
+#endif
+
+static PhaseRotation convert_phase_rotation(CMPhaseRotation pr) {
+    switch (pr) {
+        case CMPhaseRotation::Unknown: return PhaseRotation::Unknown;
+        case CMPhaseRotation::L123:    return PhaseRotation::L123;
+        case CMPhaseRotation::L132:    return PhaseRotation::L132;
+        case CMPhaseRotation::L231:    return PhaseRotation::L231;
+        case CMPhaseRotation::L213:    return PhaseRotation::L213;
+        case CMPhaseRotation::L321:    return PhaseRotation::L321;
+        case CMPhaseRotation::L312:    return PhaseRotation::L312;
+        default: return PhaseRotation::Unknown;
+    }
+}
+
+void ChargeManager::pre_setup()
+{
+    this->trace_buffer_index = logger.alloc_trace_buffer("charge_manager", 2 * 1024 * 1024);
+
+    config_chargers_prototype = Config::Object({
+        {"host", Config::Str("", 0, 64)},
+        {"name", Config::Str("", 0, CHARGER_NAME_LENGTH)},
+        {"rot", Config::Enum(CMPhaseRotation::Unknown)},
+        {"uid", Config::Uint32(0)},
+    });
+
+    config = ConfigRoot{Config::Object({
+        {"enable_charge_manager", Config::Bool(false)},
+        {"enable_central_management", Config::Bool(false)},
+        {"enable_watchdog", Config::Bool(false)},
+        {"default_available_current", Config::Uint32(0)},
+        {"maximum_available_current", Config::Uint(0, 0, 32000 * MAX_CONTROLLED_CHARGERS)},
+        {"minimum_current_auto", Config::Bool(true)},
+        {"minimum_current", Config::Uint(6000, 6000, 32000)},
+        {"minimum_current_1p", Config::Uint(6000, 6000, 32000)},
+        {"minimum_current_vehicle_type", Config::Uint32(0)},
+        {"verbose", Config::Bool(false)},
+        // Line currents are used to calculate the "requested current"
+        // if a charger is in state C for at least
+        // "requested_current_threshold" s.
+        // Otherwise the "requested current" is the "supported current"
+        // to allow the car to ramp up fast.
+        {"requested_current_threshold", Config::Uint16(60)},
+        // Added to requested current before distributing current.
+        // This margin has to be large enough to make sure
+        // every vehicle can always request more current.
+        // See https://github.com/Tinkerforge/warp-charger/blob/master/tools/current_ramp/allowed_vs_effective_3.gp
+        {"requested_current_margin", Config::Uint16(REQUESTED_CURRENT_MARGIN_DEFAULT)},
+        {"chargers", Config::Array({},
+            &config_chargers_prototype,
+            0, MAX_CONTROLLED_CHARGERS, Config::type_id<Config::ConfObject>()
+        )}
+    }), [](Config &conf, ConfigSource source) -> String {
+        if (conf.get("enable_charge_manager")->asBool() && conf.get("chargers")->count() == 0)
+            return "at least one charger is required";
+
+        uint32_t default_available_current = conf.get("default_available_current")->asUint();
+        uint32_t maximum_available_current = conf.get("maximum_available_current")->asUint();
+
+        if (default_available_current > maximum_available_current)
+            return "default_available_current can not be greater than maximum_available_current";
+
+        if (conf.get("minimum_current_auto")->asBool()) {
+            auto minimum_current_vehicle_type = conf.get("minimum_current_vehicle_type")->asUint();
+            uint32_t min_1p;
+            uint32_t min_3p;
+
+            if (minimum_current_vehicle_type > 0) {
+                min_1p = 6000;
+                min_3p = 9200;
+            } else {
+                min_1p = 6000;
+                min_3p = 6000;
+            }
+
+            conf.get("minimum_current_1p")->updateUint(min_1p);
+            conf.get("minimum_current")->updateUint(min_3p);
+        }
+
+        auto chargers = conf.get("chargers");
+
+        for (size_t i = 0; i < chargers->count(); i++)
+            for (size_t a = i + 1; a < chargers->count(); a++)
+                if (chargers->get(i)->get("host")->asString() == chargers->get(a)->get("host")->asString())
+                    return "there must not be two chargers with the same hostname or IP address";
+
+        return "";
+    }};
+
+    low_level_config = Config::Object({
+        // 3 * 60 + 30 seconds to make sure we don't switch anything
+        // while the EVSE is waking up a vehicle via IEC state F.
+        {"global_hysteresis", Config::Uint(3 * 60 + 30, 0, 60 * 60)},
+        {"wakeup_time", Config::Uint(3 * 60 + 30, 0, 60 * 60)},
+        {"plug_in_time", Config::Uint(3 * 60 + 30, 0, 60 * 60)},
+        {"enable_current_factor_pct", Config::Uint(150, 100, 300)},
+        {"allocation_interval", Config::Uint(10, 1, 60 * 60)},
+        {"rotation_interval", Config::Uint(15 * 60, 0, 24 * 60 * 60)},
+    });
+
+    state_chargers_prototype = Config::Object({
+        {"s",  Config::Enum(CASState::NoVehicle)},  // "state"
+        {"e",  Config::Enum(CASError::OK)}, // "error"
+        {"ac", Config::Uint16(0)},      // "allocated_current" - last current limit send to the charger
+        {"ap", Config::Uint(0, 0, 3)},  // "allocated_phases" - last phase limit send to the charger
+        {"sc", Config::Uint16(0)},      // "supported_current" - maximum current supported by the charger
+        {"sp", Config::Uint(0, 0, 3)},  // "supported_phases" - maximum phases supported by the charger. Is 1 or 3 for a not phase-switchable charger. Bit 2 is set if it can be switched.
+        {"lu", Config::Uptime()},       // "last_update" - The last time we received a CM packet from this charger
+        {"n",  Config::Str("", 0, 32)}, // "name" - Configured display name. Has to be duplicated in case the config was written but we didn't reboot.
+        {"uid",  Config::Uint32(0)},      // "uid" - The ESP's UID
+        {"d0", ZeroPhaseDecision::getUnion()},
+        {"d1", OnePhaseDecision::getUnion()},
+        {"d3", ThreePhaseDecision::getUnion()},
+        {"dc", CurrentDecision::getUnion()},
+        /*
+         * u == -2 unknown NFC-Tag
+         * u == -1 unauthorized
+         * u == 0 authorization disabled
+         * u >= 1 user authorized
+         */
+        {"u", Config::Int16(0)},
+    });
+
+    // This has to fit in the 10k WebSocket send buffer with 64 chargers with long names.
+    // -> Be stingy with the key names. If we need more space we could switch to an array for all numbers.
+    // This API only exists to communicate with the web interface and is not documented.
+    state = Config::Object({
+        {"state", Config::Uint8(0)}, // 0 - not configured, 1 - active, 2 - shutdown
+        {"l_raw", Config::Tuple(4, Config::Int32(0))},
+        {"l_min", Config::Tuple(4, Config::Int32(0))},
+        {"l_spread", Config::Tuple(4, Config::Int32(0))},
+        {"l_max_pv", Config::Int32(0)},
+        {"alloc", Config::Tuple(4, Config::Int32(0))},
+        {"auth_changed", Config::Bool(false)},
+        {"chargers", Config::Array(
+            {},
+            &state_chargers_prototype,
+            0, MAX_CONTROLLED_CHARGERS, Config::type_id<Config::ConfObject>()
+        )}
+    });
+
+    low_level_state_chargers_prototype = Config::Object({
+        {"b",  Config::Uint(0, 0, 0x3F)},  /* "bits"
+                                                0 cp_disc_supported
+                                                1 cp_disc_state
+                                                2 phase_switch_supported
+                                                3 phases (2)*/
+        {"rc", Config::Uint16(0)},         // "requested_current" - either the supported current or (after requested_current_threshold is elapsed in state C) the max phase current + requested_current_margin
+        {"ae", Config::Uint(0, 0, 99999)}, // "allocated_energy" in Wh, values > 99999 Wh are truncated to 99999.
+        {"ls", Config::Uptime()},      // "last_switch_on"
+        {"lp", Config::Uptime()},      // "just_plugged_in_timestamp"
+        {"lw", Config::Uptime()},      // "last_wakeup"
+        {"ip", Config::Uptime()},      // "use_supported_current"
+    });
+
+    low_level_state = Config::Object({
+        {"last_hyst_reset", Config::Uptime()},
+        {"wnd_min", Config::Tuple(4, Config::Int32(0))},
+        {"wnd_max", Config::Tuple(4, Config::Int32(0))},
+        {"chargers", Config::Array(
+            {},
+            &low_level_state_chargers_prototype,
+            0, MAX_CONTROLLED_CHARGERS, Config::type_id<Config::ConfObject>()
+        )}
+    });
+
+    available_current = ConfigRoot{Config::Object({
+        {"current", Config::Uint32(0)},
+    }), [this](const Config &conf, ConfigSource source) -> String {
+        if (source == ConfigSource::API && !this->static_cm) {
+            logger.printfln("Cannot set available_current via the API if the Power Manager is enabled.");
+            return "Cannot set available_current if the Power Manager is enabled.";
+        }
+
+        uint32_t max_avail_current = this->get_maximum_available_current();
+
+        if (conf.get("current")->asUint() > max_avail_current)
+            return "Current too large: maximum available current is configured to " + String(max_avail_current);
+        return "";
+    }};
+    available_current_update = available_current;
+
+    control_pilot_disconnect = Config::Object({
+        {"disconnect", Config::Bool(false)},
+    });
+
+    charge_mode = Config::Array({}, new Config{Config::Enum(ConfigChargeMode::Default)}, 0, MAX_CONTROLLED_CHARGERS);
+
+    pm_charge_mode = Config::Object({
+        {"mode", Config::Enum(ConfigChargeMode::Fast)},
+    });
+    pm_charge_mode_update = pm_charge_mode;
+
+    supported_charge_modes = Config::Tuple({Config::Enum(ConfigChargeMode::Off), Config::Enum(ConfigChargeMode::Fast)});
+
+    authorize_charger = Config::Object({
+        {"charger_idx", Config::Uint8(0)},
+        {"user_id", Config::Int16(-1)},
+    });
+
+#ifdef DEBUG_FS_ENABLE
+    debug_limits_update = Config::Object({
+        {"raw", Config::Tuple(4, Config::Int32(0))},
+        {"min", Config::Tuple(4, Config::Int32(0))},
+        {"spread", Config::Tuple(4, Config::Int32(0))},
+        {"max_pv", Config::Int32(0)},
+    });
+#endif
+
+#if MODULE_AUTOMATION_AVAILABLE()
+    automation.register_trigger(
+        AutomationTriggerID::ChargeManagerWd,
+        *Config::Null(),
+        nullptr, false
+    );
+
+    automation.register_action(
+        AutomationActionID::SetManagerCurrent,
+        Config::Object({
+            {"current", Config::Uint32(0)}
+        }),
+        [this](const Config *config) {
+            String err = api.callCommand("charge_manager/available_current_update", Config::ConfUpdateObject{{
+                {"current", config->get("current")->asUint()},
+            }});
+            if (!err.isEmpty()) {
+                logger.printfln("Automation couldn't set manager current: %s", err.c_str());
+            }
+        },
+        [this](const Config *config) -> String {
+            uint32_t max_avail_current = this->get_maximum_available_current();
+
+            if (config->get("current")->asUint() > max_avail_current)
+                return "Current too large: maximum available current is configured to " + String(max_avail_current);
+            return "";
+        },
+        false);
+
+    automation.register_action(
+        AutomationActionID::PMChargeModeSwitch,
+        Config::Object({
+            {"mode", Config::Enum(ConfigChargeMode::Fast)}
+        }),
+        [this](const Config *cfg) {
+            const String err = api.callCommand("power_manager/charge_mode_update", Config::ConfUpdateObject{{
+                {"mode", cfg->get("mode")->asEnumUnderlyingType<ConfigChargeMode>()}
+            }});
+            if (!err.isEmpty()) {
+                logger.printfln("Automation couldn't switch charge mode: %s", err.c_str());
+            }
+        },
+        nullptr,
+        false);
+#endif
+}
+
+static bool is_packet_stale(
+    uint8_t client_id,
+    cm_state_v1 *v1,
+    ChargerState *charger_state,
+    ChargerAllocationState *charger_allocation_state,
+    const char * const *hosts,
+    const std::function<const char *(uint8_t)> &get_charger_name
+    )
+{
+    auto now = now_us();
+    // TODO: bounds check
+    auto &target = charger_state[client_id];
+    auto &target_alloc = charger_allocation_state[client_id];
+
+    // Don't update if the uptimes are the same.
+    // This means, that the EVSE hangs or the communication
+    // is not working. As last_update will now hang too,
+    // the management will stop all charging after some time.
+    if (target.uptime == v1->evse_uptime) {
+        logger.printfln("Received stale charger state from %s (%s). Reported EVSE uptime (%lu) is the same as in the last state. Is the EVSE still reachable?",
+            get_charger_name(client_id), hosts[client_id],
+            v1->evse_uptime);
+        if ((target.last_update + 10_s) < now) {
+            target_alloc.state = CASState::Error;
+            target_alloc.error = CASError::EVSEUnreachable;
+        }
+
+        return true;
+    }
+    return false;
+}
+
+static uint16_t get_user_current(uint8_t user_id) {
+#if MODULE_USERS_AVAILABLE()
+        return users.get_user_current(user_id);
+#else
+        return 32000;
+#endif
+}
+
+static constexpr int16_t NOT_AUTHORIZED = -1;
+static constexpr int16_t UNKNOWN_NFC_TAG = -2;
+static constexpr int16_t AUTHD_ANONYMOUSLY = 0;
+
+static void update_charge_tracking(
+    uint8_t client_id,
+    cm_state_v1 *v1,
+    const CurrentAllocatorConfig *cfg,
+    ChargerState *charger_state)
+{
+#if MODULE_CHARGE_TRACKER_AVAILABLE()
+    if (!cfg->enable_central_management)
+        return;
+
+    auto now = now_us();
+    // TODO: bounds check
+    auto &target = charger_state[client_id];
+
+    // Populate first and last tracked charge when we first see this charger
+    if (target.last_update == 0_us) {
+        char uid_str[15];
+        bool is_local_charger = false;
+        if (target.uid == esp32_common.get_uid_num()) {
+            is_local_charger = true;
+        } else {
+            tf_base58_encode(target.uid, uid_str);
+        }
+
+        ChargeStart cs;
+
+        if (charge_tracker.currentlyCharging(is_local_charger ? nullptr : uid_str, &cs)) {
+            if (v1->charger_state != 0 && (target.authenticated_user_id < 0 || target.authenticated_user_id == cs.user_id)) {
+                // Car is still connected and we trust our charge tracking. Authenticate for tracked user.
+                target.authenticated_user_id = cs.user_id;
+                target.user_current = get_user_current(target.authenticated_user_id);
+            } else {
+                // Car not connected or we've already authenticated another user than was tracked the last time.
+                // Track stop (and potentially track start below for other user)
+                charge_tracker.endCharge(
+                    0, // We don't know when the car was disconnected -> unknown duration
+                    v1->energy_abs,
+                    is_local_charger ? nullptr : uid_str);
+            }
+        }
+    }
+
+    // If tracking, a vehicle is plugged in and we are authenticated, track a start if not done already.
+    if (v1->charger_state != 0 && target.authenticated_user_id != NOT_AUTHORIZED && target.authenticated_user_id != UNKNOWN_NFC_TAG) {
+        char uid_str[15];
+        bool is_local_charger = false;
+        if (target.uid == esp32_common.get_uid_num()) {
+            is_local_charger = true;
+        } else {
+            tf_base58_encode(target.uid, uid_str);
+        }
+
+        // TODO: optimize this!
+        if (!charge_tracker.currentlyCharging(is_local_charger ? nullptr : uid_str)) {
+            uint32_t charge_start = 0;
+            timeval _timeval;
+            if (rtc.clock_synced(&_timeval))
+                charge_start = rtc.timestamp_minutes();
+
+            charge_tracker.startCharge(charge_start,
+                                       v1->energy_abs,
+                                       target.authenticated_user_id,
+                                       v1->evse_uptime,
+                                       CMAuthType::None,
+                                       Config::ConfVariant(),
+                                       is_local_charger ? nullptr : uid_str);
+        }
+    }
+
+    // If tracking and no vehicle is plugged in track a stop if not done already.
+    if (v1->charger_state == 0) {
+        char uid_str[15];
+        bool is_local_charger = false;
+        if (target.uid == esp32_common.get_uid_num()) {
+            is_local_charger = true;
+        } else {
+            tf_base58_encode(target.uid, uid_str);
+        }
+
+        if (charge_tracker.currentlyCharging(is_local_charger ? nullptr : uid_str)) {
+            charge_tracker.endCharge(
+                (now - target.last_plug_in).to<seconds_t>().as<uint32_t>(),
+                v1->energy_abs,
+                is_local_charger ? nullptr : uid_str);
+        }
+    }
+#endif
+}
+
+static bool on_auth_success(uint8_t new_user_id,
+    uint8_t client_id,
+    ChargerState *charger_state)
+{
+    auto &target = charger_state[client_id];
+    if (target.authenticated_user_id == NOT_AUTHORIZED || target.authenticated_user_id == UNKNOWN_NFC_TAG) {
+        // Authorize
+        target.authenticated_user_id = new_user_id;
+        target.user_current = get_user_current(target.authenticated_user_id);
+        return true;
+    }
+
+    if (target.authenticated_user_id != new_user_id) {
+        // Only allow deauthorize if this is the same user as the one that is authorized.
+        return false;
+    }
+
+    // Deauthorize
+    target.authenticated_user_id = NOT_AUTHORIZED;
+    target.user_current = get_user_current(target.authenticated_user_id);
+    return true;
+}
+
+static bool update_authentication(
+    uint8_t client_id,
+    cm_state_v1 *v1,
+    cm_state_v5 *v5,
+    const CurrentAllocatorConfig *cfg,
+    ChargerState *charger_state)
+{
+    // TODO: bounds check
+    auto &target = charger_state[client_id];
+
+    bool auth_info_changed = false;
+    if (v5 == nullptr) {
+        memset(target.auth_info, 0, sizeof(target.auth_info));
+    } else {
+        // The newest auth info is at index 0. So it is enough to compare the first entry to see if anything changed.
+        auth_info_changed = target.auth_info[0] != v5->auth_info[0];
+        if (auth_info_changed) {
+
+#if MODULE_NFC_AVAILABLE() && MODULE_AUTOMATION_AVAILABLE()
+            // Fire the NFC automation trigger for tags that were just seen by a
+            // managed charger. Skip this device's own state packets. Locally seen
+            // tags already fire the trigger via NFC::tag_seen.
+            const cm_auth_info &newest = v5->auth_info[0];
+            if ((v1->esp32_uid != esp32_common.get_uid_num()) &&
+                ((newest.auth_method == CMAuthType::NFC) || (newest.auth_method == CMAuthType::InjectedNFC)) &&
+                (newest.last_seen_s != 0) &&
+                (newest.last_seen_s < 2)) {
+                nfc.remote_tag_seen(newest.nfc.tag_type, newest.nfc.tag_id, newest.nfc.tag_id_len, static_cast<int8_t>(client_id));
+            }
+#endif
+        }
+        memcpy(target.auth_info, v5->auth_info, sizeof(target.auth_info));
+    }
+
+    micros_t deadtime = 30_s;
+#if MODULE_NFC_AVAILABLE()
+    deadtime = nfc.get_deadtime_post_start();
+#endif
+
+    // If central auth is disabled, always authorize
+    if (!cfg->enable_central_management) {
+        target.authenticated_user_id = AUTHD_ANONYMOUSLY;
+        target.user_current = get_user_current(target.authenticated_user_id);
+        return auth_info_changed;
+    }
+
+    // De-authorize on plug out
+    if (v1->charger_state == 0 && target.charger_state != 0) {
+        target.authenticated_user_id = NOT_AUTHORIZED;
+        target.user_current = 0;
+
+        // Allow re-auth immediately
+        target.last_auth_success_timestamp = -deadtime;
+    }
+
+    // De-authorize when the last auth expires and there is still no car connected
+    if (target.last_auth_success_timestamp != 0_us && deadline_elapsed(target.last_auth_success_timestamp + 30_s) && v1->charger_state == 0) {
+        target.authenticated_user_id = NOT_AUTHORIZED;
+        target.user_current = 0;
+    }
+
+    // If we are still in the auth deadtime, ignore new auths.
+    if (target.last_auth_success_timestamp != 0_us && !deadline_elapsed(target.last_auth_success_timestamp + deadtime)) {
+        return auth_info_changed;
+    }
+
+    if (v5 == nullptr)
+        return auth_info_changed;
+
+    micros_t latest_auth_fail = 0_us;
+    for (int i = ARRAY_SIZE(v5->auth_info) - 1; i >= 0; --i) {
+        const cm_auth_info &info = v5->auth_info[i];
+        if (info.last_seen_s != 0 && info.last_seen_s < 2) {
+            int16_t tag_auth = NOT_AUTHORIZED;
+#if MODULE_CHARGE_AUTHORIZATION_AVAILABLE()
+            tag_auth = charge_authorization.find_user(info);
+            if (tag_auth == -1)
+                tag_auth = UNKNOWN_NFC_TAG;
+#endif
+            if (tag_auth >= AUTHD_ANONYMOUSLY && on_auth_success((uint8_t) tag_auth, client_id, charger_state)) {
+                target.last_auth_success_timestamp = now_us() - seconds_t{info.last_seen_s};
+                break; // A successful auth wins immediately.
+            } else if (tag_auth == UNKNOWN_NFC_TAG) {
+                latest_auth_fail = now_us() - seconds_t{info.last_seen_s};
+            }
+        }
+    }
+
+    if (latest_auth_fail != 0_us) {
+        target.last_auth_fail_timestamp = latest_auth_fail;
+    }
+
+    return auth_info_changed;
+}
+
+static void update_uid(uint8_t client_id, cm_state_v1 *v1, Config *config, ChargerState *charger_state) {
+    if (client_id >= config->get("chargers")->count())
+        return;
+
+    // Populate and save UID if not yet stored for this charger
+    if (config->get("chargers")->get(client_id)->get("uid")->asUint() == 0 && v1->esp32_uid != 0) {
+        config->get("chargers")->get(client_id)->get("uid")->updateUint(v1->esp32_uid);
+        api.writeConfig("charge_manager/config", config);
+
+        const String &name = config->get("chargers")->get(client_id)->get("name")->asString();
+        charge_manager.rename_charger(v1->esp32_uid, name);
+    }
+    auto &target = charger_state[client_id];
+    target.uid = v1->esp32_uid;
+}
+
+static void update_charge_mode(uint8_t client_id, cm_state_v1 *v1, cm_state_v4 *v4, ChargerState *charger_state) {
+    // If requested_charge_mode is default, no charge mode change is requested.
+    if (v4 != nullptr && v4->requested_charge_mode != (uint8_t)ConfigChargeMode::Default)
+        charger_state[client_id].charge_mode = charge_manager.config_cm_to_cm((ConfigChargeMode)v4->requested_charge_mode);
+
+    // If the car is unplugged, change back to the default charge mode once.
+    if (v1->charger_state == 0 && charger_state[client_id].charger_state != 0) {
+        charger_state[client_id].charge_mode = charge_manager.config_cm_to_cm(ConfigChargeMode::Default);
+    }
+}
+
+bool ChargeManager::send_client_packet(uint8_t i) {
+    auto &charger_alloc = this->charger_allocation_state[i];
+
+    auto ignore_allocation = false;
+    auto current = charger_alloc.allocated_current;
+    auto cp_disconnect = charger_alloc.cp_disconnect;
+    auto phases = charger_alloc.allocated_phases;
+    auto charge_mode = this->cm_to_config_cm(this->charger_state[i].charge_mode);
+
+    CMAuthFeedback auth_feedback = CMAuthFeedback::None;
+    if (this->ca_config->enable_central_management) {
+        auto &charger = this->charger_state[i];
+
+        if (!deadline_elapsed(charger.last_auth_success_timestamp + 2_s)) {
+            auth_feedback = CMAuthFeedback::Ack;
+        } else if (!deadline_elapsed(charger.last_auth_fail_timestamp + 2_s)) {
+            auth_feedback = CMAuthFeedback::Nack;
+        } else if (charger.charger_state == 1 && charger.authenticated_user_id == NOT_AUTHORIZED) {
+            auth_feedback = CMAuthFeedback::Nag;
+        }
+    }
+
+    // If we've never seen a packet from this charger, send "ignore allocation".
+    // This means we (the charge manager) have rebooted and either our uptime is < 30 seconds or the charger has stopped charging
+    // (managed chargers set the managed slot to 0 if they don't receive a packet for 30 seconds)
+    // We assume the the last allocation (before the reboot) is fine for up to 30 seconds.
+    if (!all_chargers_seen || this->charger_state[i].last_update == 0_us) {
+        ignore_allocation = true; // This requires managed chargers to support cm_command_v3!
+        charge_mode = ConfigChargeMode::Default; // This will instruct the managed charger to send its charge mode back as if it wants to request a charge mode change
+
+        // Set sane defaults for managed chargers with older firmwares
+        current = std::numeric_limits<decltype(current)>::max(); // Directly passed through to the EVSE bricklet, which ignores values > 32000
+        cp_disconnect = false; // Way more likely to be correct than that the manager restarted while a phase switch was in progress
+        phases = 0; // 0 phases are ignored except with WARP* firmware == 2.6.0. 2.6.1 fixed this two weeks later
+    }
+
+    return cm_networking.send_manager_update(i,
+                                             ignore_allocation,
+                                             current,
+                                             cp_disconnect,
+                                             phases,
+                                             charge_mode,
+                                             this->supported_charge_mode_bitmask,
+                                             auth_feedback,
+                                             this->ca_config->enable_central_management,
+                                             this->ca_config->enable_central_management);
+}
+
+void ChargeManager::start_manager_task()
+{
+    auto get_charger_name_fn = [this](uint8_t i){ return this->get_charger_name(i);};
+
+    cm_networking.register_manager(this->hosts.get(), charger_count, [this, get_charger_name_fn](uint8_t client_id, cm_state_v1 *v1, cm_state_v2 *v2, cm_state_v3 *v3, cm_state_v4 *v4, cm_state_v5 *v5) mutable {
+            if (is_packet_stale(
+                    client_id,
+                    v1,
+                    this->charger_state,
+                    this->charger_allocation_state,
+                    this->hosts.get(),
+                    get_charger_name_fn))
+                return;
+
+            update_uid(client_id, v1, &this->config, this->charger_state);
+
+            update_charge_mode(client_id, v1, v4, this->charger_state);
+
+            this->auth_info_changed |= update_authentication(client_id, v1, v5, this->ca_config, this->charger_state);
+            this->auth_info_chargers_seen |= uint64_t{1} << client_id;
+
+            // this has the problem that in case one charger is not reachable, the auth_changed flag will never be reset.
+            // Maybe we should fix this but ignore for now
+            static_assert(MAX_CONTROLLED_CHARGERS <= 64, "auth info charger tracking mask is too small");
+            const uint64_t all_chargers_mask = this->charger_count == 64
+                ? std::numeric_limits<uint64_t>::max()
+                : (uint64_t{1} << this->charger_count) - 1;
+            if (this->auth_info_chargers_seen == all_chargers_mask) {
+                this->state.get("auth_changed")->updateBool(this->auth_info_changed);
+                this->auth_info_changed = false;
+                this->auth_info_chargers_seen = 0;
+            }
+
+            update_charge_tracking(client_id, v1, this->ca_config, this->charger_state);
+
+            update_from_client_packet(
+                    client_id,
+                    v1,
+                    v2,
+                    v3,
+                    this->ca_config,
+                    this->charger_state,
+                    this->charger_allocation_state,
+                    this->hosts.get(),
+                    get_charger_name_fn
+                    );
+
+            update_charger_state_config(client_id);
+
+            if (CM_FEATURE_FLAGS_URGENT_IS_SET(v1->feature_flags) && !this->charger_state[client_id].last_send_was_urgent) {
+                this->charger_state[client_id].last_send_was_urgent = true;
+                this->override_next_client_send = client_id;
+                // This task will run directly after the one that is rescheduled in trigger_allocator_run.
+                // Multiple rescheduleNow calls are executed backwards.
+                task_scheduler.rescheduleNow(this->send_client_task_id);
+            }
+
+            if (CM_FEATURE_FLAGS_REQUEST_REALLOCATION_IS_SET(v1->feature_flags)) {
+                trigger_allocator_run(false);
+            }
+    }, [this](uint8_t client_id, ClientError error){
+        static_assert(std::is_same_v<std::underlying_type_t<ClientError>, std::underlying_type_t<CASError>>);
+        static_assert(ClientError::_min == ClientError::OK);
+        static_assert(ClientError::_max == ClientError::NotManaged);
+        static_assert(to_underlying(ClientError::_max) - to_underlying(ClientError::_min) == 3);
+        static_assert(to_underlying(ClientError::OK) == to_underlying(CASError::OK));
+        static_assert(to_underlying(ClientError::InvalidHeader) == to_underlying(CASError::InvalidHeader));
+        static_assert(to_underlying(ClientError::NotManaged) == to_underlying(CASError::NotManaged));
+
+        //TODO bounds check
+        auto &target_alloc = this->charger_allocation_state[client_id];
+        target_alloc.state = CASState::Error;
+
+        target_alloc.error = (CASError) error;
+        //TODO: should we call update_charger_state_config(client_id); here? This is currently missing but smells weird.
+    });
+
+    millis_t cm_send_delay = 1_s / millis_t{charger_count};
+
+    send_client_task_id = task_scheduler.scheduleUncancelable([this](){
+        static int i = 0;
+
+        if (i >= charger_count)
+            i = 0;
+
+        if (this->override_next_client_send != -1) {
+            if (this->send_client_packet((uint8_t) this->override_next_client_send))
+                this->override_next_client_send = -1;
+            return;
+        }
+
+        this->charger_state[i].last_send_was_urgent = false;
+
+        if (this->send_client_packet(i))
+            ++i;
+
+    }, cm_send_delay);
+}
+
+// This is a separate function to simplify the control flow.
+void ChargeManager::update_charger_state_from_mode(ChargerState *state, int charger_idx) {
+    auto mode = state->charge_mode;
+
+    // Every charger is off by default.
+    // If no bit in mode is set the charger stays off.
+    state->off = true;
+    state->observe_pv_limit = false;
+    state->eco_fast = false;
+    state->guaranteed_pv_current = 0;
+
+    for (uint8_t m = ChargeMode::_max; m >= ChargeMode::_min; m = ((uint8_t)m >> 1)) {
+        switch((ChargeMode::Type)(mode & m)) {
+            case ChargeMode::Fast:
+                state->off = false;
+                state->observe_pv_limit = false;
+                return;
+
+            case ChargeMode::Eco:
+#if MODULE_ECO_AVAILABLE()
+                switch (eco.get_charge_decision(charger_idx)) {
+                    case Eco::ChargeDecision::Fast:
+                        state->off = false;
+                        state->observe_pv_limit = false;
+                        state->eco_fast = true;
+                        return;
+                    case Eco::ChargeDecision::Normal:
+                        continue;
+                }
+#endif
+                continue;
+
+            case ChargeMode::Min: {
+                state->off = false;
+                state->guaranteed_pv_current = this->guaranteed_pv_current;
+                state->observe_pv_limit = true;
+                continue;
+            }
+
+            case ChargeMode::PV:
+                state->off = false;
+                state->observe_pv_limit = true;
+                return;
+        }
+    }
+}
+
+uint8_t ChargeManager::config_cm_to_cm(ConfigChargeMode power_manager_charge_mode) {
+    switch (power_manager_charge_mode) {
+        case ConfigChargeMode::Fast:
+            return ChargeMode::Fast;
+        case ConfigChargeMode::Off:
+            return 0;
+        case ConfigChargeMode::PV:
+            return ChargeMode::PV;
+        case ConfigChargeMode::MinPV:
+            return ChargeMode::Min | ChargeMode::PV;
+        case ConfigChargeMode::Default:
+            return this->config_cm_to_cm(this->get_default_mode());
+        case ConfigChargeMode::Min:
+            return ChargeMode::Min;
+        case ConfigChargeMode::Eco:
+            return ChargeMode::Eco;
+        case ConfigChargeMode::EcoPV:
+            return ChargeMode::Eco | ChargeMode::PV;
+        case ConfigChargeMode::EcoMin:
+            return ChargeMode::Eco | ChargeMode::Min;
+        case ConfigChargeMode::EcoMinPV:
+            return ChargeMode::Eco | ChargeMode::Min | ChargeMode::PV;
+    }
+    return 0;
+}
+
+ConfigChargeMode ChargeManager::cm_to_config_cm(uint8_t mode) {
+    switch (mode) {
+        case 0:
+            return ConfigChargeMode::Off;
+        case ChargeMode::PV:
+            return ConfigChargeMode::PV;
+        case ChargeMode::Min:
+            return ConfigChargeMode::Min;
+        case ChargeMode::Min | ChargeMode::PV:
+            return ConfigChargeMode::MinPV;
+        case ChargeMode::Eco:
+            return ConfigChargeMode::Eco;
+        case ChargeMode::Eco | ChargeMode::PV:
+            return ConfigChargeMode::EcoPV;
+        case ChargeMode::Eco | ChargeMode::Min:
+            return ConfigChargeMode::EcoMin;
+        case ChargeMode::Eco | ChargeMode::Min | ChargeMode::PV:
+            return ConfigChargeMode::EcoMinPV;
+        case ChargeMode::Fast:
+            return ConfigChargeMode::Fast;
+    }
+    // Fast overrides other modes.
+    return ConfigChargeMode::Fast;
+}
+
+void ChargeManager::setup()
+{
+    api.restorePersistentConfig("charge_manager/config", &config);
+
+    // We could move this below the enable_charge_manager check, but want to always see
+    // the configured values in debug reports even if the charge manager is currently
+    // disabled.
+    api.restorePersistentConfig("charge_manager/low_level_config", &low_level_config);
+
+    if (!LittleFS.exists(CHARGER_NAMES_FILE)) {
+        logger.printfln("Charger names file does not exist! Creating now.");
+        create_charger_names_file();
+    }
+
+    // Ensure all configured chargers are in the charger names file
+    for (size_t i = 0; i < config.get("chargers")->count(); ++i) {
+        uint32_t uid = config.get("chargers")->get(i)->get("uid")->asUint();
+        const String &name = config.get("chargers")->get(i)->get("name")->asString();
+        if (uid != 0) {
+            this->rename_charger(uid, name);
+        }
+    }
+
+    // Always set initialized so that the front-end is displayed.
+    initialized = true;
+
+    if (!config.get("enable_charge_manager")->asBool() || config.get("chargers")->count() == 0) {
+        return;
+    }
+
+    // If enable_charge_manager is false, leave charger_count as 0.
+    this->charger_count = config.get("chargers")->count();
+
+    state.get("state")->updateUint(1);
+
+    this->ca_config = new CurrentAllocatorConfig();
+
+    ca_config->global_hysteresis                    = seconds_t{low_level_config.get("global_hysteresis")->asUint()};
+    ca_config->wakeup_time                          = seconds_t{low_level_config.get("wakeup_time")->asUint()};
+    ca_config->plug_in_time                         = seconds_t{low_level_config.get("plug_in_time")->asUint()};
+    ca_config->allocation_interval                  = seconds_t{low_level_config.get("allocation_interval")->asUint()};
+    ca_config->rotation_interval                    = seconds_t{low_level_config.get("rotation_interval")->asUint()};
+    ca_config->enable_current_factor                = low_level_config.get("enable_current_factor_pct")->asUint() / 100.0f;
+
+    ca_config->minimum_current_3p = config.get("minimum_current")->asUint();
+    ca_config->minimum_current_1p = config.get("minimum_current_1p")->asUint();
+    ca_config->requested_current_margin = config.get("requested_current_margin")->asUint();
+    ca_config->requested_current_threshold = config.get("requested_current_threshold")->asUint();
+#if OPTIONS_PRODUCT_ID_IS_WARP
+    ca_config->enable_central_management = false;
+#else
+    ca_config->enable_central_management = config.get("enable_central_management")->asBool();
+#endif
+
+    this->ca_state = new CurrentAllocatorState();
+
+    auto default_current = config.get("default_available_current")->asUint();
+    available_current.get("current")->updateUint(default_current);
+
+    low_level_state.get("chargers")->setCount(charger_count);
+    state.get("chargers")->reserve(charger_count);
+    charge_mode.setCount(charger_count);
+
+    for (size_t i = 0; i < charger_count; ++i) {
+        auto state_last_charger = state.get("chargers")->add();
+        state_last_charger->get("n")->updateString(config.get("chargers")->get(i)->get("name")->asString());
+    }
+
+    size_t hosts_buf_size = 0;
+    for (size_t i = 0; i < charger_count; ++i) {
+        hosts_buf_size += config.get("chargers")->get(i)->get("host")->asString().length() + 1; //null terminator
+    }
+
+    char *hosts_buf = (char *)calloc_psram_or_dram(hosts_buf_size, sizeof(char));
+    this->hosts = heap_alloc_array<const char *>(charger_count);
+    size_t hosts_written = 0;
+
+    for (size_t i = 0; i < charger_count; ++i) {
+        hosts[i] = hosts_buf + hosts_written;
+        memcpy(hosts_buf + hosts_written, config.get("chargers")->get(i)->get("host")->asEphemeralCStr(), config.get("chargers")->get(i)->get("host")->asString().length());
+        hosts_written += config.get("chargers")->get(i)->get("host")->asString().length();
+        hosts_buf[hosts_written] = '\0';
+        ++hosts_written;
+    }
+
+    ca_config->charger_count = this->charger_count;
+    this->charger_state = (ChargerState *)calloc_psram_or_dram(this->charger_count, sizeof(ChargerState));
+    this->charger_allocation_state = (ChargerAllocationState *)calloc_psram_or_dram(this->charger_count, sizeof(ChargerAllocationState));
+    this->charger_decisions = (ChargerDecision *)calloc(this->charger_count, sizeof(ChargerDecision));
+
+    for (size_t i = 0; i < charger_count; ++i) {
+        charger_state[i].phase_rotation = convert_phase_rotation(config.get("chargers")->get(i)->get("rot")->asEnum<CMPhaseRotation>());
+        charger_state[i].last_phase_switch = -ca_config->global_hysteresis;
+        charger_state[i].authenticated_user_id = NOT_AUTHORIZED;
+    }
+
+    // TODO: Change all currents everywhere to int32_t or int16_t.
+    int def_cur = (int) default_current;
+    this->limits.raw = {0, def_cur, def_cur, def_cur};
+    this->limits.min = {0, def_cur, def_cur, def_cur};
+    this->limits.spread = {0, def_cur, def_cur, def_cur};
+    this->limits.max_pv = 0;
+
+    for (size_t i = 0; i < ARRAY_SIZE(this->limits.min_expiration_ts); i++) {
+        this->limits.min_expiration_ts[i] = 0_us;
+    }
+    this->limits.max_pv_expiration_ts = 0_us;
+
+    start_manager_task();
+
+    task_scheduler.scheduleUncancelable([this](){
+        const micros_t unreachable_threshold = now_us() - CHARGER_UNREACHABLE_TIMEOUT;
+        this->allocated_currents = Cost();
+
+        for (int i = 0; i < this->charger_count; ++i) {
+            auto &charger = this->charger_state[i];
+
+            if (charger.charger_state != 3)
+                continue; // Charger not charging. Allocated current can't be used because contactor is not closed.
+
+            if (charger.currently_switching_phases)
+                continue;
+
+            if (charger.last_update < unreachable_threshold)
+                continue; // Unreachable chargers stop charging after the timeout.
+
+            this->allocated_currents += get_cost(charger.allowed_current, charger.phases, charger.phase_rotation, 0, 0);
+        }
+    }, 1_s);
+
+    (void)task_scheduler.scheduleWithFixedDelay([this](){
+            all_chargers_seen = seen_all_chargers();
+
+            this->limits_post_allocation = this->limits;
+
+            for (size_t i = 0; i < charger_count; ++i) {
+                if (this->charger_state[i].last_update == 0_us)
+                    cm_networking.notify_charger_unresponsive(i);
+
+                auto allocd_current = this->charger_state[i].allowed_current;
+                auto allocd_phases = this->charger_state[i].phases;
+
+                this->charger_allocation_state[i].allocated_current = allocd_current;
+                this->charger_allocation_state[i].allocated_phases = allocd_phases;
+
+                auto cost = get_cost(allocd_current, allocd_phases, this->charger_state[i].phase_rotation, 0, 0);
+
+                apply_cost(cost, &this->limits_post_allocation);
+            }
+
+            if (all_chargers_seen) {
+                task_scheduler.cancel(task_scheduler.currentTaskId());
+                // Delay first allocation algorithm run by one second:
+                // This gives the power manager one second to re-calculate
+                // the limits with all now known active chargers.
+
+                this->allocate_task_id = task_scheduler.scheduleUncancelable([this](){
+                    this->run_allocator();
+                }, 1_s, ca_config->allocation_interval.to<millis_t>());
+            }
+        }, 1_s);
+
+    if (config.get("verbose")->asBool()) {
+        ca_config->distribution_log = heap_alloc_array<char>(DISTRIBUTION_LOG_LEN);
+        ca_config->distribution_log_len = DISTRIBUTION_LOG_LEN;
+    } else {
+        ca_config->distribution_log = nullptr;
+        ca_config->distribution_log_len = 0;
+    }
+}
+
+void ChargeManager::run_allocator()
+{
+#if MODULE_P14A_ENWG_AVAILABLE()
+    auto p14_limit_w = p14a_enwg.get_managed_chargers_limit();
+    // Copy old limits, we need those to be able to restore them below.
+    // If neither PV excess charging not dynamic load management are active,
+    // the limits are never written after ::setup().
+    auto limits_before = this->limits;
+    if (p14_limit_w != 0) {
+        // It is not the most effective way to evenly distribute this limit to
+        // all three phases. We could allow more charging if we would track
+        // this as a separate limit, but it is unlikely that the p14a_enwg
+        // module will ever block, so this is good enough(tm) for now.
+        auto p14_limit_mA = (int)(((double)p14_limit_w * 1000.0) / 3 / 230);
+        for (size_t p = (size_t)GridPhase::L1; p <= (size_t)GridPhase::L3; ++p) {
+            this->limits.raw[p] = std::min(this->limits.raw[p], p14_limit_mA);
+            this->limits.min[p] = std::min(this->limits.min[p], p14_limit_mA);
+            this->limits.spread[p] = std::min(this->limits.spread[p], p14_limit_mA);
+        }
+    }
+#endif
+
+    this->limits_post_allocation = this->limits;
+
+    for(size_t i = 0; i < charger_count; ++i) {
+        update_charger_state_from_mode(&charger_state[i], i);
+    }
+
+    int result = allocate_current(
+        this->ca_config,
+        &this->limits_post_allocation,
+        this->control_pilot_disconnect.get("disconnect")->asBool(),
+        this->charger_state,
+        this->hosts.get(),
+        [this](uint8_t idx) {return this->get_charger_name(idx);},
+        [](uint8_t charger_index) {return cm_networking.notify_charger_unresponsive(charger_index);},
+
+        this->ca_state,
+        this->charger_allocation_state,
+        this->charger_decisions
+    );
+
+    for (size_t i = 0; i < 4; i++) {
+        this->state.get("l_raw")->get(i)->updateInt(this->limits.raw[i]);
+        this->state.get("l_min")->get(i)->updateInt(this->limits.min[i]);
+        this->state.get("l_spread")->get(i)->updateInt(this->limits.spread[i]);
+        this->state.get("alloc")->get(i)->updateInt(this->limits.raw[i] - limits_post_allocation.raw[i]);
+        this->low_level_state.get("wnd_min")->get(i)->updateInt(this->ca_state->control_window_min[i]);
+        this->low_level_state.get("wnd_max")->get(i)->updateInt(this->ca_state->control_window_max[i]);
+    }
+    this->state.get("l_max_pv")->updateInt(this->limits.max_pv);
+    this->low_level_state.get("last_hyst_reset")->updateUptime(this->ca_state->last_hysteresis_reset);
+
+    fast_charger_in_c = false;
+    for (int i = 0; i < this->charger_count; ++i) {
+        update_charger_state_config(i);
+        this->charger_decisions[i].zero.writeToConfig((Config *)this->state.get("chargers")->get(i)->get("d0"));
+        this->charger_decisions[i].one.writeToConfig((Config *)this->state.get("chargers")->get(i)->get("d1"));
+        this->charger_decisions[i].three.writeToConfig((Config *)this->state.get("chargers")->get(i)->get("d3"));
+        this->charger_decisions[i].current.writeToConfig((Config *)this->state.get("chargers")->get(i)->get("dc"));
+    }
+
+    this->state.get("state")->updateUint(result);
+
+#if MODULE_P14A_ENWG_AVAILABLE()
+    this->limits = limits_before;
+#endif
+}
+
+void ChargeManager::check_watchdog()
+{
+    if (this->watchdog_triggered || !deadline_elapsed(last_available_current_update + WATCHDOG_TIMEOUT))
+        return;
+
+    uint32_t default_available_current = config.get("default_available_current")->asUint();
+
+    logger.printfln("Watchdog triggered! Received no available current update for %d s. Setting available current to %lu mA", WATCHDOG_TIMEOUT.to<seconds_t>().as<int>(), default_available_current);
+
+    // Use the command to update the available current.
+    // Setting available_current directly will not update the limits struct.
+    const String err = api.callCommand("charge_manager/available_current_update", Config::ConfUpdateObject{{
+        {"current", default_available_current},
+    }});
+    if (!err.isEmpty()) {
+        logger.printfln("Watchdog couldn't set manager current: %s", err.c_str());
+    }
+
+    this->watchdog_triggered = true; // Set this here because the command call always sets it to false;
+
+#if MODULE_AUTOMATION_AVAILABLE()
+    automation.trigger(AutomationTriggerID::ChargeManagerWd, nullptr, this);
+#endif
+}
+
+size_t ChargeManager::get_charger_count()
+{
+    return charger_count;
+}
+
+bool ChargeManager::seen_all_chargers()
+{
+    if (now_us() > 30_s) {
+        for (size_t i = 0; i < charger_count; ++i) {
+            if (this->charger_state[i].last_update != 0_us)
+                continue;
+            auto mode = this->get_default_mode();
+            this->charger_state[i].charge_mode = config_cm_to_cm(mode);
+            this->charge_mode.get(i)->updateEnum(mode);
+        }
+
+        return true;
+    }
+
+    for (size_t i = 0; i < charger_count; ++i)
+        if (this->charger_state[i].last_update == 0_us)
+            return false;
+
+    logger.printfln("Seen all chargers.");
+
+    return true;
+}
+
+const String &ChargeManager::get_charger_host(uint8_t idx)
+{
+    // FIXME: This is broken after a config update without reboot.
+    return this->config.get("chargers")->get(idx)->get("host")->asString();
+}
+
+const char *ChargeManager::get_charger_name(uint8_t idx)
+{
+    return this->state.get("chargers")->get(idx)->get("n")->asEphemeralCStr();
+}
+
+const char *ChargeManager::get_charger_name_by_uid(uint32_t uid)
+{
+    for (size_t i = 0; i < config.get("chargers")->count(); ++i) {
+        if (config.get("chargers")->get(i)->get("uid")->asUint() == uid)
+            return config.get("chargers")->get(i)->get("name")->asEphemeralCStr();
+    }
+
+    return nullptr;
+}
+
+static int find_charger_entry(File &f, uint32_t uid)
+{
+    size_t file_size = f.size();
+    uint32_t stored_uid;
+
+    for (size_t i = 0; i < file_size; i += CHARGER_NAME_ENTRY_LENGTH) {
+        f.seek(i, SeekMode::SeekSet);
+        if (f.read((uint8_t *)&stored_uid, sizeof(stored_uid)) != sizeof(stored_uid))
+            continue;
+
+        if (stored_uid == uid) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+static int find_empty_slot(File &f)
+{
+    size_t file_size = f.size();
+    uint32_t stored_uid;
+
+    for (size_t i = 0; i < file_size; i += CHARGER_NAME_ENTRY_LENGTH) {
+        f.seek(i, SeekMode::SeekSet);
+        if (f.read((uint8_t *)&stored_uid, sizeof(stored_uid)) != sizeof(stored_uid))
+            continue;
+
+        if (stored_uid == 0) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+static void create_charger_names_file()
+{
+    logger.printfln("Creating charger names file");
+    File f = LittleFS.open(CHARGER_NAMES_FILE, "w", true);
+    const uint8_t buf[CHARGER_NAME_ENTRY_LENGTH] = {};
+
+    for (int i = 0; i < MAX_TRACKED_CHARGERS; i++)
+        f.write(buf, sizeof(buf));
+}
+
+void ChargeManager::rename_charger(uint32_t uid, const String &display_name)
+{
+    if (uid == 0) {
+        // UID 0 is invalid (used as empty marker)
+        return;
+    }
+
+    File f = LittleFS.open(CHARGER_NAMES_FILE, "r+");
+    if (!f) {
+        logger.printfln("Failed to open charger names file for writing");
+        return;
+    }
+
+    int offset = find_charger_entry(f, uid);
+    if (offset < 0) {
+        offset = find_empty_slot(f);
+        if (offset < 0) {
+            logger.printfln("No empty slot found in charger names file");
+            return;
+        }
+    }
+
+    char buf[CHARGER_NAME_ENTRY_LENGTH] = {0};
+    memcpy(buf, &uid, sizeof(uid));
+    display_name.toCharArray(buf + sizeof(uid), CHARGER_NAME_LENGTH);
+
+    f.seek(offset, SeekMode::SeekSet);
+    f.write((const uint8_t *)buf, sizeof(buf));
+}
+
+void ChargeManager::remove_charger_names_file()
+{
+    if (LittleFS.exists(CHARGER_NAMES_FILE))
+        LittleFS.remove(CHARGER_NAMES_FILE);
+}
+
+void ChargeManager::remove_from_charger_names_file(uint32_t uid)
+{
+    if (uid == 0)
+        return;
+
+    // Don't remove if the charger is still in the config
+    if (get_charger_name_by_uid(uid) != nullptr)
+        return;
+
+    File f = LittleFS.open(CHARGER_NAMES_FILE, "r+");
+    if (!f)
+        return;
+
+    int offset = find_charger_entry(f, uid);
+    if (offset < 0)
+        return;
+
+    // Write zeros to mark the entry as empty (UID 0 = empty marker)
+    const uint8_t buf[CHARGER_NAME_ENTRY_LENGTH] = {0};
+    f.seek(offset, SeekMode::SeekSet);
+    f.write(buf, sizeof(buf));
+}
+
+bool ChargeManager::is_charger_tracked(uint32_t uid)
+{
+    if (uid == 0)
+        return false;
+
+    File f = LittleFS.open(CHARGER_NAMES_FILE, "r");
+    if (!f) {
+        return false;
+    }
+
+    return find_charger_entry(f, uid) >= 0;
+}
+
+void ChargeManager::register_urls()
+{
+#if MODULE_POWER_MANAGER_AVAILABLE()
+    // PowerManager::setup() runs after ChargeManager::setup()
+    this->guaranteed_pv_current = (power_manager.get_guaranteed_power_w() * 1000) / 230;
+    this->pm_default_charge_mode = power_manager.get_default_charge_mode();
+#else
+    this->guaranteed_pv_current = 0;
+    this->pm_default_charge_mode = ConfigChargeMode::Fast;
+#endif
+
+    if (this->pm_default_charge_mode == ConfigChargeMode::Default) {
+        if (api.restorePersistentConfig("power_manager/charge_mode", &this->pm_charge_mode, API::SavedDefaultConfig::Keep)) {
+            // The default's default is Fast. This is used if the default charge mode is set to Default, i.e. persistent,
+            // but the charge_mode was never written.
+            this->pm_charge_mode.get("mode")->updateEnum(ConfigChargeMode::Fast);
+        }
+    }
+    else {
+        this->pm_charge_mode.get("mode")->updateEnum(this->pm_default_charge_mode);
+    }
+
+    auto default_mode = config_cm_to_cm(this->pm_charge_mode.get("mode")->asEnum<ConfigChargeMode>());
+    for (size_t i = 0; i < charger_count; ++i) {
+        charger_state[i].charge_mode = default_mode;
+    }
+
+    bool enabled = config.get("enable_charge_manager")->asBool();
+
+    if (enabled && charger_count > 0 && this->static_cm) {
+        ca_config->enable_current_factor = 1;
+    }
+
+#if MODULE_AUTOMATION_AVAILABLE()
+    automation.set_enabled(AutomationActionID::PMChargeModeSwitch, enabled);
+    automation.set_enabled(AutomationTriggerID::ChargeManagerWd, enabled && this->static_cm);
+    automation.set_enabled(AutomationActionID::SetManagerCurrent, enabled && this->static_cm);
+#endif
+
+    api.addPersistentConfig("charge_manager/config", &config);
+    api.addPersistentConfig("charge_manager/low_level_config", &low_level_config);
+    api.addState("charge_manager/state", &state);
+    api.addState("charge_manager/low_level_state", &low_level_state);
+
+    api.addState("charge_manager/available_current", &available_current);
+    api.addCommand("charge_manager/available_current_update", &available_current_update, {}, [this](Language /*language*/, String &/*errmsg*/) {
+        uint32_t current = this->available_current_update.get("current")->asUint();
+        this->available_current.get("current")->updateUint(current);
+        this->last_available_current_update = now_us();
+        this->watchdog_triggered = false;
+
+        for(size_t i = 1; i < 4; ++i) {
+            this->limits.raw[i] = current;
+            this->limits.min[i] = current;
+            this->limits.spread[i] = current;
+        }
+
+    }, false);
+
+#ifdef DEBUG_FS_ENABLE
+    api.addCommand("charge_manager/debug_limits_update", &debug_limits_update, {}, [this](Language /*language*/, String &/*errmsg*/) {
+        auto expiration = now_us() + 240_s;
+        for(size_t i = 0; i < 4; ++i) {
+            this->limits.raw[i] = debug_limits_update.get("raw")->get(i)->asInt();
+            this->limits.min[i] = debug_limits_update.get("min")->get(i)->asInt();
+            this->limits.spread[i] = debug_limits_update.get("spread")->get(i)->asInt();
+            this->limits.min_expiration_ts[i] = expiration;
+        }
+        this->limits.max_pv = debug_limits_update.get("max_pv")->asInt();
+        this->limits.max_pv_expiration_ts = expiration;
+    }, false);
+#endif
+
+    api.addState("charge_manager/charge_modes", &charge_mode);
+    api.addCommand("charge_manager/charge_modes_update", &charge_mode, {}, [this](Language /*language*/, String &errmsg) {
+        for (size_t i = 0; i < charger_count; ++i) {
+            auto new_mode = config_cm_to_cm(this->charge_mode.get(i)->asEnum<ConfigChargeMode>());
+            charger_state[i].charge_mode = new_mode;
+            this->charge_mode.get(i)->updateEnum(this->cm_to_config_cm(new_mode));
+        }
+    }, false);
+    api.addState("charge_manager/supported_charge_modes", &supported_charge_modes);
+
+    // This is power_manager API that is now handled by the charge manager.
+    api.addState("power_manager/charge_mode", &pm_charge_mode);
+    api.addCommand("power_manager/charge_mode_update", &pm_charge_mode_update, {}, [this](Language /*language*/, String &errmsg) {
+        auto new_ccm = this->pm_charge_mode_update.get("mode")->asEnum<ConfigChargeMode>();
+        auto mode_is_persistent = this->pm_default_charge_mode == ConfigChargeMode::Default;
+
+        if (new_ccm == ConfigChargeMode::Default) {
+            if (mode_is_persistent)
+                return;  // Setting the mode to default is a nop if the mode is persistent. The default mode *is* the current value of the (persistent) charge mdoe.
+
+            new_ccm = this->pm_default_charge_mode;
+        }
+
+        this->pm_charge_mode.get("mode")->updateEnum(new_ccm);
+
+        auto new_mode = config_cm_to_cm(new_ccm);
+
+        for (size_t i = 0; i < charger_count; ++i) {
+            charger_state[i].charge_mode = new_mode;
+            this->charge_mode.get(i)->updateEnum(this->cm_to_config_cm(new_mode));
+        }
+
+        if (mode_is_persistent)
+            api.writeConfig("power_manager/charge_mode", &pm_charge_mode);
+
+        //logger.printfln("Charging mode %u requested but it was ignored", new_mode);
+        //errmsg = "Charge mode switch ignored";
+    }, false);
+
+    api.addCommand("charge_manager/authorize_charger", &authorize_charger, {}, [this](Language /*language*/, String &errmsg) {
+        uint8_t charger_idx = this->authorize_charger.get("charger_idx")->asUint();
+        int16_t user_id = this->authorize_charger.get("user_id")->asInt();
+
+        if (charger_idx >= this->charger_count) {
+            errmsg = "Invalid charger index";
+            return;
+        }
+
+        if (!this->ca_config->enable_central_management) {
+            errmsg = "Central authorization is not enabled";
+            return;
+        }
+
+        if (user_id <= 0) {
+            errmsg = "Invalid user ID";
+            return;
+        }
+
+        auto &target = this->charger_state[charger_idx];
+
+        target.authenticated_user_id = user_id;
+
+#if MODULE_USERS_AVAILABLE()
+        target.user_current = users.get_user_current(user_id);
+#else
+        target.user_current = 32000;
+#endif
+    }, false);
+
+#if MODULE_WEB_SERVER_AVAILABLE()
+    server.on_HTTPThread("/charge_manager/all_charger_names", HTTP_GET, [](WebServerRequest request) {
+        size_t len = MAX_TRACKED_CHARGERS * CHARGER_NAME_ENTRY_LENGTH;
+        auto buf = heap_alloc_array<char>(len);
+        if (buf == nullptr) {
+            return request.send_plain(507);
+        }
+
+        size_t read = 0;
+
+        {
+            File f = LittleFS.open(CHARGER_NAMES_FILE, "r");
+            if (!f) {
+                return request.send_plain(404);
+            }
+            read = f.read((uint8_t *)buf.get(), len);
+        }
+
+        return request.send_bytes(200, buf.get(), read);
+    });
+
+    server.on_HTTPThread("/charge_manager/auth_info", HTTP_GET, [this](WebServerRequest request) {
+        auto now = now_us();
+        constexpr size_t BUF_SIZE = 20480;
+        auto buf = heap_alloc_array<char>(BUF_SIZE);
+        if (buf == nullptr) {
+            return request.send_plain(507);
+        }
+
+        TFJsonSerializer json{buf.get(), BUF_SIZE};
+        json.addArray();
+
+        for (size_t idx = 0; idx < this->charger_count; ++idx) {
+            json.addArray();
+            for (int i = 0; i < 3; ++i) {
+                const auto &info = this->charger_state[idx].auth_info[i];
+                json.addObject();
+                json.addMemberNumber("seen_at", (now - seconds_t{info.last_seen_s}).to<millis_t>().as<int64_t>());
+                json.addMemberArray("auth_info");
+                json.addNumber(static_cast<uint8_t>(info.auth_method));
+
+                switch (info.auth_method) {
+                    case CMAuthType::NFC:
+                    case CMAuthType::InjectedNFC: {
+                            char tag_id_str[CM_AUTH_INFO_TAG_ID_STRING_LEN + 1];
+                            hexdump(info.nfc.tag_id, info.nfc.tag_id_len, tag_id_str, ARRAY_SIZE(tag_id_str), HexdumpCase::Upper, ':');
+                            json.addObject();
+                            json.addMemberString("tag_id", tag_id_str);
+                            json.addMemberNumber("tag_type", info.nfc.tag_type);
+                            json.endObject();
+                        }
+                        break;
+
+                    case CMAuthType::EV:
+                    case CMAuthType::InjectedEV:{
+                            char mac_str[ARRAY_SIZE(info.ev.mac) * 3];
+                            hexdump(info.ev.mac, ARRAY_SIZE(info.ev.mac), mac_str, ARRAY_SIZE(mac_str), HexdumpCase::Upper, ':');
+
+                            json.addObject();
+                            json.addMemberString("mac", mac_str);
+                            json.endObject();
+
+                        }
+                        break;
+
+                    case CMAuthType::None:
+                    case CMAuthType::Lost:
+                    default:
+                        json.addNull();
+                        break;
+                }
+                json.endArray();
+
+                json.endObject();
+            }
+            json.endArray();
+        }
+
+        json.endArray();
+        json.end();
+
+        return request.send_json(200, json);
+    });
+#endif
+
+    if (static_cm && config.get("enable_watchdog")->asBool()) {
+        task_scheduler.scheduleUncancelable([this](){this->check_watchdog();}, 1_s, 1_s);
+    }
+}
+
+void ChargeManager::update_supported_charge_modes(bool pv, bool eco) {
+    /*
+        PV Eco  Buttons
+        0   0   (none)
+        0   1   Eco, Min+Eco
+        1   0   PV, Min+PV
+        1   1   PV, Eco+PV
+    */
+
+    if (!pv && eco) {
+        supported_charge_modes = Config::Tuple({
+            Config::Enum(ConfigChargeMode::Off),
+            Config::Enum(ConfigChargeMode::Eco),
+            Config::Enum(ConfigChargeMode::EcoMin),
+            Config::Enum(ConfigChargeMode::Fast),
+        });
+    } else if (pv && eco) {
+        supported_charge_modes = Config::Tuple({
+            Config::Enum(ConfigChargeMode::Off),
+            Config::Enum(ConfigChargeMode::PV),
+            Config::Enum(ConfigChargeMode::EcoPV),
+            Config::Enum(ConfigChargeMode::Fast),
+        });
+    } else if (pv) {
+        supported_charge_modes = Config::Tuple({
+            Config::Enum(ConfigChargeMode::Off),
+            Config::Enum(ConfigChargeMode::PV),
+            Config::Enum(ConfigChargeMode::MinPV),
+            Config::Enum(ConfigChargeMode::Fast),
+        });
+    } else {
+        supported_charge_modes = Config::Tuple({
+            Config::Enum(ConfigChargeMode::Off),
+            Config::Enum(ConfigChargeMode::Fast),
+        });
+    }
+
+    this->supported_charge_mode_bitmask.fill(0); // clear bitmask
+    for (size_t i = 0; i < supported_charge_modes.count(); ++i) {
+        size_t mode = (size_t) supported_charge_modes.get(i)->asEnum<ConfigChargeMode>();
+        this->supported_charge_mode_bitmask[mode / 8] |= 1 << (mode % 8);
+    }
+}
+
+ConfigChargeMode ChargeManager::get_default_mode() {
+    if (this->pm_default_charge_mode != ConfigChargeMode::Default)
+        return this->pm_default_charge_mode;
+    // default mode == default means persistent.
+    // Use the currently selected charge mode (for all chargers)
+
+    return this->pm_charge_mode.get("mode")->asEnum<ConfigChargeMode>();
+}
+
+void ChargeManager::register_events() {
+    {
+        bool pv = false;
+        bool eco = false;
+#if MODULE_POWER_MANAGER_AVAILABLE()
+        pv = api.getState("power_manager/config")->get("excess_charging_enable")->asBool();
+#endif
+#if MODULE_ECO_AVAILABLE()
+        eco = api.getState("eco/config")->get("enable")->asBool();
+#endif
+
+        this->update_supported_charge_modes(pv, eco);
+    }
+
+#if MODULE_ECO_AVAILABLE()
+    event.registerEvent("eco/config", {"enable"}, [this](const Config *eco_enabled) {
+        bool eco = eco_enabled->asBool();
+
+        bool pv = false;
+#if MODULE_POWER_MANAGER_AVAILABLE()
+        pv = api.getState("power_manager/config")->get("excess_charging_enable")->asBool();
+#endif
+
+        this->update_supported_charge_modes(pv, eco);
+        return EventResult::OK;
+    });
+#endif
+
+#if MODULE_CHARGE_TRACKER_AVAILABLE()
+    // When a charger is removed from the config, check if it has any tracked charges.
+    // If not, remove it from the charger names file.
+    event.registerEvent("charge_manager/config", {"chargers"}, [this](const Config */*chargers_cfg*/) {
+        File f = LittleFS.open(CHARGER_NAMES_FILE, "r");
+        if (!f) {
+            return EventResult::OK;
+        }
+
+        size_t file_size = f.size();
+        for (size_t i = 0; i < file_size; i += CHARGER_NAME_ENTRY_LENGTH) {
+            uint32_t uid = 0;
+            f.seek(i, SeekMode::SeekSet);
+            if (f.read((uint8_t *)&uid, sizeof(uid)) != sizeof(uid))
+                continue;
+
+            if (uid == 0)
+                continue;
+
+            // Check if this charger is still in the config
+            if (get_charger_name_by_uid(uid) != nullptr)
+                continue;
+
+            // Check if this charger has any tracked charges
+            if (charge_tracker.has_tracked_charges(uid))
+                continue;
+
+            // Charger is not in config and has no tracked charges - remove from names file
+            remove_from_charger_names_file(uid);
+        }
+
+        return EventResult::OK;
+    });
+#endif
+}
+
+void ChargeManager::update_charger_state_config(uint8_t idx) {
+    auto &charger = charger_state[idx];
+    auto &charger_alloc = charger_allocation_state[idx];
+    auto *charger_cfg = (Config *)this->state.get("chargers")->get(idx);
+    auto *ll_charger_cfg = (Config *)this->low_level_state.get("chargers")->get(idx);
+    charger_cfg->get("s")->updateEnum(charger_alloc.state);
+    charger_cfg->get("e")->updateEnum(charger_alloc.error);
+    charger_cfg->get("ac")->updateUint(charger_alloc.allocated_current);
+    charger_cfg->get("ap")->updateUint(charger_alloc.allocated_phases);
+    charger_cfg->get("sc")->updateUint(charger.supported_current);
+    charger_cfg->get("sp")->updateUint((charger.phase_switch_supported ? 4 : 0) | (charger.phases));
+    charger_cfg->get("lu")->updateUptime(charger.last_update);
+    charger_cfg->get("uid")->updateUint(charger.uid);
+
+    charger_cfg->get("u")->updateInt(charger.authenticated_user_id);
+
+    uint8_t bits = (charger.phases << 3) | (charger.phase_switch_supported << 2) | (charger.cp_disconnect_state << 1) | charger.cp_disconnect_supported;
+    ll_charger_cfg->get("b")->updateUint(bits);
+    ll_charger_cfg->get("rc")->updateUint(charger.requested_current);
+    ll_charger_cfg->get("ae")->updateUint(charger.allocated_energy * 1000);
+    ll_charger_cfg->get("ls")->updateUptime(charger.last_switch_on);
+    ll_charger_cfg->get("lp")->updateUptime(charger.just_plugged_in_timestamp);
+    ll_charger_cfg->get("lw")->updateUptime(charger.last_wakeup);
+    ll_charger_cfg->get("ip")->updateUptime(charger.use_supported_current);
+
+    charge_mode.get(idx)->updateEnum(this->cm_to_config_cm(charger.charge_mode));
+
+    bool is_fast = (charger.charge_mode & ChargeMode::Fast) != 0;
+    bool is_eco_fast = (charger.charge_mode & ChargeMode::Eco) != 0 && charger.eco_fast;
+    if (charger.is_charging && (is_fast || is_eco_fast))
+        fast_charger_in_c = true;
+}
+
+uint32_t ChargeManager::get_maximum_available_current()
+{
+    return config.get("maximum_available_current")->asUint();
+}
+
+void ChargeManager::trigger_allocator_run(bool force) {
+    if (!force && !deadline_elapsed(this->last_allocator_run_override + 5_s))
+        return;
+
+    task_scheduler.rescheduleNow(this->allocate_task_id);
+    this->last_allocator_run_override = now_us();
+}
+
+void ChargeManager::skip_global_hysteresis() {
+    if (this->ca_state == nullptr || this->ca_config == nullptr)
+        return;
+
+    this->ca_state->last_hysteresis_reset = now_us() - this->ca_config->global_hysteresis - 1_us;
+}
+
+const ChargerState *ChargeManager::get_charger_state(uint8_t idx)
+{
+    return this->get_mutable_charger_state(idx);
+}
+
+
+ChargerState *ChargeManager::get_mutable_charger_state(uint8_t idx)
+{
+    return this->charger_state == nullptr ? nullptr : &this->charger_state[idx];
+}
+
+ChargerState *ChargeManager::find_charger_state(uint32_t uid)
+{
+    if (this->charger_state == nullptr)
+        return nullptr;
+
+    for (size_t i = 0; i < this->charger_count; ++i) {
+        if (this->charger_state[i].uid == uid)
+            return &this->charger_state[i];
+    }
+
+    return nullptr;
+}
+
+int8_t ChargeManager::get_charger_state_index(const ChargerState *state)
+{
+    if (this->charger_state == nullptr || state == nullptr)
+        return -1;
+
+    // Check if the pointer is within the array bounds
+    if (state < this->charger_state || state >= this->charger_state + this->charger_count)
+        return -1;
+
+    return static_cast<int8_t>(state - this->charger_state);
+}
+
+void ChargeManager::enable_fast_single_charger_mode()
+{
+    if (!config.get("enable_charge_manager")->asBool()) {
+        logger.printfln("Cannot enable fast single charger mode because the charge manager is disabled");
+        return;
+    }
+
+    if (charger_count != 1) {
+        logger.printfln("Cannot enable fast single charger mode because %zu chargers are configured", charger_count);
+        return;
+    }
+
+    ca_config->allocation_interval = 5_s;
+    low_level_config.get("allocation_interval")->updateUint(5);
+
+    logger.printfln("Enabled fast single charger mode");
+}

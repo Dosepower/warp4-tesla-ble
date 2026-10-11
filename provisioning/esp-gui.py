@@ -1,0 +1,127 @@
+#!/usr/bin/env -S uv run --active --script
+
+from PySide6.QtCore import QTimer
+from PySide6.QtWidgets import QApplication, QWidget, QVBoxLayout, QPushButton, QComboBox
+
+from collections import namedtuple
+import functools
+import shlex
+import subprocess
+import queue
+import threading
+import tinkerforge_util as tfutil
+
+selected_firmware_type = ""
+
+Action = namedtuple("Action", "name pwd cmd filter_fn")
+
+actions = [
+    Action("ESP Parallel-Flash",          ".", "lxterminal -e ./provision_stage_0_{{{firmware_type}}}.sh",                               lambda x: x not in ("warp3", "warp4")),
+    Action("ESP Test",                    ".", "lxterminal -e ./provision_stage_1_{{{brick_type}}}.py {{{firmware_type}}}",              lambda x: x not in ("warp3", "warp4")),
+    Action("ESP Print Label (Skip Test)", ".", "lxterminal -e ./provision_stage_1_{{{brick_type}}}.py {{{firmware_type}}} --skip-tests", lambda x: x not in ("warp3", "warp4")),
+    Action("WARP ESP Flash and Test",     ".", "./provision_{{{brick_type}}}.py",                                                        lambda x: x     in ("warp3", "warp4")),
+]
+
+work_queue = queue.Queue()
+work_done_queue = queue.Queue()
+
+def work(q: queue.Queue, done_q: queue.Queue):
+    global selected_firmware_type
+    while True:
+        todo = q.get(block=True)
+        if todo is None:
+            return
+
+        a, btn = todo
+
+        with tfutil.ChangedDirectory(a.pwd):
+            cmd = a.cmd if isinstance(a.cmd, list) else [a.cmd]
+
+            for c in cmd:
+                if selected_firmware_type == "esp32":
+                    brick_type = "esp32"
+                elif selected_firmware_type == "warp3":
+                    brick_type = "warp_esp32_ethernet_brick"
+                elif selected_firmware_type == "warp4":
+                    brick_type = "warp_esp32_ethernet_brick_v2"
+                else:
+                    brick_type = "esp32_ethernet"
+
+                c = c.replace("{{{firmware_type}}}", selected_firmware_type)
+                c = c.replace("{{{brick_type}}}", brick_type)
+                result = subprocess.run(shlex.split(c), encoding='utf-8')
+
+                if result.returncode == 42:
+                    q.put((a, btn))
+                else:
+                    done_q.put(btn)
+
+def run(a: Action, btn: QPushButton):
+    btn.setDisabled(True)
+    work_queue.put((a, btn))
+
+def unblock_btn_check():
+    try:
+        btn = work_done_queue.get_nowait()
+    except queue.Empty:
+        return
+    btn.setDisabled(False)
+
+class App(QApplication):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.unblock_btn_timer = QTimer()
+        self.unblock_btn_timer.timeout.connect(unblock_btn_check)
+        self.unblock_btn_timer.setInterval(100)
+        self.unblock_btn_timer.start()
+
+
+def main():
+    t = threading.Thread(target=work, args=[work_queue, work_done_queue], daemon=True)
+    t.start()
+
+    app = App([])
+    window = QWidget()
+    window.setWindowTitle('ESP GUI')
+    layout = QVBoxLayout()
+    combo_box = QComboBox()
+    combo_box.addItem("Select Brick type...", "")
+    combo_box.addItem("ESP32 Brick (w/o Ethernet)", "esp32")
+    combo_box.addItem("ESP32 Ethernet Brick", "esp32_ethernet")
+    combo_box.addItem("ESP32 Ethernet Brick (WARP2 Firmware)", "warp2")
+    combo_box.addItem("ESP32 Ethernet Brick (Energy Manager Firmware)", "energy_manager")
+    combo_box.addItem("ESP32 Ethernet Brick (Energy Manager 2.0 Firmware)", "energy_manager_v2")
+    combo_box.addItem("ESP32 Ethernet Brick (Smart Energy Broker Firmware)", "smart_energy_broker")
+    combo_box.addItem("WARP ESP32 Ethernet Brick", "warp3")
+    combo_box.addItem("WARP ESP32 Ethernet Brick 2.0", "warp4")
+    layout.addWidget(combo_box)
+
+    btn_action = {}
+
+    for a in actions:
+        btn = QPushButton(a.name, window)
+        btn.setMinimumHeight(btn.sizeHint().height() * 2)
+        font = btn.font()
+        font.setPointSizeF(font.pointSizeF() * 1.5)
+        btn.setFont(font)
+        btn.setEnabled(False)
+        btn.clicked.connect(functools.partial(run, a, btn))
+        layout.addWidget(btn)
+        btn_action[btn] = a
+
+    def current_index_changed(idx):
+        global selected_firmware_type
+        selected_firmware_type = combo_box.itemData(idx)
+        for button in window.findChildren(QPushButton):
+            button.setEnabled(idx != 0 and btn_action[button].filter_fn(selected_firmware_type))
+
+    combo_box.currentIndexChanged.connect(current_index_changed)
+
+    window.setLayout(layout)
+    window.show()
+    app.exec()
+    work_queue.put(None)
+    t.join()
+
+if __name__ == "__main__":
+    main()

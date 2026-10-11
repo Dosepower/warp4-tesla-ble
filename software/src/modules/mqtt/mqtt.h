@@ -1,0 +1,150 @@
+/* esp32-firmware
+ * Copyright (C) 2020-2021 Erik Fleckstein <erik@tinkerforge.com>
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, write to the
+ * Free Software Foundation, Inc., 59 Temple Place - Suite 330,
+ * Boston, MA 02111-1307, USA.
+ */
+
+#pragma once
+
+#include <mqtt_client.h>
+
+#include "module.h"
+#include "config.h"
+#include "modules/api/api.h"
+#include "tools/allocator.h"
+#include "generated/mqtt_connection_state.enum.h"
+#include "generated/module_available.h"
+
+#if MODULE_AUTOMATION_AVAILABLE()
+#include "modules/automation/automation_backend.h"
+#endif
+
+class Mqtt final : public IModule,
+                   public IAPIBackend
+#if MODULE_AUTOMATION_AVAILABLE()
+                 , public IAutomationBackend
+#endif
+{
+public:
+    using SubscribeCallback = std::function<void(const char *, size_t, char *, size_t)>;
+
+    enum class Retained : uint8_t {
+        Accept       = 0,
+        IgnoreWarn   = 1,
+        IgnoreSilent = 2,
+    };
+
+    enum class CallbackInThread : uint8_t {
+        Main = 0,
+        Mqtt = 1,
+    };
+
+    enum class AddPrefix {
+        No  = 0,
+        Yes = 1,
+    };
+
+    Mqtt(){}
+    void pre_setup() override;
+    void setup() override;
+    void register_urls() override;
+    void register_events() override;
+    void pre_reboot() override;
+
+    // Retain messages by default because we only send on change.
+    bool publish_with_prefix(const String &path, const String &payload, bool retain = true);
+    bool publish(const String &topic, const String &payload, bool retain);
+    void refresh_state(const char *path);
+
+    void subscribe(const String &path, SubscribeCallback &&callback, Retained retained, CallbackInThread callback_in_thread = CallbackInThread::Main, AddPrefix add_prefix = AddPrefix::No);
+    bool unsubscribe(const String &path, AddPrefix add_prefix = AddPrefix::No);
+
+    // IAPIBackend implementation
+    void addCommand(size_t commandIdx, const CommandRegistration &reg) override;
+    bool pushStateUpdate(size_t stateIdx, const String &payload, const String &path) override;
+    bool pushRawStateUpdate(const String &payload, const String &path) override;
+    WantsStateUpdate wantsStateUpdate(size_t stateIdx) override;
+
+    void onMqttConnect();
+    void onMqttMessage(char *topic, size_t topic_len, char *data, size_t data_len, bool retain);
+    void onMqttDisconnect();
+
+    void resubscribe();
+
+#if MODULE_AUTOMATION_AVAILABLE()
+    bool has_triggered(const Config *conf, void *data) override;
+#endif
+
+    ConfigRoot config;
+    ConfigRoot state;
+
+    uint32_t config_generation = 0;
+
+    // Both strings are read by mqtt_auto_discovery.
+    String client_name;
+    // Copy prefix to not access config in MQTT thread.
+    String global_topic_prefix;
+
+    bool report_disconnect = true;
+
+private:
+    struct MqttCommand {
+        String topic;
+        SubscribeCallback callback;
+        Retained retained;
+        CallbackInThread callback_in_thread;
+        bool starts_with_global_topic_prefix;
+        bool subscribed;
+        bool is_automation;
+    };
+
+    struct MqttMessage {
+        String topic;
+        String payload;
+        bool retained;
+    };
+
+    std::vector<MqttCommand> commands;
+    micros_t *state_last_send;
+
+    size_t backend_idx;
+
+    bool create_client();
+    void stop_and_destroy_client();
+    void reconfigure();
+    void subscribe_automation_triggers();
+
+    esp_mqtt_client_handle_t client = nullptr;
+    micros_t send_interval;
+
+    micros_t last_connected = 0_us;
+    bool was_connected = false;
+    bool global_topic_prefix_subscribed = false;
+    bool initial_network_event_seen = false;
+
+    bool read_only = false;
+
+    std::unique_ptr<unsigned char[]> broker_cert_buf = nullptr;
+    std::unique_ptr<unsigned char[]> client_cert_buf = nullptr;
+    std::unique_ptr<unsigned char[]> client_key_buf  = nullptr;
+
+    int subscribe_internal(const char *topic, int qos);
+    int unsubscribe_internal(const char *topic);
+
+    String build_topic(const String &path, AddPrefix add_prefix, bool *out_starts_with_global_topic_prefix);
+};
+
+#include "generated/module_available_end.h"

@@ -1,0 +1,87 @@
+/* esp32-firmware
+ * Copyright (C) 2022 Erik Fleckstein <erik@tinkerforge.com>
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, write to the
+ * Free Software Foundation, Inc., 59 Temple Place - Suite 330,
+ * Boston, MA 02111-1307, USA.
+ */
+
+import * as util from "../../ts/util";
+
+import { h, Context, Fragment } from "preact";
+import { useId, useContext, useState } from "preact/hooks";
+import { JSX } from 'preact';
+import { Button } from "react-bootstrap";
+import { Progress } from "./progress";
+import { __ } from "../../ts/translation";
+import { register_id_context_component_type } from "./form_row";
+
+interface InputFileProps extends Omit<JSX.InputHTMLAttributes<HTMLInputElement>, "id" | "type" | "onInput" | "accept"> {
+    idContext?: Context<string>
+    onUploadStart?: (f: File) => Promise<boolean>,
+    onUploadSuccess: () => void,
+    onUploadError: (error: string | XMLHttpRequest) => void,
+    upload: string,
+    uploading?: string,
+    url: string,
+    contentType?: string
+    timeout_ms?: number
+    accept?: string
+    progress_override?: number // [0..1]
+}
+
+export function InputFile(props: InputFileProps) {
+    const [file, setFile] = useState<File>(null);
+    const [uploading, setUploading] = useState(false);
+    const [progress, setProgress] = useState(0);
+    const id = !props.idContext ? useId() : useContext(props.idContext);
+
+    const upload = async () => {
+        if(props.onUploadStart && !await props.onUploadStart(file))
+            return;
+
+        setProgress(0);
+        setUploading(true);
+
+        util.upload(props.url, file, true, setProgress, props.contentType, props.timeout_ms)
+            .then(() => {
+                setUploading(false);
+                setProgress(0);
+
+                props.onUploadSuccess();
+            })
+            .catch((xhr: XMLHttpRequest) => {
+                setUploading(false);
+                setProgress(0);
+
+                props.onUploadError(xhr);
+            });
+    }
+
+    return (<>
+        <div class={"input-group " + (props.class ? props.class : "")} hidden={uploading || util.hasValue(props.progress_override)}>
+            <input type="file" class="form-control" accept={props.accept}
+                onChange={(ev) => setFile((ev.target as HTMLInputElement).files[0])}
+                id={id}/>
+            <Button variant="primary" onClick={upload} disabled={file == null}>{props.upload}</Button>
+        </div>
+        <div hidden={!uploading && !util.hasValue(props.progress_override)}>
+            <Progress class="mb-1" progress={util.hasValue(props.progress_override) ? props.progress_override : progress} />
+            <div class="mb-0">{props.uploading ? props.uploading : __("component.input_file.uploading")}</div>
+        </div>
+        </>
+    );
+}
+
+register_id_context_component_type(InputFile);

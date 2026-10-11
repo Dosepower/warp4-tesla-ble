@@ -1,0 +1,1300 @@
+/* esp32-firmware
+ * Copyright (C) 2024 Frederic Henrichs <frederic@tinkerforge.com>
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, write to the
+ * Free Software Foundation, Inc., 59 Temple Place - Suite 330,
+ * Boston, MA 02111-1307, USA.
+ */
+
+//#include "generated/module_available.inc"
+
+import * as util from "../../ts/util";
+import * as API from "../../ts/api";
+import * as options from "../../options";
+import { h, Fragment, ComponentChildren, Component, RefObject } from "preact";
+import { Smartphone } from "react-feather";
+import { ConfigComponent } from "../../ts/components/config_component";
+import { ConfigForm } from "../../ts/components/config_form";
+import { FormRow } from "../../ts/components/form_row";
+import { InputPassword } from "../../ts/components/input_password";
+import { InputText } from "../../ts/components/input_text";
+import { NavbarItem } from "../../ts/components/navbar_item";
+import { SubPage } from "../../ts/components/sub_page";
+import { Switch } from "../../ts/components/switch";
+import { InputHost } from "../../ts/components/input_host";
+import { __ } from "../../ts/translation";
+import "./wireguard";
+import { add_user, config_update, register, config } from "./api";
+import { ConnectionState } from "./generated/connection_state.enum";
+import { RegistrationState } from "./generated/registration_state.enum";
+import { InputNumber } from "../../ts/components/input_number";
+import { InputSelect } from "../../ts/components/input_select";
+import { ArgonType, hash } from "argon2-browser";
+import { CollapsedSection } from "../../ts/components/collapsed_section";
+import {
+    Button,
+    Collapse,
+    Container,
+    Modal,
+    Row,
+    Spinner,
+} from "react-bootstrap";
+import { Table, TableRow } from "ts/components/table";
+import { useState, useEffect } from "preact/hooks";
+import { StatusSection } from "ts/components/status_section";
+import { IndicatorGroup } from "ts/components/indicator_group";
+import {
+    register_status_provider,
+    ModuleStatus,
+} from "../../ts/status_registry";
+
+export function RemoteAccessNavbar() {
+    return (
+        <NavbarItem
+            name="remote_access"
+            module="remote_access"
+            title={__("remote_access.navbar.remote_access")}
+            symbol={<Smartphone />}
+        />
+    );
+}
+
+interface RemoteAccessStatusState {
+    state: API.getType["remote_access/state"];
+    config: API.getType["remote_access/config"];
+}
+
+export class RemoteAccessStatus extends Component<{}, RemoteAccessStatusState> {
+    constructor() {
+        super();
+
+        util.addApiEventListener("remote_access/state", () => {
+            this.setState({ state: [...API.get("remote_access/state")] });
+        });
+        util.addApiEventListener("remote_access/config", () => {
+            this.setState({ config: API.get("remote_access/config") });
+        });
+    }
+
+    render(props: never, state: RemoteAccessStatusState) {
+        return <StatusSection name="remote_access" />;
+
+        if (!util.render_allowed || !state.config || !state.config.enable) {
+            return <StatusSection name="remote_access" />;
+        }
+
+        const label_muted = state.state[0].last_state_change !== 0 ?
+            __("remote_access.status.label_muted")(util.timestamp_min_to_date(state.state[0].last_state_change / 60, "")) :
+            __("remote_access.status.since_start");
+
+        const active_clients = state.state.slice(1).filter((c) => c.state !== 1).length;
+        const active_btn = active_clients > 0 ? 2 : state.state[0].state - 1;
+
+        return <StatusSection name="remote_access">
+            <FormRow label={__("remote_access.status.remote_access")}
+                label_muted={label_muted}>
+                <IndicatorGroup
+                    style="width: 100%"
+                    class="flex-wrap"
+                    value={active_btn}
+                    items={[
+                        ["danger", __("remote_access.status.disconnected")],
+                        ["success", __("remote_access.status.connected")],
+                        ["success", __("remote_access.status.connected_to_clients")(active_clients)],
+                    ]}/>
+            </FormRow>
+        </StatusSection>;
+    }
+}
+
+interface RemoteAccessState {
+    login_key: string;
+    status_modal_string: ComponentChildren;
+    addUser: {
+        email: string;
+        password: string;
+        auth_token: string;
+        public_key: string;
+        user_id: string;
+        note: string;
+    };
+    removeUsers: number[];
+    pingState: API.getType["remote_access/ping_state"];
+    authMethod: string;
+    invalidFeedback: string;
+    authToken: string;
+}
+
+export class RemoteAccess extends ConfigComponent<
+    "remote_access/config",
+    { status_ref: RefObject<RemoteAccessStatus> },
+    RemoteAccessState
+> {
+    resolve: (arg0?: any) => void;
+    reject: (arg0?: any) => void;
+    constructor() {
+        super(
+            "remote_access/config",
+            () => __("remote_access.script.save_failed"),
+            undefined,
+        );
+
+        this.resolve = undefined;
+        this.reject = undefined;
+        util.addApiEventListener("remote_access/registration_state", () => {
+            if (!this.resolve || !this.reject) {
+                return;
+            }
+            const state = API.get("remote_access/registration_state");
+            if (state.state === RegistrationState.Success) {
+                if (state.message !== "") {
+                    this.resolve(state.message);
+                } else {
+                    this.resolve();
+                }
+                this.resolve = undefined;
+                this.reject = undefined;
+            } else if (state.state === RegistrationState.Error) {
+                this.reject(state.message);
+                this.resolve = undefined;
+                this.reject = undefined;
+            }
+        });
+        util.addApiEventListener("remote_access/ping_state", () => {
+            this.setState({ pingState: API.get("remote_access/ping_state") });
+        });
+        this.setState({
+            status_modal_string: "",
+            removeUsers: [],
+            authMethod: "password",
+            invalidFeedback: "",
+            authToken: "",
+        });
+    }
+
+    async parseAuthorizationToken(authToken: string) {
+        let decodedToken;
+        try {
+            decodedToken = util.decodeBase58(authToken);
+        } catch {
+            throw new Error(__("remote_access.content.token_corrupted"));
+        }
+        const binaryToken = decodedToken.subarray(0, decodedToken.length - 32);
+        const tokenDigest = decodedToken.subarray(binaryToken.length);
+
+        // Use argon2 here since browsers think it's a good idea to block crypto.subtle due to insecure contexts
+        const calculatedDigest = await hash({
+            pass: binaryToken,
+            salt: new Uint8Array(8),
+            time: 2,
+            mem: 19 * 1024,
+            hashLen: 32,
+            parallelism: 1,
+            type: ArgonType.Argon2id,
+        });
+        if (
+            !util.compareArrays(
+                Array.from(calculatedDigest.hash),
+                Array.from(tokenDigest),
+            )
+        ) {
+            throw new Error(__("remote_access.content.token_corrupted"));
+        }
+
+        // Magic number explanation: https://github.com/Tinkerforge/esp32-remote-access/blob/main/data_type_definitions.md
+        const token = btoa(String.fromCharCode(...binaryToken.slice(0, 32)));
+        const decoder = new TextDecoder();
+        const uuid = decoder.decode(binaryToken.slice(32, 32 + 36));
+        const pubKey = btoa(
+            String.fromCharCode(...binaryToken.slice(32 + 36, 32 + 36 + 32)),
+        );
+        const email = decoder.decode(binaryToken.slice(32 + 36 + 32));
+
+        if (this.checkUserExisting(email, uuid)) {
+            throw new Error(__("remote_access.content.user_exists"));
+        }
+        return {
+            token,
+            uuid,
+            pubKey,
+            email,
+        };
+    }
+
+    async get_login_salt(
+        cfg: util.NoExtraProperties<
+            API.getType["remote_access/register"]["config"]
+        >,
+    ) {
+        this.setState({
+            status_modal_string: __("remote_access.content.prepare_login"),
+        });
+        const getLoginSaltPromise: Promise<string> = new Promise(
+            (resolve, reject) => {
+                this.resolve = resolve;
+                this.reject = reject;
+            },
+        );
+        await API.call("remote_access/get_login_salt", cfg, () =>
+            __("remote_access.script.save_failed"),
+        );
+
+        const bs64LoginSalt = await getLoginSaltPromise;
+        const encodedString =
+            "data:application/octet-stream;base64," + bs64LoginSalt;
+        const res = await fetch(encodedString);
+
+        return new Uint8Array(await res.arrayBuffer());
+    }
+
+    async get_secret_salt(
+        cfg: util.NoExtraProperties<
+            API.getType["remote_access/register"]["config"]
+        >,
+    ) {
+        this.setState({
+            status_modal_string: __("remote_access.content.prepare_encryption"),
+        });
+        const getSecretPromise: Promise<string> = new Promise(
+            (resolve, reject) => {
+                this.resolve = resolve;
+                this.reject = reject;
+            },
+        );
+        await API.call("remote_access/get_secret_salt", cfg, () =>
+            __("remote_access.script.save_failed"),
+        );
+        const bs64Secret = await getSecretPromise;
+        const encodedString =
+            "data:application/octet-stream;base64," + bs64Secret;
+        const res = await fetch(encodedString);
+
+        return new Uint8Array(await res.arrayBuffer());
+    }
+
+    login(data: util.NoExtraProperties<API.getType["remote_access/register"]>) {
+        this.setState({
+            status_modal_string: __("remote_access.content.logging_in"),
+        });
+        const loginPromise: Promise<void> = new Promise((resolve, reject) => {
+            this.resolve = resolve;
+            this.reject = reject;
+        });
+
+        API.call("remote_access/login", data, () =>
+            __("remote_access.script.save_failed"),
+        );
+        return loginPromise;
+    }
+
+    async runRegistration(
+        cfg: util.NoExtraProperties<API.getType["remote_access/register"]>,
+    ) {
+        this.setState({
+            status_modal_string: __("remote_access.content.registration"),
+        });
+        const registrationPromise: Promise<void> = new Promise(
+            (resolve, reject) => {
+                this.resolve = resolve;
+                this.reject = reject;
+            },
+        );
+
+        await API.call("remote_access/register", cfg, () =>
+            __("remote_access.script.save_failed"),
+        );
+        await registrationPromise;
+
+        this.setState({ status_modal_string: "" });
+    }
+
+    async registerCharger(
+        cfg: util.NoExtraProperties<
+            API.getType["remote_access/register"]["config"]
+        >,
+    ) {
+        if (!cfg.enable) {
+            const registration_data: util.NoExtraProperties<
+                API.getType["remote_access/register"]
+            > = {
+                config: cfg,
+                note: "",
+                login_key: "",
+                secret_key: "",
+                mgmt_charger_public: "",
+                mgmt_charger_private: "",
+                mgmt_psk: "",
+                keys: [],
+            };
+
+            await API.call(
+                "remote_access/register",
+                registration_data,
+                () => __("remote_access.script.save_failed"),
+                undefined,
+                10000,
+            );
+            return;
+        }
+
+        let secret_key_string = undefined;
+        if (this.state.addUser.auth_token === "") {
+            let loginSalt: Uint8Array;
+            try {
+                loginSalt = await this.get_login_salt(cfg);
+            } catch (err) {
+                console.error(err);
+
+                // scrape the status code from the error message and only display wrong username or password in case it
+                // really is an authorization error.
+                const errString = err as string;
+                const errCode = errString.substring(
+                    errString.lastIndexOf(" ") + 1,
+                );
+                if (errCode === "400") {
+                    util.add_alert(
+                        "registration",
+                        "danger",
+                        () => __("remote_access.content.login_failed"),
+                        () => __("remote_access.content.wrong_credentials"),
+                    );
+                } else if (errCode === "10") {
+                    util.add_alert(
+                        "registration",
+                        "danger",
+                        () => __("remote_access.script.http_client_error_10"),
+                        () => "",
+                    );
+                } else {
+                    util.add_alert(
+                        "registration",
+                        "danger",
+                        () => __("remote_access.content.login_failed"),
+                        () => errString,
+                    );
+                }
+                this.setState({ status_modal_string: "" });
+                this.setState({ status_modal_string: "" });
+                return;
+            }
+
+            const loginHash = await hash({
+                pass: this.state.addUser.password,
+                salt: loginSalt,
+                time: 2,
+                mem: 19 * 1024,
+                hashLen: 24,
+                parallelism: 1,
+                type: ArgonType.Argon2id,
+            });
+            const loginKey = await util.blobToBase64(
+                new Blob([loginHash.hash]),
+            );
+
+            try {
+                await this.login({
+                    config: cfg,
+                    note: "",
+                    login_key: loginKey,
+                    secret_key: "",
+                    mgmt_charger_public: "",
+                    mgmt_charger_private: "",
+                    mgmt_psk: "",
+                    keys: [],
+                });
+            } catch (err) {
+                console.error(`Failed to login: ${err}`);
+
+                // scrape the status code from the error message and only display wrong username or password in case it
+                // really is an authorization error.
+                const errString = err as string;
+                const errCode = errString.substring(
+                    errString.lastIndexOf(" ") + 1,
+                );
+                if (errCode === "401") {
+                    util.add_alert(
+                        "registration",
+                        "danger",
+                        () => __("remote_access.content.login_failed"),
+                        () => __("remote_access.content.wrong_credentials"),
+                    );
+                } else if (errCode === "10") {
+                    util.add_alert(
+                        "registration",
+                        "danger",
+                        () => __("remote_access.script.http_client_error_10"),
+                        () => "",
+                    );
+                } else {
+                    util.add_alert(
+                        "registration",
+                        "danger",
+                        () => __("remote_access.content.login_failed"),
+                        () => errString,
+                    );
+                }
+                this.setState({ status_modal_string: "" });
+                return;
+            }
+
+            let secretSalt: Uint8Array;
+            try {
+                secretSalt = await this.get_secret_salt(cfg);
+            } catch (err) {
+                console.error(`Failed to get secret salt: ${err}`);
+                util.add_alert(
+                    "registration",
+                    "danger",
+                    () => "Failed to get secret-salt:",
+                    () => err,
+                );
+                this.setState({ status_modal_string: "" });
+                return;
+            }
+
+            const secret_key = await hash({
+                pass: this.state.addUser.password,
+                salt: secretSalt,
+                // Takes about 1.5 seconds on a Nexus 4
+                time: 2, // the number of iterations
+                mem: 19 * 1024, // used memory, in KiB
+                hashLen: 32, // desired hash length
+                parallelism: 1, // desired parallelism (it won't be computed in parallel, however)
+                type: ArgonType.Argon2id,
+            });
+
+            const secret_key_blob = new Blob([secret_key.hash]);
+            secret_key_string = await util.blobToBase64(secret_key_blob);
+        }
+
+        const mg_charger_keypair = (window as any).wireguard.generateKeypair();
+
+        const keys: util.NoExtraProperties<
+            API.getType["remote_access/register"]["keys"]
+        > = [];
+
+        for (const i of util.range(
+            0,
+            options.REMOTE_ACCESS_MAX_KEYS_PER_USER,
+        )) {
+            const charger_keypair = (window as any).wireguard.generateKeypair();
+            const web_keypair = (window as any).wireguard.generateKeypair();
+
+            const psk: string = (
+                window as any
+            ).wireguard.generatePresharedKey();
+
+            keys.push({
+                charger_public: charger_keypair.publicKey,
+                charger_private: charger_keypair.privateKey,
+                web_public: web_keypair.publicKey,
+                web_private: web_keypair.privateKey,
+                psk: psk,
+            });
+        }
+
+        const psk: string = (window as any).wireguard.generatePresharedKey();
+
+        let registration_data: register;
+        if (this.state.addUser.auth_token === "") {
+            registration_data = {
+                config: cfg,
+                note: this.state.addUser.note,
+                login_key: this.state.login_key,
+                secret_key: secret_key_string,
+                mgmt_charger_public: mg_charger_keypair.publicKey,
+                mgmt_charger_private: mg_charger_keypair.privateKey,
+                mgmt_psk: psk,
+                keys: keys,
+            };
+        } else {
+            registration_data = {
+                config: cfg,
+                note: this.state.addUser.note,
+                auth_token: this.state.addUser.auth_token,
+                public_key: this.state.addUser.public_key,
+                user_uuid: this.state.addUser.user_id,
+                mgmt_charger_private: mg_charger_keypair.privateKey,
+                mgmt_charger_public: mg_charger_keypair.publicKey,
+                mgmt_psk: psk,
+                keys: keys,
+            };
+        }
+
+        try {
+            await this.runRegistration(registration_data);
+            this.setState({ enable: true });
+        } catch (err) {
+            const errCode = err.substring(err.lastIndexOf(" ") + 1);
+            if (errCode === "10") {
+                util.add_alert(
+                    "registration",
+                    "danger",
+                    () => __("remote_access.script.http_client_error_10"),
+                    () => "",
+                );
+            } else {
+                util.add_alert(
+                    "registration",
+                    "danger",
+                    () => "Failed to register",
+                    () => err,
+                );
+            }
+            this.setState({ status_modal_string: "" });
+        }
+    }
+    async runAddUser(user: add_user) {
+        this.setState({
+            status_modal_string: __("remote_access.content.registration"),
+        });
+        const registrationPromise: Promise<void> = new Promise(
+            (resolve, reject) => {
+                this.resolve = resolve;
+                this.reject = reject;
+            },
+        );
+
+        await API.call("remote_access/add_user", user, () =>
+            __("remote_access.script.save_failed"),
+        );
+        await registrationPromise;
+
+        this.setState({ status_modal_string: "" });
+    }
+
+    async addUser() {
+        const cfg: util.NoExtraProperties<
+            API.getType["remote_access/register"]["config"]
+        > = {
+            enable: this.state.enable,
+            relay_host: this.state.relay_host,
+            relay_port: this.state.relay_port,
+            email: this.state.addUser.email,
+            cert_id: this.state.cert_id,
+            mtu: this.state.mtu,
+        };
+
+        let secret_key_string = undefined;
+        let loginKey = undefined;
+        if (this.state.addUser.auth_token === "") {
+            let loginSalt: Uint8Array;
+            try {
+                loginSalt = await this.get_login_salt(cfg);
+            } catch (err) {
+                console.error(err);
+                util.add_alert(
+                    "registration",
+                    "danger",
+                    () => "Failed to login:",
+                    () => "Wrong user or password",
+                );
+                this.setState({ status_modal_string: "" });
+                return;
+            }
+
+            const loginHash = await hash({
+                pass: this.state.addUser.password,
+                salt: loginSalt,
+                time: 2,
+                mem: 19 * 1024,
+                hashLen: 24,
+                parallelism: 1,
+                type: ArgonType.Argon2id,
+            });
+            loginKey = await util.blobToBase64(new Blob([loginHash.hash]));
+
+            try {
+                await this.login({
+                    config: cfg,
+                    login_key: loginKey,
+                    note: "",
+                    secret_key: "",
+                    mgmt_charger_public: "",
+                    mgmt_charger_private: "",
+                    mgmt_psk: "",
+                    keys: [],
+                });
+            } catch (err) {
+                console.error(`Failed to login: ${err}`);
+
+                // scrape the status code from the error message and only display wrong username or password in case it
+                // really is an authorization error.
+                const errString = err as string;
+                const errCode = errString.substring(
+                    errString.lastIndexOf(" ") + 1,
+                );
+                if (errCode === "401") {
+                    util.add_alert(
+                        "registration",
+                        "danger",
+                        () => __("remote_access.content.login_failed"),
+                        () => __("remote_access.content.wrong_credentials"),
+                    );
+                } else if (errCode === "10") {
+                    util.add_alert(
+                        "registration",
+                        "danger",
+                        () => __("remote_access.script.http_client_error_10"),
+                        () => "",
+                    );
+                } else {
+                    util.add_alert(
+                        "registration",
+                        "danger",
+                        () => __("remote_access.content.login_failed"),
+                        () => errString,
+                    );
+                }
+                this.setState({ status_modal_string: "" });
+                return;
+            }
+
+            let secretSalt: Uint8Array;
+            try {
+                secretSalt = await this.get_secret_salt(cfg);
+            } catch (err) {
+                console.error(`Failed to get secret salt: ${err}`);
+                util.add_alert(
+                    "registration",
+                    "danger",
+                    () => "Failed to get secret-salt:",
+                    err,
+                );
+                this.setState({ status_modal_string: "" });
+                return;
+            }
+            const secret_key = await hash({
+                pass: this.state.addUser.password,
+                salt: secretSalt,
+                // Takes about 1.5 seconds on a Nexus 4
+                time: 2, // the number of iterations
+                mem: 19 * 1024, // used memory, in KiB
+                hashLen: 32, // desired hash length
+                parallelism: 1, // desired parallelism (it won't be computed in parallel, however)
+                type: ArgonType.Argon2id,
+            });
+
+            const secret_key_blob = new Blob([secret_key.hash]);
+            secret_key_string = await util.blobToBase64(secret_key_blob);
+        }
+
+        const keys: util.NoExtraProperties<
+            API.getType["remote_access/register"]["keys"]
+        > = [];
+
+        for (const i of util.range(
+            0,
+            options.REMOTE_ACCESS_MAX_KEYS_PER_USER,
+        )) {
+            const charger_keypair = (window as any).wireguard.generateKeypair();
+            const web_keypair = (window as any).wireguard.generateKeypair();
+
+            const psk: string = (
+                window as any
+            ).wireguard.generatePresharedKey();
+
+            keys.push({
+                charger_public: charger_keypair.publicKey,
+                charger_private: charger_keypair.privateKey,
+                web_public: web_keypair.publicKey,
+                web_private: web_keypair.privateKey,
+                psk: psk,
+            });
+        }
+
+        let add_user_data: add_user;
+        if (this.state.addUser.auth_token === "") {
+            add_user_data = {
+                secret_key: secret_key_string,
+                login_key: loginKey,
+                note: this.state.addUser.note,
+                email: this.state.addUser.email,
+                wg_keys: keys,
+            };
+        } else {
+            add_user_data = {
+                auth_token: this.state.addUser.auth_token,
+                public_key: this.state.addUser.public_key,
+                user_uuid: this.state.addUser.user_id,
+                note: this.state.addUser.note,
+                email: this.state.addUser.email,
+                wg_keys: keys,
+            };
+        }
+
+        try {
+            await this.runAddUser(add_user_data);
+        } catch (err) {
+            const errCode = err.substring(err.lastIndexOf(" ") + 1);
+            if (errCode === "10") {
+                util.add_alert(
+                    "registration",
+                    "danger",
+                    () => __("remote_access.script.http_client_error_10"),
+                    () => "",
+                );
+            } else {
+                util.add_alert(
+                    "registration",
+                    "danger",
+                    () => "Failed to register",
+                    () => err,
+                );
+            }
+            this.setState({ status_modal_string: "" });
+        }
+    }
+
+    override async sendSave(
+        t: "remote_access/config",
+        cfg: config,
+    ): Promise<void> {
+        let enable = cfg.enable;
+
+//#if MODULE_CHARGE_TRACKER_AVAILABLE
+        if (this.state.removeUsers.length > 0) {
+            const chargeTrackerConfig = { ...API.get("charge_tracker/config") };
+            const filteredRemoteUploadConfigs =
+                chargeTrackerConfig.remote_upload_configs.filter(
+                    (config) =>
+                        !this.state.removeUsers.find(
+                            (u) => u == config.user_id,
+                        ),
+                );
+
+            if (
+                filteredRemoteUploadConfigs.length !==
+                chargeTrackerConfig.remote_upload_configs.length
+            ) {
+                chargeTrackerConfig.remote_upload_configs =
+                    filteredRemoteUploadConfigs;
+                API.save("charge_tracker/config", chargeTrackerConfig, () =>
+                    __("remote_access.script.save_failed"),
+                );
+            }
+        }
+//#endif
+
+        for (const id of this.state.removeUsers) {
+            API.call(
+                "remote_access/remove_user",
+                {
+                    id: id,
+                },
+                () => __("remote_access.script.save_failed"),
+            );
+        }
+        if (this.state.users.length === 0) {
+            enable = false;
+        }
+        this.setState({ removeUsers: [] });
+        const config: config_update = {
+            enable: enable,
+            relay_host: this.state.relay_host,
+            relay_port: this.state.relay_port,
+            email: "",
+            cert_id: this.state.cert_id,
+            mtu: this.state.mtu,
+        };
+        API.call("remote_access/config_update", config, () =>
+            __("remote_access.script.save_failed"),
+        );
+    }
+
+    checkUserExisting(email?: string, userId?: string) {
+        if (email === undefined) {
+            email = this.state.addUser.email;
+        }
+        for (const user of this.state.users) {
+            if (
+                user.email.toLowerCase() === email.toLowerCase() ||
+                user.uuid === userId
+            ) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    render() {
+        if (!util.render_allowed()) return <></>;
+
+        // Check if NTP is disabled and remote access is enabled
+        const ntpConfig = API.get("ntp/config");
+        const remoteAccessEnabled = this.state.enable;
+        const ntpEnabled = ntpConfig.enable;
+
+        useEffect(() => {
+            if (remoteAccessEnabled && !ntpEnabled) {
+                util.add_status_alert(
+                    "remote_access_ntp_disabled",
+                    "warning",
+                    () => __("remote_access.status.ntp_not_synced"),
+                    () => __("remote_access.status.ntp_not_synced_text"),
+                );
+            } else {
+                util.remove_status_alert("remote_access_ntp_disabled");
+            }
+        }, [remoteAccessEnabled, ntpEnabled]);
+
+        const cert_config = API.get("certs/state");
+        const cert_items: [string, string][] = [
+            ["-1", __("remote_access.content.not_used")],
+        ];
+        for (const cert of cert_config.certs) {
+            cert_items.push([cert.id.toString(), cert.name]);
+        }
+
+        let users: TableRow[] = [];
+        for (const user of this.state.users) {
+            const row: TableRow = {
+                columnValues: [user.email],
+                onRemoveClick: async () => {
+                    this.setState({
+                        users: this.state.users.filter((u) => u.id != user.id),
+                        removeUsers: this.state.removeUsers.concat(user.id),
+                    });
+                    this.setDirty(true);
+                    return true;
+                },
+            };
+            users.push(row);
+        }
+
+        return (
+            <>
+                <Modal
+                    centered
+                    className="modal-1"
+                    backdropClassName="modal-backdrop-1"
+                    show={this.state.status_modal_string != ""}
+                >
+                    <Modal.Header {...({ closeButton: false } as any)}>
+                        <Modal.Title>
+                            {__("remote_access.content.status_modal_header")}
+                        </Modal.Title>
+                    </Modal.Header>
+                    <Modal.Body>
+                        <Container fluid>
+                            <Row className="justify-content-center mb-3">
+                                <Spinner animation="border" variant="primary" />
+                            </Row>
+                            <Row className="text-center message-box-body">
+                                <div>{this.state.status_modal_string}</div>
+                            </Row>
+                        </Container>
+                    </Modal.Body>
+                </Modal>
+                <SubPage name="remote_access">
+                    <ConfigForm
+                        id="remote_access_config_form"
+                        title={__("remote_access.content.remote_access")}
+                        isDirty={this.isDirty()}
+                        onSave={this.save}
+                        onDirtyChange={this.setDirty}
+                    >
+                        <FormRow label={__("remote_access.content.enable")}>
+                            <Switch
+                                checked={this.state.enable}
+                                desc={__("remote_access.content.enable_desc")(
+                                    this.state.relay_host,
+                                )}
+                                onClick={() => {
+                                    this.setState({
+                                        enable: !this.state.enable,
+                                    });
+                                }}
+                            />
+                        </FormRow>
+                        <FormRow label={__("remote_access.content.user")}>
+                            <Table
+                                columnNames={[
+                                    __("remote_access.content.email"),
+                                ]}
+                                rows={users}
+                                addEnabled={
+                                    users.length <
+                                    options.REMOTE_ACCESS_MAX_USERS
+                                }
+                                addTitle={__("remote_access.content.add_user")}
+                                onAddShow={async () => {
+                                    this.setState({
+                                        addUser: {
+                                            email: "",
+                                            password: "",
+                                            auth_token: "",
+                                            public_key: "",
+                                            note: "",
+                                            user_id: "",
+                                        },
+                                        authMethod: "password",
+                                        invalidFeedback: "",
+                                        authToken: "",
+                                    });
+                                }}
+                                addMessage={__("remote_access.content.user_add_message")(
+                                    users.length,
+                                    options.REMOTE_ACCESS_MAX_USERS,
+                                )}
+                                onAddGetChildren={() => {
+                                    return (
+                                        <>
+                                            <FormRow label={__("remote_access.content.auth_method")}>
+                                                <InputSelect
+                                                    items={[
+                                                        ["password", __("remote_access.content.password")],
+                                                        ["token", __("remote_access.content.auth_token")],
+                                                    ]}
+                                                    value={
+                                                        this.state.authMethod
+                                                    }
+                                                    onValue={(v) => {
+                                                        this.setState({
+                                                            authMethod: v,
+                                                            authToken: "",
+                                                            addUser: {
+                                                                email: "",
+                                                                password: "",
+                                                                auth_token: "",
+                                                                public_key: "",
+                                                                note: "",
+                                                                user_id: "",
+                                                            },
+                                                        });
+                                                    }}
+                                                />
+                                            </FormRow>
+                                            <Collapse in={this.state.authMethod ==="token"}>
+                                                <div>
+                                                    <FormRow label={__("remote_access.content.auth_token")} help={__("remote_access.content.auth_token_help")(this.state.relay_host, this.state.relay_port)}>
+                                                        <InputText
+                                                            required={
+                                                                this.state
+                                                                    .addUser
+                                                                    .password ===
+                                                                ""
+                                                            }
+                                                            class={
+                                                                this.state
+                                                                    .invalidFeedback !==
+                                                                ""
+                                                                    ? "is-invalid"
+                                                                    : undefined
+                                                            }
+                                                            value={
+                                                                this.state
+                                                                    .authToken
+                                                            }
+                                                            invalidFeedback={
+                                                                this.state
+                                                                    .invalidFeedback
+                                                            }
+                                                            onValue={async (
+                                                                v,
+                                                            ) => {
+                                                                this.setState({
+                                                                    authToken:
+                                                                        v,
+                                                                });
+                                                                try {
+                                                                    const parsedToken =
+                                                                        await this.parseAuthorizationToken(
+                                                                            v,
+                                                                        );
+                                                                    this.setState(
+                                                                        {
+                                                                            addUser:
+                                                                                {
+                                                                                    ...this
+                                                                                        .state
+                                                                                        .addUser,
+                                                                                    email: parsedToken.email,
+                                                                                    password:
+                                                                                        "",
+                                                                                    public_key:
+                                                                                        parsedToken.pubKey,
+                                                                                    auth_token:
+                                                                                        parsedToken.token,
+                                                                                    user_id:
+                                                                                        parsedToken.uuid,
+                                                                                },
+                                                                            invalidFeedback:
+                                                                                "",
+                                                                        },
+                                                                    );
+                                                                } catch (e) {
+                                                                    this.setState(
+                                                                        {
+                                                                            invalidFeedback:
+                                                                                e.message,
+                                                                        },
+                                                                    );
+                                                                }
+                                                            }}
+                                                        />
+                                                    </FormRow>
+                                                    <FormRow
+                                                        label={__("remote_access.content.email")}
+                                                    >
+                                                        <InputText
+                                                            value={
+                                                                this.state
+                                                                    .addUser
+                                                                    .email
+                                                            }
+                                                            readonly
+                                                        />
+                                                    </FormRow>
+                                                </div>
+                                            </Collapse>
+                                            <Collapse
+                                                in={
+                                                    this.state.authMethod ===
+                                                    "password"
+                                                }
+                                            >
+                                                <div>
+                                                    <FormRow
+                                                        label={__("remote_access.content.email")}
+                                                    >
+                                                        <InputText
+                                                            value={
+                                                                this.state
+                                                                    .addUser
+                                                                    .email
+                                                            }
+                                                            required={
+                                                                this.state
+                                                                    .addUser
+                                                                    .auth_token ===
+                                                                ""
+                                                            }
+                                                            maxLength={64}
+                                                            class={
+                                                                this.checkUserExisting()
+                                                                    ? "is-invalid"
+                                                                    : undefined
+                                                            }
+                                                            invalidFeedback={__("remote_access.content.user_exists")}
+                                                            onValue={(v) => {
+                                                                this.setState({
+                                                                    addUser: {
+                                                                        ...this
+                                                                            .state
+                                                                            .addUser,
+                                                                        email: v,
+                                                                    },
+                                                                });
+                                                            }}
+                                                        />
+                                                    </FormRow>
+                                                    <FormRow label={__("remote_access.content.password")}>
+                                                        <InputPassword
+                                                            required={
+                                                                this.state
+                                                                    .addUser
+                                                                    .auth_token ===
+                                                                ""
+                                                            }
+                                                            value={
+                                                                this.state
+                                                                    .addUser
+                                                                    .password
+                                                            }
+                                                            // no maxLength: The password is put through argon2id.
+                                                            onValue={(v) => {
+                                                                this.setState({
+                                                                    addUser: {
+                                                                        ...this
+                                                                            .state
+                                                                            .addUser,
+                                                                        password:
+                                                                            v,
+                                                                    },
+                                                                });
+                                                            }}
+                                                            hideClear
+                                                            placeholder=""
+                                                        />
+                                                    </FormRow>
+                                                </div>
+                                            </Collapse>
+                                            <FormRow
+                                                label={__("remote_access.content.note")}
+                                                label_muted={__("remote_access.content.note_muted")(this.state.relay_host)}
+                                            >
+                                                <textarea
+                                                    class="form-control"
+                                                    maxLength={128}
+                                                    style={{ width: "100%" }}
+                                                    value={
+                                                        this.state.addUser.note
+                                                    }
+                                                    onInput={(v) =>
+                                                        this.setState({
+                                                            addUser: {
+                                                                ...this.state
+                                                                    .addUser,
+                                                                note: (
+                                                                    v.target as HTMLInputElement
+                                                                ).value,
+                                                            },
+                                                        })
+                                                    }
+                                                />
+                                            </FormRow>
+                                        </>
+                                    );
+                                }}
+                                onAddSubmit={async () => {
+                                    if (users.length === 0) {
+                                        const config: util.NoExtraProperties<
+                                            API.getType["remote_access/register"]["config"]
+                                        > = {
+                                            enable: true,
+                                            email: this.state.addUser.email,
+                                            relay_host: this.state.relay_host,
+                                            relay_port: this.state.relay_port,
+                                            cert_id: this.state.cert_id,
+                                            mtu: this.state.mtu,
+                                        };
+                                        await this.registerCharger(config);
+                                    } else {
+                                        await this.addUser();
+                                    }
+                                }}
+                            />
+                        </FormRow>
+                        <CollapsedSection heading={__("remote_access.content.advanced_settings")}>
+                            <FormRow label={__("remote_access.content.relay_host")} label_muted={__("remote_access.content.relay_host_muted")}>
+                                <InputHost
+                                    required
+                                    maxLength={64}
+                                    value={this.state.relay_host}
+                                    onValue={(v) =>
+                                        this.setState({ relay_host: v })
+                                    }
+                                />
+                            </FormRow>
+                            <FormRow label={__("remote_access.content.relay_port")}>
+                                <InputNumber
+                                    required
+                                    min={1}
+                                    max={65565}
+                                    value={this.state.relay_port}
+                                    onValue={(v) =>
+                                        this.setState({ relay_port: v })
+                                    }
+                                />
+                            </FormRow>
+                            <FormRow label={__("remote_access.content.cert")}>
+                                <InputSelect
+                                    items={cert_items}
+                                    value={this.state.cert_id}
+                                    onValue={(v) => {
+                                        this.setState({ cert_id: parseInt(v) });
+                                    }}
+                                />
+                            </FormRow>
+                            <FormRow label={__("remote_access.content.mtu")} label_muted={__("remote_access.content.mtu_desc")} >
+                                <InputNumber
+                                    required
+                                    min={576}
+                                    max={1440}
+                                    value={this.state.mtu}
+                                    onValue={(v) => this.setState({ mtu: v })}
+                                />
+                            </FormRow>
+                            <FormRow label={__("remote_access.content.ping")}>
+                                <div class="row g-2">
+                                    <div class="col">
+                                        <Button className="w-100" onClick={() => API.call("remote_access/start_ping", {}, () => __("remote_access.content.start_ping_failed"))}>
+                                            {__("remote_access.content.start_ping")}
+                                        </Button>
+                                    </div>
+                                    <div class="col">
+                                        <Button className="w-100" onClick={() => API.call("remote_access/stop_ping", {}, () =>  __("remote_access.content.stop_ping_failed"))}>
+                                            {__("remote_access.content.stop_ping")}
+                                        </Button>
+                                    </div>
+                                </div>
+                            </FormRow>
+                            <FormRow label={__("remote_access.content.packets_sent")}>
+                                <InputNumber value={this.state.pingState.packets_sent} />
+                            </FormRow>
+                            <FormRow label={__("remote_access.content.packets_received")}>
+                                <InputNumber value={this.state.pingState.packets_received} />
+                            </FormRow>
+                            <FormRow label={__("remote_access.content.time_elapsed")} >
+                                <InputNumber value={Math.floor(this.state.pingState.time_elapsed_ms / 1000)} />
+                            </FormRow>
+                        </CollapsedSection>
+                    </ConfigForm>
+                </SubPage>
+            </>
+        );
+    }
+}
+
+export function pre_init() {}
+
+export function init() {
+    register_status_provider("remote_access", {
+        name: () => __("remote_access.navbar.remote_access"),
+        href: "#remote_access",
+        get_status: () => {
+            const state = API.get("remote_access/state");
+            const config = API.get("remote_access/config");
+
+            if (!config?.enable) {
+                return { status: ModuleStatus.Disabled };
+            }
+
+            if (!state || state.length === 0) {
+                return { status: ModuleStatus.Disabled }; // Or Warning?
+            }
+
+            // state[0] is the main connection state, state[1+] are client connections
+            const main_state = state[0]?.state;
+            const active_clients = state
+                .slice(1)
+                .filter(
+                    (c: any) => c.state !== ConnectionState.Disconnected,
+                ).length;
+
+            if (active_clients > 0) {
+                return {
+                    status: ModuleStatus.Ok,
+                    text: () =>
+                        __("remote_access.status.connected_to_clients")(
+                            active_clients,
+                        ),
+                };
+            } else if (main_state === ConnectionState.Connected) {
+                // connected to relay but no clients
+                return {
+                    status: ModuleStatus.Ok,
+                    text: () => __("remote_access.status.connected"),
+                };
+            } else {
+                // disconnected
+                return {
+                    status: ModuleStatus.Error,
+                    text: () => __("remote_access.status.disconnected"),
+                };
+            }
+        },
+    });
+}

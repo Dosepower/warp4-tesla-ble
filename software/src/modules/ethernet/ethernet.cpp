@@ -1,0 +1,881 @@
+/* esp32-firmware
+ * Copyright (C) 2020-2021 Erik Fleckstein <erik@tinkerforge.com>
+ * Copyright (C) 2026 Olaf Lüke <olaf@tinkerforge.com>
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, write to the
+ * Free Software Foundation, Inc., 59 Temple Place - Suite 330,
+ * Boston, MA 02111-1307, USA.
+ */
+
+#include "ethernet.h"
+
+// #define ETH_PHY_TYPE  ETH_PHY_OPENETH
+// #define ETH_PHY_ADDR  1
+#define ETH_PHY_TYPE  ETH_PHY_KSZ8081
+#define ETH_PHY_ADDR  0
+#define ETH_PHY_MDC   23
+#define ETH_PHY_MDIO  18
+#define ETH_PHY_POWER 5
+#define ETH_CLK_MODE  ETH_CLOCK_GPIO0_IN
+
+#include "generated/module_dependencies.h"
+
+#include <ETH.h>
+#include <esp_netif.h>
+#include <lwip/tcpip.h>
+
+#include "event_log_prefix.h"
+
+#include "build.h"
+#include "options.h"
+#include "tools/freertos.h"
+#include "tools/malloc.h"
+#include "tools/net.h"
+#include "tools/printf.h"
+
+#include "gcc_warnings.h"
+
+constexpr size_t EMAC_TASK_STACK_SIZE = 2560;
+
+static constexpr uint8_t IGMP_MAC[6] = {0x01, 0x00, 0x5e, 0x00, 0x00, 0x01};
+
+// Generation counter for async ETH.begin() tasks. Incremented on every
+// enable or disable so that stale tasks from a prior enable/disable cycle
+// see a mismatch and skip the ETH.begin() call.
+static std::atomic<uint32_t> eth_begin_generation{0};
+
+void Ethernet::pre_setup()
+{
+    ip6_prototype = Config::Object({
+        {"addr",  Config::Str("", 3, INET6_ADDRSTRLEN - 1)},
+        {"flags", Config::Uint16(0)},
+    });
+
+    config = ConfigRoot{Config::Object({
+        {"enable_ethernet", Config::Bool(true)},
+        {"ip",      Config::Str("0.0.0.0", 7, 15)},
+        {"gateway", Config::Str("0.0.0.0", 7, 15)},
+        {"subnet",  Config::Str("0.0.0.0", 7, 15)},
+        {"dns",     Config::Str("0.0.0.0", 7, 15)},
+        {"dns2",    Config::Str("0.0.0.0", 7, 15)},
+        {"enable_ipv6", Config::Bool(false)},
+        {"ip6",     Config::Array({}, &ip6_prototype, 0, MAX_STATIC_IPV6_ADDRESSES)},
+        //{"dns6",    Config::Str("::", 2, INET6_ADDRSTRLEN - 1)},
+    }), [this](Config &update, ConfigSource source) -> String {
+        IPAddress ip_addr, subnet_mask, gateway_addr, unused;
+
+        if (!ip_addr.fromString(update.get("ip")->asEphemeralCStr()))
+            return "Failed to parse \"ip\": Expected format is dotted decimal, e.g. 10.0.0.1";
+
+        if (!gateway_addr.fromString(update.get("gateway")->asEphemeralCStr()))
+            return "Failed to parse \"gateway\": Expected format is dotted decimal, e.g. 10.0.0.1";
+
+        if (!subnet_mask.fromString(update.get("subnet")->asEphemeralCStr()))
+            return "Failed to parse \"subnet\": Expected format is dotted decimal, e.g. 255.255.255.0";
+
+        if (!is_valid_subnet_mask(subnet_mask))
+            return "Invalid subnet mask passed: Expected format is 255.255.255.0";
+
+        if (ip_addr != IPAddress(0, 0, 0, 0) && is_in_subnet(ip_addr, subnet_mask, IPAddress(127, 0, 0, 1)))
+            return "Invalid IP or subnet mask passed: This configuration would route localhost (127.0.0.1) to the ethernet interface.";
+
+        if (gateway_addr != IPAddress(0, 0, 0, 0) && !is_in_subnet(ip_addr, subnet_mask, gateway_addr))
+            return "Invalid IP, subnet mask, or gateway passed: IP and gateway are not in the same network according to the subnet mask.";
+
+        if (!unused.fromString(update.get("dns")->asEphemeralCStr()))
+            return "Failed to parse \"dns\": Expected format is dotted decimal, e.g. 10.0.0.1";
+
+        if (!unused.fromString(update.get("dns2")->asEphemeralCStr()))
+            return "Failed to parse \"dns2\": Expected format is dotted decimal, e.g. 10.0.0.1";
+
+        if (!update.get("enable_ethernet")->asBool()) {
+#if MODULE_WIFI_AVAILABLE()
+            if (!wifi.is_sta_enabled_in_config() && !wifi.is_ap_enabled_in_config()) {
+                return "Cannot disable Ethernet: No other network interface is enabled. Enable WiFi STA or WiFi AP first.";
+            }
+#else
+            return "Cannot disable Ethernet: No other network interface is available.";
+#endif
+        }
+
+        if (source != ConfigSource::File) {
+            // clang-format off
+            bool is_reenabled =
+                eth_started &&
+                update.get("enable_ethernet")->asBool() &&
+                update.get("ip")->asString() == config.get("ip")->asString() &&
+                update.get("gateway")->asString() == config.get("gateway")->asString() &&
+                update.get("subnet")->asString() == config.get("subnet")->asString() &&
+                update.get("dns")->asString() == config.get("dns")->asString() &&
+                update.get("dns2")->asString() == config.get("dns2")->asString() &&
+                update.get("enable_ipv6")->asBool() == config.get("enable_ipv6")->asBool();
+            // clang-format on
+
+            if (is_reenabled) {
+                const Config *update_ip6 = static_cast<const Config *>(update.get("ip6"));
+                const Config *config_ip6 = static_cast<const Config *>(config.get("ip6"));
+                const size_t update_ip6_count = update_ip6->count();
+                const size_t config_ip6_count = config_ip6->count();
+
+                if (update_ip6_count != config_ip6_count) {
+                    is_reenabled = false;
+                } else {
+                    for (size_t i = 0; i < update_ip6_count; i++) {
+                        const Config *update_ip6_elem = static_cast<const Config *>(update_ip6->get(i));
+                        const Config *config_ip6_elem = static_cast<const Config *>(config_ip6->get(i));
+
+                        if (update_ip6_elem->get("addr" )->asString() != config_ip6_elem->get("addr" )->asString() ||
+                            update_ip6_elem->get("flags")->asUint16() != config_ip6_elem->get("flags")->asUint16()) {
+
+                            is_reenabled = false;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if (is_reenabled) {
+                task_scheduler.scheduleOnce([this]() {
+                    task_scheduler.cancel(revert_countdown_task_id);
+                    state.get("disable_countdown")->updateUint(0);
+                });
+            } else {
+                task_scheduler.scheduleOnce([this]() {
+                    this->apply_config();
+                });
+            }
+        }
+
+        return "";
+    }};
+
+    state = Config::Object({
+        {"connection_state",  Config::Enum(EthernetState::NotConfigured)},
+        {"connection_start",  Config::Uptime()},
+        {"connection_end",    Config::Uptime()},
+        {"mac",               Config::Str("", 0, 17)},
+        {"ip",                Config::Str("0.0.0.0", 7, 15)},
+        {"subnet",            Config::Str("0.0.0.0", 7, 15)},
+        {"ip6",               Config::Array({}, &ip6_prototype, 0, CONFIG_LWIP_IPV6_NUM_ADDRESSES)},
+        {"full_duplex",       Config::Bool(false)},
+        {"link_speed",        Config::Uint8(0)},
+        {"disable_countdown", Config::Uint8(0)},
+    });
+}
+
+void Ethernet::print_con_duration()
+{
+    if (runtime_data->was_connected) {
+        runtime_data->was_connected = false;
+        const uint64_t connected_for_s = (now_us() - runtime_data->last_connected).to<seconds_t>().as<uint64_t>();
+        logger.printfln("Was connected for %llu seconds.", connected_for_s);
+    }
+}
+
+static void eth_async_begin(void *arg)
+{
+    const uint32_t my_generation = reinterpret_cast<uintptr_t>(arg);
+
+    if (eth_begin_generation.load() == my_generation) {
+        if (!ETH.begin()) {
+            logger.printfln("Async start failed. PHY broken?");
+        }
+    } else {
+        logger.printfln("Async start cancelled (generation mismatch: mine=%lu, current=%lu).", my_generation, eth_begin_generation.load());
+    }
+
+    vTaskDelete(NULL); // exit RTOS task
+}
+
+void Ethernet::setup()
+{
+    api.addFeature("ethernet");
+    api.restorePersistentConfig("ethernet/config", &config);
+
+    initialized = true;
+
+    runtime_data = static_cast<decltype(runtime_data)>(malloc_psram_or_dram(sizeof(*runtime_data)));
+
+    if (!runtime_data) {
+        logger.printfln("Failed to allocate memory for Ethernet runtime data");
+        return;
+    }
+
+    // Null the runtime data on allocation so all flags have a defined initial state.
+    // In particular ipv6_enabled and connection_state are read by the
+    // ARDUINO_EVENT_ETH_START handler and the deferred apply_ipv6_config() task
+    // before this change the uninitialized memory caused not initializing IPv6 on boot
+    memset(runtime_data, 0, sizeof(*runtime_data));
+
+    Network.begin();
+
+    Network.onEvent([this](arduino_event_id_t /*event*/, arduino_event_info_t /*info*/) {
+            const uint32_t t_startup = (now_us() - this->runtime_data->last_connected).as<uint32_t>() / 1000;
+            logger.printfln("Started after %lums", t_startup);
+
+#if MODULE_NETWORK_AVAILABLE()
+            const String &hostname = network.get_hostname();
+#else
+            const String hostname = esp32_common.get_default_name();
+#endif
+            ETH.setHostname(hostname.c_str()); // Underlying API creates a copy.
+
+            // Manually add a MAC filter to accept IGMP packets because lwIP is bugged and doesn't do it.
+            esp_err_t err = esp_eth_ioctl(ETH.handle(), ETH_CMD_ADD_MAC_FILTER, const_cast<uint8_t *>(IGMP_MAC));
+
+            if (err != ESP_OK) {
+                logger.printfln("Setting IGMP filter failed: %s (%04X)", esp_err_to_name(err), static_cast<unsigned>(err));
+            }
+
+            if (this->runtime_data->ipv6_enabled) {
+                // Enable "pass all multicast" mode on the ESP32 EMAC hardware.
+                // By default, the EMAC's frame filter register (gmacff.pam) is 0, meaning multicast
+                // frames are only received if their destination MAC matches a registered filter entry.
+                // IPv6 NDP relies on receiving Router Advertisements sent to the all-nodes multicast
+                // address ff02::1 (MAC 33:33:00:00:00:01) and solicited-node multicast addresses.
+                // Neither the ESP-IDF lwIP integration nor the Arduino framework registers these
+                // multicast MACs with the EMAC hardware (the lwIP netif's mld_mac_filter callback is
+                // not set for Ethernet interfaces). WiFi is unaffected because the WiFi driver passes
+                // all multicast frames regardless.
+                // Enabling pass-all-multicast allows the EMAC to receive all multicast-addressed frames
+                // (both IPv4 IGMP and IPv6 MLD/NDP), which is required for SLAAC to work.
+                bool enable = true;
+                err = esp_eth_ioctl(ETH.handle(), ETH_CMD_S_ALL_MULTICAST, &enable);
+                if (err != ESP_OK) {
+                    logger.printfln("Enabling all-multicast mode failed: %s (%04X)", esp_err_to_name(err), static_cast<unsigned>(err));
+                }
+            }
+
+            this->runtime_data->connection_state = EthernetState::NotConnected;
+
+            task_scheduler.scheduleOnce([this]() {
+                uint8_t mac[NETIF_MAX_HWADDR_LEN];
+                if (ETH.macAddress(mac) == nullptr) {
+                    memset(mac, 0, std::size(mac));
+                }
+
+                char mac_str[18];
+                const size_t len = snprintf_u(mac_str, std::size(mac_str), "%02X:%02X:%02X:%02X:%02X:%02X", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+
+                state.get("mac")->updateString(String{mac_str, len});
+                state.get("connection_state")->updateEnum(this->runtime_data->connection_state);
+
+#if MODULE_DEBUG_AVAILABLE()
+                debug.register_task("emac_rx", EMAC_TASK_STACK_SIZE);
+#endif
+            });
+        },
+        ARDUINO_EVENT_ETH_START);
+
+    Network.onEvent([this](arduino_event_id_t /*event*/, arduino_event_info_t /*info*/) {
+            const uint16_t link_speed = ETH.linkSpeed();
+            if (link_speed < 100) {
+                // A 10MBit link sometimes chokes on link-up and won't be able to send any data.
+                // It usually needs at least an additional 19ms to settle before configuring an IP.
+                // Give it 40ms to be safe.
+                delay(40);
+            }
+
+            this->apply_ip_to_interface();
+
+            const bool full_duplex = ETH.fullDuplex();
+
+            logger.printfln("Connected: %hu Mbps, %s Duplex", link_speed, full_duplex ? "Full" : "Half");
+
+            this->runtime_data->connection_state = EthernetState::Connecting;
+
+            task_scheduler.scheduleOnce([this, link_speed, full_duplex]() {
+                state.get("connection_state")->updateEnum(this->runtime_data->connection_state);
+                state.get("link_speed")->updateUint(link_speed);
+                state.get("full_duplex")->updateBool(full_duplex);
+
+#if MODULE_WIFI_AVAILABLE()
+                if (wifi.is_sta_enabled()) {
+                    logger.printfln("Warning: Ethernet is connected and WiFi station is enabled at the same time.");
+                    logger.printfln_continue("     This can lead to connectivity issues and is not recommended.");
+                }
+#endif
+            });
+        },
+        ARDUINO_EVENT_ETH_CONNECTED);
+
+    Network.onEvent([this](arduino_event_id_t /*event*/, arduino_event_info_t info) {
+            struct closure_t {
+                aligned_storage<Task> task_buf;
+                micros_t now;
+                uint32_t gateway;
+                uint32_t subnet;
+                char ip_str[INET_ADDRSTRLEN];
+                bool ip_changed;
+                bool was_already_connected;
+            };
+
+            closure_t *closure = new closure_t;
+
+            const esp_netif_ip_info_t &ip_info = info.got_ip.ip_info;
+            tf_ip4addr_ntoa(&ip_info.ip, closure->ip_str, ARRAY_SIZE(closure->ip_str));
+            char gw_str[INET_ADDRSTRLEN];
+            tf_ip4addr_ntoa(&ip_info.gw, gw_str, ARRAY_SIZE(gw_str));
+            closure->gateway = ip_info.gw.addr;
+            closure->subnet = ip_info.netmask.addr;
+
+            logger.printfln("Got IP address: %s/%i, GW %s", closure->ip_str, tf_ip4addr_mask2cidr(ip4_addr_t{closure->subnet}), gw_str);
+
+            closure->ip_changed = info.got_ip.ip_changed;
+            closure->was_already_connected = this->runtime_data->connection_state == EthernetState::Connected;
+
+            closure->now = now_us();
+            this->runtime_data->last_connected = closure->now;
+            this->runtime_data->connection_state = EthernetState::Connected;
+            this->runtime_data->was_connected = true;
+
+            tcpip_callback([](void *param) {
+                ETH.setRoutePrio(reinterpret_cast<int>(param)); // Prefer Ethernet over WiFi, which has priority 100, if a gateway is configured.
+                esp_netif_set_default_netif(NULL); // trigger immediate re-selection of default interface
+            }, reinterpret_cast<void *>(closure->gateway == 0 ? 50 : 110));
+
+            // Transfer ownership, will free the whole closure.
+            task_scheduler.scheduleOnceNoAlloc(&closure->task_buf, true, [this, closure]() {
+                char subnet_str[INET_ADDRSTRLEN];
+                tf_ip4addr_ntoa(&closure->subnet, subnet_str, ARRAY_SIZE(subnet_str));
+
+                state.get("ip")->updateString(closure->ip_str);
+                state.get("subnet")->updateString(subnet_str);
+
+                if (closure->was_already_connected && closure->ip_changed) {
+                    // When the IP changes while already connected (e.g. static IP reconfigured
+                    // at runtime), ESP-IDF only fires GOT_IP with ip_changed=true but no LOST_IP.
+                    // Set Connecting now so the event system's next polling cycle propagates it to
+                    // network.cpp (which fires on_network_connected(false), making modules release
+                    // old connections).
+                    state.get("connection_state")->updateEnum(EthernetState::Connecting);
+                    task_scheduler.cancel(this->reconnect_task_id);
+                    this->reconnect_task_id = task_scheduler.scheduleOnce(
+                        [this, now = closure->now]() {
+                            state.get("connection_state")->updateEnum(this->runtime_data->connection_state);
+                            state.get("connection_start")->updateUptime(now);
+                        },
+                        1_s);
+                } else {
+                    state.get("connection_state")->updateEnum(this->runtime_data->connection_state);
+                    state.get("connection_start")->updateUptime(closure->now);
+                }
+            });
+        },
+        ARDUINO_EVENT_ETH_GOT_IP);
+
+    Network.onEvent([this](arduino_event_id_t /*event*/, arduino_event_info_t info) {
+            struct closure_t {
+                aligned_storage<Task> task_buf;
+                esp_ip6_addr_t ip6;
+            };
+
+            closure_t *closure = new closure_t;
+
+            memcpy(&closure->ip6, &info.got_ip6.ip6_info.ip, sizeof(closure->ip6));
+
+            // Transfer ownership, will free the whole closure.
+            task_scheduler.scheduleOnceNoAlloc(&closure->task_buf, true, [this, closure]() {
+                const esp_ip6_addr_t *ip6 = &closure->ip6;
+
+                char ip6_str[INET6_ADDRSTRLEN];
+                tf_ip6addr_ntoa(ip6, ip6_str, std::size(ip6_str));
+
+                const esp_ip6_addr_type_t type = esp_netif_ip6_get_addr_type(const_cast<esp_ip6_addr_t *>(ip6)); // const_cast is safe because the called function will only read the input.
+
+                uint16_t type_flags = 0;
+                const char *type_msg;
+
+                switch (type) {
+                    case ESP_IP6_ADDR_IS_GLOBAL: {
+                        type_flags |= IPV6_ADDR_FLAG_GLOBAL;
+                        type_msg = "global";
+                        break;
+                    }
+                    case ESP_IP6_ADDR_IS_LINK_LOCAL: {
+                        type_flags |= IPV6_ADDR_FLAG_LINK_LOCAL;
+                        type_msg = "link-local";
+                        break;
+                    }
+                    case ESP_IP6_ADDR_IS_SITE_LOCAL: {
+                        type_flags |= IPV6_ADDR_FLAG_SITE_LOCAL;
+                        type_msg = "site local";
+                        break;
+                    }
+                    case ESP_IP6_ADDR_IS_UNIQUE_LOCAL: {
+                        type_flags |= IPV6_ADDR_FLAG_UNIQUE_LOCAL;
+                        type_msg = "unique local";
+                        break;
+                    }
+                    case ESP_IP6_ADDR_IS_IPV4_MAPPED_IPV6:
+                        type_flags |= IPV6_ADDR_FLAG_IPV4_MAPPED_IPV6;
+                        type_msg = "IPv4-mapped";
+                        break;
+                    case ESP_IP6_ADDR_IS_UNKNOWN:
+                    default: {
+                        type_msg = "unknown";
+                    }
+                }
+
+                Config *state_ip6 = static_cast<Config *>(this->state.get("ip6"));
+                Config *entry;
+                Config *addr;
+
+                const size_t state_addr_count = state_ip6->count();
+                for (size_t i = 0; i < state_addr_count; i++) {
+                    entry = static_cast<Config *>(state_ip6->get(i));
+                    addr  = static_cast<Config *>(entry->get("addr"));
+                    if (addr->asString() == ip6_str) {
+                        const uint16_t flags = entry->get("flags")->asUint16();
+
+                        if ((flags & IPV6_ADDR_FLAG_STATIC) == 0) {
+                            logger.printfln("Received duplicate %s IPv6 address: %s", type_msg, ip6_str);
+                        } else {
+                            // logger.printfln("Received duplicate static %s IPv6 address: %s, index %i (ignoring)", type_msg, ip6_str, got_ip6.ip_index);
+                        }
+
+                        return;
+                    }
+                }
+
+                const char *static_msg = "";
+
+                for (size_t i = 0; i < runtime_data->ip6_address_count; i++) {
+                    const esp_ip6_addr_t *static_ip6 = &(runtime_data->ip6[i].addr);
+
+                    if (memcmp(&static_ip6->addr, ip6->addr, sizeof(static_ip6->addr)) == 0) {
+                        type_flags |= IPV6_ADDR_FLAG_STATIC;
+                        static_msg = "static ";
+                        break;
+                    }
+                }
+
+                logger.printfln("Got %s%s IPv6 address: %s", static_msg, type_msg, ip6_str);
+
+                if (state_addr_count >= CONFIG_LWIP_IPV6_NUM_ADDRESSES) {
+                    logger.printfln("Can't add new IPv6 address to state: array full (%zu)", state_addr_count);
+                    return;
+                }
+
+                entry = static_cast<Config *>(state_ip6->add());
+
+                entry->get("addr" )->updateString(ip6_str);
+                entry->get("flags")->updateUint(type_flags);
+            });
+        },
+        ARDUINO_EVENT_ETH_GOT_IP6);
+
+    Network.onEvent([this](arduino_event_id_t /*event*/, arduino_event_info_t /*info*/) {
+            logger.printfln("Lost IP address.");
+            this->print_con_duration();
+
+            // Restart DHCP, if it's enabled, to make sure that the GOT_IP event fires when receiving the same address as before.
+#if defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wold-style-cast"
+#pragma GCC diagnostic ignored "-Wuseless-cast"
+#endif
+            if (ip4_addr_isany_val(this->runtime_data->ip4)) {
+#if defined(__GNUC__)
+#pragma GCC diagnostic pop
+#endif
+                ETH.config();
+            }
+
+            this->runtime_data->connection_state = EthernetState::Connecting;
+
+            tcpip_callback([](void *param) {
+                esp_netif_set_default_netif(NULL); // trigger immediate re-selection of default interface
+            }, nullptr);
+
+            task_scheduler.scheduleOnce([this]() {
+                task_scheduler.cancel(this->reconnect_task_id); // Cancel pending IP-change reconnect
+                state.get("connection_state")->updateEnum(this->runtime_data->connection_state);
+                state.get("ip")->updateString("0.0.0.0");
+                state.get("subnet")->updateString("0.0.0.0");
+                state.get("ip6")->removeAll();
+                state.get("connection_end")->updateUptime(now_us());
+            });
+        },
+        ARDUINO_EVENT_ETH_LOST_IP);
+
+    Network.onEvent([this](arduino_event_id_t /*event*/, arduino_event_info_t /*info*/) {
+            logger.printfln("Disconnected");
+            this->print_con_duration();
+
+            this->runtime_data->connection_state = EthernetState::NotConnected;
+
+            // TODO Check and remove everything from esp_netif_get_all_ip6()
+
+            task_scheduler.scheduleOnce([this]() {
+                task_scheduler.cancel(this->reconnect_task_id); // Cancel pending IP-change reconnect
+                state.get("connection_state")->updateEnum(this->runtime_data->connection_state);
+                state.get("ip")->updateString("0.0.0.0");
+                state.get("subnet")->updateString("0.0.0.0");
+                state.get("ip6")->removeAll();
+                state.get("connection_end")->updateUptime(now_us());
+            });
+        },
+        ARDUINO_EVENT_ETH_DISCONNECTED);
+
+    Network.onEvent([this](arduino_event_id_t /*event*/, arduino_event_info_t /*info*/) {
+            logger.printfln("Stopped");
+            this->print_con_duration();
+
+            // If eth_started is false, we're being shut down by apply_config() for a disable.
+            this->runtime_data->connection_state = this->eth_started ? EthernetState::NotConnected : EthernetState::NotConfigured;
+
+            task_scheduler.scheduleOnce([this]() {
+                task_scheduler.cancel(this->reconnect_task_id); // Cancel pending IP-change reconnect
+                state.get("connection_state")->updateEnum(this->runtime_data->connection_state);
+                state.get("connection_end")->updateUptime(now_us());
+            });
+        },
+        ARDUINO_EVENT_ETH_STOP);
+
+    ETH.setTaskStackSize(EMAC_TASK_STACK_SIZE);
+    apply_config();
+}
+
+void Ethernet::register_urls()
+{
+    api.addPersistentConfig("ethernet/config", &config);
+    api.addState("ethernet/state", &state);
+
+#if OPTIONS_ETHERNET_ENABLE_RESTART_API()
+    server.on_HTTPThread("/ethernet/restart", HTTP_GET, [this](WebServerRequest req) {
+        task_scheduler.scheduleOnce([this]() {
+            ETH.end();
+            this->runtime_data->last_connected = now_us();
+            ETH.begin();
+        });
+        return req.send_plain(200);
+    });
+#endif
+}
+
+EthernetState Ethernet::get_connection_state() const
+{
+    if (!runtime_data) {
+        return EthernetState::NotConfigured;
+    }
+    return runtime_data->connection_state;
+}
+
+bool Ethernet::is_enabled() const
+{
+    return eth_started;
+}
+
+bool Ethernet::is_enabled_in_config() const
+{
+    return config.get("enable_ethernet")->asBool();
+}
+
+// Called from Arduino event task
+void Ethernet::apply_ipv6_to_interface()
+{
+    if (!runtime_data->want_ipv6) {
+        return;
+    }
+
+    if (!runtime_data->ipv6_enabled) {
+        runtime_data->ipv6_enabled = true;
+        ETH.enableIPv6(true);
+    }
+
+    esp_netif_t *eth_netif = ETH.netif();
+
+    for (size_t i = 0; i < runtime_data->ip6_address_count; i++) {
+        ip6_addr_with_flags *ip6_with_flags = runtime_data->ip6 + i;
+
+        char ip6_str[INET6_ADDRSTRLEN];
+        tf_ip6addr_ntoa(&ip6_with_flags->addr, ip6_str, std::size(ip6_str));
+
+        if ((ip6_with_flags->flags & IPV6_ADDR_FLAG_NEW) == 0) {
+            logger.printfln("Skipping already set address %s", ip6_str);
+            continue;
+        }
+
+        ip6_with_flags->flags &= static_cast<uint16_t>(~IPV6_ADDR_FLAG_NEW);
+
+        const bool preferred = (ip6_with_flags->flags & IPV6_ADDR_FLAG_PREFERRED) != 0;
+
+        const esp_err_t err = esp_netif_add_ip6_address(eth_netif, ip6_with_flags->addr, preferred);
+
+        if (err != ESP_OK) {
+            logger.printfln("Failed to set static IPv6 address %s: %s (0x%04X)", ip6_str, esp_err_to_name(err), static_cast<unsigned>(err));
+        }
+    }
+
+    // TODO DNS
+    // String dns_str = config.get("dns6")->asString();
+    // if (dns_str != "::") {
+    //     // IPv6 DNS ist set as backup so its the lowest priority. Fallback is not enabled.
+    //     esp_netif_dns_type_t dns_type = ESP_NETIF_DNS_BACKUP;
+
+    //     // Check configured DNS
+    //     esp_netif_dns_info_t get_dns_info;
+    //     esp_netif_get_dns_info(eth_netif, dns_type, &get_dns_info);
+
+    //     esp_ip6_addr_t dns_addr;
+    //     esp_netif_str_to_ip6(dns_str.c_str(), &dns_addr);
+    //     esp_netif_dns_info_t dns_info;
+    //     dns_info.ip.type = ESP_IPADDR_TYPE_V6;
+    //     dns_info.ip.u_addr.ip6 = dns_addr;
+
+    //     if ((get_dns_info.ip.type != ESP_IPADDR_TYPE_V6 || memcmp(&get_dns_info.ip.u_addr.ip6, &dns_info.ip.u_addr.ip6, sizeof(esp_ip6_addr_t)) != 0)) {
+    //         esp_netif_set_dns_info(eth_netif, dns_type, &dns_info);
+    //     }
+    // }
+}
+
+void Ethernet::apply_ip_to_interface()
+{
+#if defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wold-style-cast"
+#pragma GCC diagnostic ignored "-Wuseless-cast"
+#endif
+    bool static_ipv4 = !ip4_addr_isany_val(runtime_data->ip4);
+#if defined(__GNUC__)
+#pragma GCC diagnostic pop
+#endif
+    if (static_ipv4) {
+        ETH.config({runtime_data->ip4.addr}, {runtime_data->gateway4.addr}, {tf_ip4addr_cidr2mask(runtime_data->subnet4_cidr).addr}, {runtime_data->dns4.addr}, {runtime_data->dns24.addr});
+    } else {
+        ETH.config();
+    }
+
+    apply_ipv6_to_interface();
+}
+
+// Called from main task
+[[gnu::noinline]]
+void Ethernet::apply_ipv6_config()
+{
+    const bool want_ipv6 = config.get("enable_ipv6")->asBool();
+    runtime_data->want_ipv6 = want_ipv6;
+
+    if (!want_ipv6) {
+        runtime_data->ip6_address_count = 0;
+        // Let apply_ipv6_to_interface remove all addresses
+        state.get("ip6")->removeAll();
+
+        if (runtime_data->ipv6_enabled) {
+            runtime_data->ipv6_enabled = false;
+            ETH.enableIPv6(false);
+
+            // Remove addresses twice, to avoid a race condition if an RA is received before removing the link-local address.
+            for (size_t tries = 0; tries < 2; tries++) {
+                esp_ip6_addr_t ip6_addrs[CONFIG_LWIP_IPV6_NUM_ADDRESSES];
+                const int addr_count = esp_netif_get_all_ip6(ETH.netif(), ip6_addrs);
+
+                for (int i = 0; i < addr_count; i++) {
+                    const esp_err_t err = esp_netif_remove_ip6_address(ETH.netif(), ip6_addrs + i);
+                    if (err != ESP_OK) {
+                        logger.printfln("Failed to remove IPv6 address: %s (%04X)", esp_err_to_name(err), static_cast<unsigned>(err));
+                    }
+                }
+            }
+        }
+        // TODO: Cannot unset DNS6, so we just leave it in this case
+
+        return;
+    }
+
+    ip6_addr_with_flags ip6_addresses_new[MAX_STATIC_IPV6_ADDRESSES];
+    const char *ip6_str_unsafe[MAX_STATIC_IPV6_ADDRESSES]; // Pointers only valid during the execution of this function.
+    const Config *config_ip6 = static_cast<const Config *>(this->config.get("ip6"));
+    const size_t addr_count_new = config_ip6->count();
+
+    assert(addr_count_new <= MAX_STATIC_IPV6_ADDRESSES);
+
+    for (size_t i = 0; i < addr_count_new; i++) {
+        ip6_addr_with_flags *ip6_new = ip6_addresses_new + i;
+        const Config *config_ip6_elem = static_cast<const Config *>(config_ip6->get(i));
+        ip6_str_unsafe[i] = config_ip6_elem->get("addr" )->asUnsafeCStr();
+        ip6_new->flags    = config_ip6_elem->get("flags")->asUint16() | IPV6_ADDR_FLAG_NEW;
+
+        if (esp_netif_str_to_ip6(ip6_str_unsafe[i], &ip6_new->addr) != ESP_OK) {
+            logger.printfln("Failed to parse IPv6 address: '%s'", ip6_str_unsafe[i]);
+            ip6_new->flags = std::numeric_limits<decltype(ip6_new->flags)>::max();
+            continue;
+        }
+    }
+
+    // Check for removed addresses if IPv6 was already enabled.
+    if (runtime_data->ipv6_enabled) {
+        uint32_t address_removed = 0;
+
+        for (int i_old = 0; i_old < runtime_data->ip6_address_count; i_old++) {
+            const ip6_addr_with_flags *ip6_old = runtime_data->ip6 + i_old;
+
+            bool found = false;
+
+            for (size_t i_new = 0; i_new < addr_count_new; i_new++) {
+                ip6_addr_with_flags *ip6_new = ip6_addresses_new + i_new;
+
+                if ((ip6_old->flags & IPV6_ADDR_FLAG_PREFERRED) == (ip6_new->flags & IPV6_ADDR_FLAG_PREFERRED) // If the "preferred" flag was changed, the address must be removed and then added with the new flag setting.
+                    && memcmp(&ip6_old->addr.addr, &ip6_new->addr.addr, sizeof(ip6_new->addr.addr)) == 0) { // Only compare actual address of esp_ip6_addr_t, ignore zone.
+
+                    logger.printfln("Found unchanged IP %s", ip6_str_unsafe[i_new]);
+                    found = true;
+                    ip6_new->flags &= static_cast<uint16_t>(~IPV6_ADDR_FLAG_NEW);
+                    break;
+                }
+            }
+
+            if (!found) {
+                esp_err_t err = esp_netif_remove_ip6_address(ETH.netif(), &ip6_old->addr);
+                if (err != ESP_OK) {
+                    logger.printfln("Failed to remove static IPv6 address: %s (%04X)", esp_err_to_name(err), static_cast<unsigned>(err));
+                }
+                logger.printfln("Removed old IP %i", i_old);
+
+                address_removed |= 1 << i_old;
+            }
+        }
+
+        if (address_removed != 0) {
+            Config *state_ip6 = static_cast<Config *>(state.get("ip6"));
+            size_t i_state = state_ip6->count();
+
+            // Array removals are slow; iterate in reverse.
+            while (i_state > 0) {
+                i_state--;
+
+                Config *state_ip6_elem = static_cast<Config *>(state_ip6->get(i_state));
+
+                if ((state_ip6_elem->get("flags")->asUint16() & IPV6_ADDR_FLAG_STATIC) == 0) {
+                    // Not a static IPv6 address
+                    continue;
+                }
+
+                const char *ip6_str = state_ip6_elem->get("addr")->asUnsafeCStr();
+                esp_ip6_addr_t ip6;
+                if (esp_netif_str_to_ip6(ip6_str, &ip6) != ESP_OK) {
+                    logger.printfln("Failed to parse candidate IPv6 address to remove: %s", ip6_str);
+                    continue;
+                }
+
+                for (size_t i_old = 0; i_old < runtime_data->ip6_address_count; i_old++) {
+                    const ip6_addr_with_flags *ip6_old = runtime_data->ip6 + i_old;
+                    uint32_t address_removed_mask = 1 << i_old;
+
+                    if ((address_removed & address_removed_mask) == 0) {
+                        // Address not removed
+                        continue;
+                    }
+
+                    if (memcmp(&ip6_old->addr.addr, &ip6.addr, sizeof(ip6.addr)) != 0) {
+                        // Not this address
+                        continue;
+                    }
+
+                    state_ip6->remove(i_state);
+                    address_removed &= ~address_removed_mask;
+                    break;
+                }
+
+                if (address_removed == 0) {
+                    break;
+                }
+            }
+        }
+    }
+
+    memcpy(runtime_data->ip6, ip6_addresses_new, addr_count_new * sizeof(ip6_addresses_new[0]));
+    runtime_data->ip6_address_count = static_cast<uint8_t>(addr_count_new);
+}
+
+void Ethernet::apply_config()
+{
+    const bool want_enabled = config.get("enable_ethernet")->asBool();
+
+    apply_ipv6_config();
+
+    if (want_enabled) {
+        // Cancel any pending auto-revert since ethernet is being (re-)enabled.
+        task_scheduler.cancel(revert_countdown_task_id);
+        state.get("disable_countdown")->updateUint(0);
+
+        // Parse IPv4 settings from top-level config fields.
+        ip4_addr_t subnet4_tmp;
+        ip4addr_aton(config.get("ip"     )->asUnsafeCStr(), &runtime_data->ip4);
+        ip4addr_aton(config.get("gateway")->asUnsafeCStr(), &runtime_data->gateway4);
+        ip4addr_aton(config.get("dns"    )->asUnsafeCStr(), &runtime_data->dns4);
+        ip4addr_aton(config.get("dns2"   )->asUnsafeCStr(), &runtime_data->dns24);
+        ip4addr_aton(config.get("subnet" )->asUnsafeCStr(), &subnet4_tmp);
+        runtime_data->subnet4_cidr = tf_ip4addr_mask2cidr(subnet4_tmp);
+
+        if (!eth_started) {
+            // Disabled -> Enabled: start the interface.
+            runtime_data->connection_state = EthernetState::NotConnected;
+            state.get("connection_state")->updateEnum(runtime_data->connection_state);
+
+            runtime_data->last_connected = now_us();
+            eth_started = true;
+            const uint32_t gen = ++eth_begin_generation;
+
+#if defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wold-style-cast"
+#pragma GCC diagnostic ignored "-Wuseless-cast"
+#endif
+
+            const BaseType_t ret = xTaskCreatePinnedToCore(eth_async_begin, "eth_async_begin", 2560, reinterpret_cast<void *>(gen), uxTaskPriorityGet(nullptr) + 1, nullptr, 1);
+            if (ret != pdPASS) {
+                logger.printfln("eth_async_begin task could not be created: %s (0x%lx)", esp_err_to_name(ret), static_cast<uint32_t>(ret));
+                if (!ETH.begin()) {
+                    logger.printfln("Start failed. PHY broken?");
+                }
+            }
+
+#if defined(__GNUC__)
+#pragma GCC diagnostic pop
+#endif
+        } else {
+            // Already enabled: IP/DNS change.
+            // If connected or connecting, apply new IP settings immediately.
+            // Otherwise the ETH_CONNECTED handler will pick up the new runtime_data values.
+            if (runtime_data->connection_state == EthernetState::Connected || runtime_data->connection_state == EthernetState::Connecting) {
+                apply_ip_to_interface();
+            }
+        }
+    } else if (eth_started) {
+        // Enabled -> Disabled: requires a reboot to take effect.
+        // The config is already saved; setup() will skip ETH.begin() on next boot.
+        // The frontend enforces the reboot via a modal dialog.
+        logger.printfln("Ethernet disabled in config. Reboot required to take effect. Auto-revert in 4 minutes.");
+        state.get("disable_countdown")->updateUint(4 * 60);
+        task_scheduler.cancel(revert_countdown_task_id);
+
+        revert_countdown_task_id = task_scheduler.scheduleWithFixedDelay([this]() {
+            uint8_t remaining = state.get("disable_countdown")->asUint8();
+            if (remaining <= 1) {
+                logger.printfln("No reboot within 4 minutes. Auto-reverting ethernet config to enabled.");
+                state.get("disable_countdown")->updateUint(0);
+                task_scheduler.cancel(revert_countdown_task_id);
+                config.get("enable_ethernet")->updateBool(true);
+                API::writeConfig("ethernet/config", &config);
+                return;
+            }
+            state.get("disable_countdown")->updateUint(remaining - 1);
+        }, 1_s);
+    } else {
+        // Not enabled and not started (initial boot with ethernet disabled).
+        runtime_data->connection_state = EthernetState::NotConfigured;
+    }
+}

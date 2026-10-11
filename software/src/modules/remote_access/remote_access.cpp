@@ -1,0 +1,2854 @@
+/* esp32-firmware
+ * Copyright (C) 2024 Frederic Henrichs <frederic@tinkerforge.com>
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, write to the
+ * Free Software Foundation, Inc., 59 Temple Place - Suite 330,
+ * Boston, MA 02111-1307, USA.
+ */
+
+#include "remote_access.h"
+
+#include "generated/module_dependencies.h"
+
+#include <LittleFS.h>
+#include <TFJson.h>
+#include <WiFi.h>
+#include <esp_http_client.h>
+#include <lwip/err.h>
+#include <lwip/netdb.h>
+#include <lwip/pbuf.h>
+#include <lwip/sockets.h>
+#include <lwip/sys.h>
+#include <esp_random.h>
+#include <mbedtls/aes.h>
+#include <mbedtls/base64.h>
+#include <sodium.h>
+#include <ctype.h>
+
+#include "build.h"
+#include "options.h"
+#include "esp_tls.h"
+#include "esp_tls_errors.h"
+#include "event_log_prefix.h"
+#include "language.h"
+#include "tools.h"
+#include "tools/dns.h"
+#include "tools/net.h"
+
+#include "gcc_warnings.h"
+
+extern "C" esp_err_t esp_crt_bundle_attach(void *conf);
+
+#define WG_KEY_LENGTH 44
+#define KEY_SIZE (3 * WG_KEY_LENGTH)
+#define KEY_DIRECTORY "/remote-access-keys"
+// Maximum accepted HTTP request body size for endpoints in this module (5 KiB)
+#define MAX_HTTP_BODY_BYTES 5120
+
+// Validate HTTP request body length and provide the length to callers.
+// Returns 0 on success, or an HTTP status code (400 for empty, 413 for too large).
+static inline uint16_t validate_http_body(WebServerRequest &request, size_t &out_len) {
+    out_len = request.contentLength();
+    if (out_len == 0) {
+        return 400; // Empty request body
+    }
+    if (out_len > MAX_HTTP_BODY_BYTES) {
+        return 413; // Payload Too Large
+    }
+    return 0;
+}
+
+static inline String get_key_path(uint8_t user_id, uint8_t key_id)
+{
+    return String(KEY_DIRECTORY "/") + user_id + "_" + key_id;
+}
+
+static void remove_key(uint8_t user_id, uint8_t key_id)
+{
+    auto path = get_key_path(user_id, key_id);
+    if (!LittleFS.exists(path))
+        return;
+
+    LittleFS.remove(path);
+}
+
+static void store_key(uint8_t user_id, uint8_t key_id, const char *pri, const char *psk, const char *pub)
+{
+    File f = LittleFS.open(get_key_path(user_id, key_id), "w+");
+    // TODO: more robust writing
+    f.write(reinterpret_cast<const uint8_t *>(pri), WG_KEY_LENGTH);
+    f.write(reinterpret_cast<const uint8_t *>(psk), WG_KEY_LENGTH);
+    f.write(reinterpret_cast<const uint8_t *>(pub), WG_KEY_LENGTH);
+}
+
+static bool get_key(uint8_t user_id, uint8_t key_id, char *pri, char *psk, char *pub)
+{
+    String path = get_key_path(user_id, key_id);
+
+    if (!LittleFS.exists(path)) {
+        goto fail;
+    }
+
+    {
+        File f = LittleFS.open(path, "r");
+
+        if (f.size() != KEY_SIZE) {
+            goto fail;
+        }
+
+        if (f.read(reinterpret_cast<uint8_t *>(pri), WG_KEY_LENGTH) != WG_KEY_LENGTH) {
+            goto fail;
+        }
+        if (f.read(reinterpret_cast<uint8_t *>(psk), WG_KEY_LENGTH) != WG_KEY_LENGTH) {
+            goto fail;
+        }
+        if (f.read(reinterpret_cast<uint8_t *>(pub), WG_KEY_LENGTH) != WG_KEY_LENGTH) {
+            goto fail;
+        }
+    }
+
+    pri[WG_KEY_LENGTH] = '\0';
+    psk[WG_KEY_LENGTH] = '\0';
+    pub[WG_KEY_LENGTH] = '\0';
+
+    return true;
+
+fail:
+    pri[0] = '\0';
+    psk[0] = '\0';
+    pub[0] = '\0';
+    return false;
+}
+
+static int create_sock_and_send_to(const void *payload, size_t payload_len, const ip_addr_t ip, uint16_t port, uint16_t local_port)
+{
+    sockaddr_in dest_addr;
+    memset(&dest_addr, 0, sizeof(dest_addr));
+    dest_addr.sin_addr.s_addr = ip.u_addr.ip4.addr;
+    dest_addr.sin_family = AF_INET;
+    dest_addr.sin_port = htons(port);
+
+    int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_IP);
+    if (sock < 0) {
+        logger.printfln("Failed to create socket: %s (%i)", strerror(errno), errno);
+        return sock;
+    }
+    int ret = fcntl(sock, F_SETFL, O_NONBLOCK);
+    if (ret < 0) {
+        logger.printfln("Setting socket to non-blocking caused an error: %s (%i)", strerror(errno), errno);
+        close(sock);
+        return -1;
+    }
+
+    struct sockaddr_in local_addr;
+    memset(&local_addr, 0, sizeof(local_addr));
+
+    //local_addr.sin_addr.s_addr = inet_addr("0.0.0.0"); // address already set by memset
+    local_addr.sin_family = AF_INET;
+    local_addr.sin_port = htons(local_port);
+    ret = bind(sock, reinterpret_cast<struct sockaddr *>(&local_addr), sizeof(local_addr));
+    if (ret < 0) {
+        logger.printfln("Binding socket to port %u caused an error: %s (%i)", local_port, strerror(errno), errno);
+        close(sock);
+        return -1;
+    }
+
+    ret = sendto(sock, payload, payload_len, 0, reinterpret_cast<struct sockaddr *>(&dest_addr), sizeof(dest_addr));
+    close(sock);
+    return ret;
+}
+
+void RemoteAccess::pre_setup()
+{
+    users_config_prototype = Config::Object({
+        {"id", Config::Uint8(0)},
+        {"email", Config::Str("", 0, 64)},
+        {"uuid", Config::Str("", 0, 36)},
+        {"public_key", Config::Str("", 0, 44)},
+    });
+
+    // We cant reset this because it is a state since it contains values (uuid, password, users) that should
+    // never ever be writable by a user. The only way to fix this is to completely separate the
+    // "normal" config from the config that stores the chargers credentials.
+    config = Config::Object({
+        {"uuid", Config::Str("", 0, 36)},
+        {"enable", Config::Bool(false)},
+        {"password", Config::Str("", 0, 32)},
+        {"relay_host", Config::Str(OPTIONS_REMOTE_ACCESS_HOST(), 0, 64)},
+        {"relay_port", Config::Uint16(443)},
+        {"cert_id", Config::Int8(-1)},
+        // a mtu of 1240 should be always safe
+        {"mtu", Config::Uint16(1240)},
+        {"users", Config::Array({}, &users_config_prototype, 0, OPTIONS_REMOTE_ACCESS_MAX_USERS(), Config::type_id<Config::ConfObject>())},
+    });
+
+    registration_config = Config::Object({
+        {"enable", Config::Bool(false)},
+        {"relay_host", Config::Str("", 0, 32)},
+        {"relay_port", Config::Uint16(443)},
+        {"email", Config::Str("", 0, 64)},
+        {"cert_id", Config::Int8(-1)},
+        {"mtu", Config::Uint16(1280)},
+    });
+
+    ping_state = Config::Object({
+        {"packets_sent", Config::Uint32(0)},
+        {"packets_received", Config::Uint32(0)},
+        {"time_elapsed_ms", Config::Uptime()},
+    });
+
+    connection_state = Config::Tuple(MAX_USER_CONNECTIONS + 1, Config::Object({
+        {"state", Config::Enum(ConnectionState::Disconnected)},
+        {"user", Config::Uint8(255)},
+        {"connection", Config::Uint8(255)},
+        {"last_state_change", Config::Uint53(0)}, // Unix timestamp in seconds
+    }));
+
+    registration_state = Config::Object({{"state", Config::Enum(RegistrationState::None)}, {"message", Config::Str("", 0, 64)}});
+}
+
+void RemoteAccess::setup()
+{
+    LittleFS.mkdir(KEY_DIRECTORY);
+
+    api.restorePersistentConfig("remote_access/config", &config);
+    initialized = true;
+
+    if (!config.get("enable")->asBool())
+        return;
+
+    logger.printfln("Remote Access is enabled, trying to connect");
+}
+
+static std::unique_ptr<uint8_t[]> decode_base64(const String &input, size_t buffer_size)
+{
+    std::unique_ptr<uint8_t[]> out = heap_alloc_array<uint8_t>(buffer_size);
+    if (out == nullptr) {
+        return out;
+    }
+    size_t _unused = 0;
+    int ret = mbedtls_base64_decode(out.get(), buffer_size, &_unused, reinterpret_cast<const unsigned char *>(input.c_str()), input.length());
+    if (ret != 0) {
+        logger.printfln("Error while decoding: %i", ret);
+        return nullptr;
+    }
+    return out;
+}
+
+void RemoteAccess::handle_response_chunk(const AsyncHTTPSClientEvent *event)
+{
+    if (response_body.length() == 0) {
+        if (event->data_complete_len < 0) {
+            response_body.reserve(1024);
+        } else {
+            response_body.reserve(static_cast<unsigned int>(event->data_complete_len));
+        }
+    }
+    response_body.concat(static_cast<const uint8_t *>(event->data_chunk), static_cast<unsigned int>(event->data_chunk_len));
+}
+
+// Percent-encode a query string while preserving '=' between keys and values and '&' between pairs.
+// Encodes any byte not in [A-Za-z0-9-_.~=&] using %HH uppercase hex.
+static void url_encode_query(const StringWriter *query, StringWriter &out)
+{
+    if (query == nullptr) {
+        return;
+    }
+
+    const size_t query_len = query->getLength();
+    const char *query_chars = query->getPtr();
+
+    for (size_t i = 0; i < query_len; ++i) {
+        const char c = query_chars[i];
+
+        if (isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~' || c == '=' || c == '&') {
+            out.putc(c);
+        } else {
+            out.printf("%%%02hhX", c);
+        }
+    }
+}
+
+static String construct_relay_url(const Config& config, const char* endpoint, const StringWriter *query_params = nullptr) {
+    char url_buffer[256];
+    StringWriter url(url_buffer, sizeof(url_buffer));
+
+    url.printf("https://%s:%lu%s",
+               config.get("relay_host")->asUnsafeCStr(),
+               config.get("relay_port")->asUint(),
+               endpoint);
+
+    if (query_params) {
+        url.putc('?');
+        url_encode_query(query_params, url);
+    }
+
+    return url.toString();
+}
+
+void RemoteAccess::register_urls()
+{
+    api.addState("remote_access/config", &config, {"password"}, {"email"});
+
+    api.addState("remote_access/state", &connection_state);
+    api.addState("remote_access/registration_state", &registration_state);
+    api.addState("remote_access/ping_state", &ping_state);
+
+    server.on("/remote_access/reset_registration_state", HTTP_PUT, [this](WebServerRequest request) {
+        update_registration_state(RegistrationState::None);
+        return request.send_plain(200);
+    });
+
+    api.addCommand(
+        "remote_access/start_ping",
+        Config::Null(),
+        {},
+        [this](Language /*language*/, String &errmsg) {
+            if (ping != nullptr) {
+                errmsg = "Ping already started";
+                return;
+            }
+            int start_err = start_ping();
+            if (start_err != 0) {
+                errmsg = "Failed to start ping: " + String(start_err);
+            }
+        },
+        true);
+
+    api.addCommand(
+        "remote_access/stop_ping",
+        Config::Null(),
+        {},
+        [this](Language /*language*/, String &/*errmsg*/) {
+            stop_ping();
+        },
+        true);
+
+    api.addCommand(
+        "remote_access/config_update",
+        &registration_config,
+        {"password", "email"},
+        [this](Language /*language*/, String &/*errmsg*/) {
+            config.get("enable")->updateBool(registration_config.get("enable")->asBool());
+            config.get("relay_host")->updateString(registration_config.get("relay_host")->asString());
+            config.get("relay_port")->updateUint(registration_config.get("relay_port")->asUint());
+            config.get("cert_id")->updateInt(registration_config.get("cert_id")->asInt());
+            config.get("mtu")->updateUint(registration_config.get("mtu")->asUint());
+            api.writeConfig("remote_access/config", &config);
+            task_scheduler.scheduleOnce([this]() { this->apply_config(); });
+        },
+        false);
+
+    server.on("/remote_access/get_login_salt", HTTP_PUT, [this](WebServerRequest request) {
+        this->management_request_allowed = false;
+        size_t content_len = 0;
+        if (uint16_t s = validate_http_body(request, content_len)) {
+            this->request_cleanup();
+            return request.send_plain(s, s == 400 ? "Empty request body" : "Request body too large");
+        }
+        std::unique_ptr<char[]> req_body = heap_alloc_array<char>(content_len);
+        if (req_body == nullptr) {
+            this->request_cleanup();
+            return request.send_plain(500, "Low memory");
+        }
+        if (request.receive(req_body.get(), content_len) <= 0) {
+            this->request_cleanup();
+            return request.send_plain(500, "Failed to read request body");
+        }
+
+        {
+            String error = registration_config.update_from_cstr(req_body.get(), content_len);
+            if (!error.isEmpty()) {
+                this->request_cleanup();
+                return request.send_plain(400, error);
+            }
+        }
+
+        this->get_login_salt(registration_config);
+        return request.send_plain(200);
+    });
+
+    server.on("/remote_access/get_secret_salt", HTTP_PUT, [this](WebServerRequest request) {
+        size_t content_len = 0;
+        if (uint16_t s = validate_http_body(request, content_len)) {
+            this->request_cleanup();
+            return request.send_plain(s, s == 400 ? "Empty request body" : "Request body too large");
+        }
+        std::unique_ptr<char[]> req_body = heap_alloc_array<char>(content_len);
+        if (req_body == nullptr) {
+            this->request_cleanup();
+            return request.send_plain(500, "Low memory");
+        }
+        if (request.receive(req_body.get(), content_len) <= 0) {
+            this->request_cleanup();
+            return request.send_plain(500, "Failed to read request body");
+        }
+
+        {
+            String error = registration_config.update_from_cstr(req_body.get(), content_len);
+            if (!error.isEmpty()) {
+                this->request_cleanup();
+                return request.send_plain(400, error);
+            }
+        }
+
+        this->get_secret(registration_config);
+
+        return request.send_plain(200);
+    });
+
+    server.on("/remote_access/login", HTTP_PUT, [this](WebServerRequest request) {
+        size_t content_len = 0;
+        if (uint16_t s = validate_http_body(request, content_len)) {
+            this->request_cleanup();
+            return request.send_plain(s, s == 400 ? "Empty request body" : "Request body too large");
+        }
+        std::unique_ptr<char[]> req_body = heap_alloc_array<char>(content_len);
+        if (req_body == nullptr) {
+            this->request_cleanup();
+            return request.send_plain(500, "Low memory");
+        }
+        if (request.receive(req_body.get(), content_len) <= 0) {
+            this->request_cleanup();
+            return request.send_plain(500, "Failed to read request body");
+        }
+
+        // TODO: use TFJsonDeserializer?
+        StaticJsonDocument<768> doc;
+
+        {
+            DeserializationError error = deserializeJson(doc, req_body.get(), content_len);
+
+            if (error) {
+                char err_str[64];
+                snprintf(err_str, sizeof(err_str), "Failed to deserialize request body: %s", error.c_str());
+                this->request_cleanup();
+                return request.send_plain(400, err_str);
+            }
+        }
+
+        {
+            String error = registration_config.update_from_json(doc["config"], true, ConfigSource::API);
+            if (!error.isEmpty()) {
+                this->request_cleanup();
+                return request.send_plain(400, error);
+            }
+        }
+
+        const String login_key = doc["login_key"];
+        this->login(registration_config, login_key);
+
+        return request.send_plain(200);
+    });
+
+    server.on("/remote_access/register", HTTP_PUT, [this](WebServerRequest request) {
+        if (config.get("users")->count() != 0) {
+            config.get("users")->removeAll();
+        }
+
+        // TODO: Maybe don't run the registration in the request handler. Start a task instead?
+        size_t content_len = 0;
+        if (uint16_t s = validate_http_body(request, content_len)) {
+            this->request_cleanup();
+            return request.send_plain(s, s == 400 ? "Empty request body" : "Request body too large");
+        }
+        std::unique_ptr<char[]> req_body = heap_alloc_array<char>(content_len);
+
+        if (req_body == nullptr) {
+            this->request_cleanup();
+            return request.send_plain(500, "Low memory");
+        }
+
+        if (request.receive(req_body.get(), content_len) <= 0) {
+            this->request_cleanup();
+            return request.send_plain(500, "Failed to read request body");
+        }
+
+        // TODO: use TFJsonDeserializer?
+        StaticJsonDocument<768> doc;
+
+        {
+            DeserializationError error = deserializeJson(doc, req_body.get(), content_len);
+
+            if (error) {
+                char err_str[64];
+                snprintf(err_str, sizeof(err_str), "Failed to deserialize request body: %s", error.c_str());
+                this->request_cleanup();
+                return request.send_plain(400, err_str);
+            }
+        }
+
+        {
+            String error = registration_config.update_from_json(doc["config"], true, ConfigSource::API);
+            if (!error.isEmpty()) {
+                this->request_cleanup();
+                return request.send_plain(400, error.c_str());
+            }
+        }
+
+        if (!registration_config.get("enable")->asBool()) {
+            this->request_cleanup();
+            return request.send_plain(400, "Calling register without enable beeing true is not supported anymore");
+        }
+
+        const String &note = doc["note"];
+        size_t encrypted_note_size = crypto_box_SEALBYTES + note.length();
+        size_t bs64_note_size = 4 * (encrypted_note_size / 3) + 5;
+        const String &name = api.getState("info/display_name")->get("display_name")->asString();
+        size_t encrypted_name_size = crypto_box_SEALBYTES + name.length();
+        size_t bs64_name_size = 4 * (encrypted_name_size / 3) + 5;
+        size_t json_size = 5000 + bs64_name_size + bs64_note_size;
+        std::unique_ptr<char[]> ptr = heap_alloc_array<char>(json_size);
+
+        if (ptr == nullptr) {
+            this->request_cleanup();
+            return request.send_plain(500, "Low memory");
+        }
+
+        if (sodium_init() < 0) {
+            this->request_cleanup();
+            logger.printfln("Failed to initialize libsodium");
+            return request.send_plain(500, "Failed to initialize crypto");
+        }
+
+        unsigned char pk[crypto_box_PUBLICKEYBYTES];
+        if (!doc["secret_key"].isNull()) {
+            // TODO: Should we validate the secret{,_nonce,_key} lengths before decoding?
+            // Also validate the decoded lengths!
+            std::unique_ptr<uint8_t[]> secret_key = decode_base64(doc["secret_key"], crypto_secretbox_KEYBYTES);
+
+            if (secret_key == nullptr) {
+                this->request_cleanup();
+                return request.send_plain(500, "Low memory");
+            }
+
+            unsigned char secret[crypto_box_SECRETKEYBYTES];
+            int ret = crypto_secretbox_open_easy(secret,
+                                                 encrypted_secret.get(),
+                                                 crypto_box_SECRETKEYBYTES + crypto_secretbox_MACBYTES,
+                                                 secret_nonce.get(),
+                                                 secret_key.get());
+            if (ret != 0) {
+                this->request_cleanup();
+                logger.printfln("Failed to decrypt secret");
+                return request.send_plain(500, "Failed to decrypt secret");
+            }
+
+            ret = crypto_scalarmult_base(pk, secret);
+            if (ret < 0) {
+                this->request_cleanup();
+                logger.printfln("Failed to derive public-key");
+                return request.send_plain(500, "Failed to derive public-key");
+            }
+        } else if (!doc["public_key"].isNull()) {
+            std::unique_ptr<uint8_t[]> public_key = decode_base64(doc["public_key"], crypto_box_PUBLICKEYBYTES);
+            if (public_key == nullptr) {
+                this->request_cleanup();
+                return request.send_plain(500, "Low memory");
+            }
+            memcpy(pk, public_key.get(), crypto_box_PUBLICKEYBYTES);
+        } else {
+            this->request_cleanup();
+            return request.send_plain(400, "No key provided");
+        }
+
+        TFJsonSerializer serializer{ptr.get(), json_size};
+        serializer.addObject();
+        serializer.addMemberArray("keys");
+        {
+            int32_t i = 0;
+            // JsonArray already has reference semantics. No need for &.
+            for (const auto key : doc["keys"].as<JsonArray>()) {
+                serializer.addObject();
+                serializer.addMemberStringF("charger_address", "10.123.%li.2", i);
+                serializer.addMemberString("charger_public", key["charger_public"]);
+                serializer.addMemberNumber("connection_no", i);
+                serializer.addMemberStringF("web_address", "10.123.%li.3", i);
+
+                const String web_private = key["web_private"];
+                unsigned char encrypted_web_private[44 + crypto_box_SEALBYTES];
+                int ret = crypto_box_seal(encrypted_web_private, reinterpret_cast<const unsigned char *>(web_private.c_str()), web_private.length(), pk);
+                if (ret < 0) {
+                    this->request_cleanup();
+                    logger.printfln("Failed to encrypt Wireguard keys: %i", ret);
+                    return request.send_plain(500, "Failed to encrypt WireGuard keys.");
+                }
+
+                // TODO: maybe base64 encode?
+                serializer.addMemberArray("web_private");
+                for (size_t a = 0; a < ARRAY_SIZE(encrypted_web_private); a++) {
+                    serializer.addNumber(encrypted_web_private[a]);
+                }
+                serializer.endArray();
+
+                const String psk = key["psk"];
+                unsigned char encrypted_psk[44 + crypto_box_SEALBYTES];
+                ret = crypto_box_seal(encrypted_psk, reinterpret_cast<const unsigned char *>(psk.c_str()), psk.length(), pk);
+                if (ret < 0) {
+                    this->request_cleanup();
+                    logger.printfln("Failed to encrypt psk: %i", ret);
+                    return request.send_plain(500, "Failed to encrypt psk");
+                }
+
+                // TODO: maybe base64 encode?
+                serializer.addMemberArray("psk");
+                for (size_t a = 0; a < ARRAY_SIZE(encrypted_psk); a++) {
+                    serializer.addNumber(encrypted_psk[a]);
+                }
+                serializer.endArray();
+
+                serializer.endObject();
+                i++;
+
+                // Ignore rest of keys if there were sent more than we support.
+                if (i == OPTIONS_REMOTE_ACCESS_MAX_KEYS_PER_USER())
+                    break;
+            }
+        }
+        serializer.endArray();
+
+        serializer.addMemberObject("charger");
+
+        serializer.addMemberString("charger_pub", doc["mgmt_charger_public"]);
+        serializer.addMemberString("uid", esp32_common.get_uid_cstr());
+        serializer.addMemberString("wg_charger_ip", "10.123.123.2");
+        serializer.addMemberString("wg_server_ip", "10.123.123.3");
+        serializer.addMemberString("psk", doc["mgmt_psk"]);
+
+        serializer.endObject();
+
+        std::unique_ptr<uint8_t[]> encrypted_name = heap_alloc_array<uint8_t>(encrypted_name_size);
+        if (encrypted_name == nullptr) {
+            this->request_cleanup();
+            return request.send_plain(500, "Low memory");
+        }
+        crypto_box_seal(encrypted_name.get(), reinterpret_cast<const unsigned char *>(name.c_str()), name.length(), reinterpret_cast<unsigned char *>(pk));
+        auto bs64_name = heap_alloc_array<char>(bs64_name_size);
+        if (bs64_name == nullptr) {
+            this->request_cleanup();
+            return request.send_plain(500, "Low memory");
+        }
+        size_t olen;
+        mbedtls_base64_encode(reinterpret_cast<uint8_t *>(bs64_name.get()), bs64_name_size, &olen, encrypted_name.get(), encrypted_name_size);
+
+        serializer.addMemberString("name", bs64_name.get());
+
+        auto encrypted_note = heap_alloc_array<uint8_t>(encrypted_note_size);
+        if (encrypted_note == nullptr) {
+            this->request_cleanup();
+            return request.send_plain(500, "Low memory");
+        }
+        crypto_box_seal(encrypted_note.get(), reinterpret_cast<const unsigned char *>(note.c_str()), note.length(), pk);
+        auto bs64_note = heap_alloc_array<char>(bs64_note_size);
+        if (bs64_note == nullptr) {
+            this->request_cleanup();
+            return request.send_plain(500, "Low memory");
+        }
+        mbedtls_base64_encode(reinterpret_cast<uint8_t *>(bs64_note.get()), bs64_note_size, &olen, encrypted_note.get(), encrypted_note_size);
+
+        serializer.addMemberString("note", bs64_note.get());
+
+        String url;
+        const String &uuid = doc["user_uuid"];
+        const String &token = doc["auth_token"];
+        if (uuid != "null" && token != "null") {
+            serializer.addMemberString("user_id", uuid.c_str());
+            serializer.addMemberString("token", token.c_str());
+            url = construct_relay_url(registration_config, "/api/add_with_token");
+        } else {
+            url = construct_relay_url(registration_config, "/api/charger/add");
+        }
+
+        serializer.endObject();
+        size_t size = serializer.end();
+
+        std::queue<WgKey> key_cache;
+
+        key_cache.push(WgKey{
+            doc["mgmt_charger_private"],
+            doc["mgmt_psk"],
+            "",
+        });
+
+        {
+            int i = 0;
+            for (const auto key : doc["keys"].as<JsonArray>()) {
+                key_cache.push(WgKey{key["charger_private"], key["psk"], key["web_public"]});
+                ++i;
+                // Ignore rest of keys if there were sent more than we support.
+                if (i == OPTIONS_REMOTE_ACCESS_MAX_KEYS_PER_USER())
+                    break;
+            }
+        }
+
+        update_registration_state(RegistrationState::InProgress);
+
+        uint8_t public_key[50];
+        mbedtls_base64_encode(public_key, sizeof(public_key), &olen, pk, crypto_box_PUBLICKEYBYTES);
+        auto next_stage = [this, key_cache = std::move(key_cache), public_key, olen](const Config &cfg) mutable {
+            const String pub_key(reinterpret_cast<const char *>(public_key), olen);
+            this->parse_registration(cfg, key_cache, pub_key);
+        };
+        this->run_request_with_next_stage(url, HTTP_METHOD_PUT, ptr.get(), size, registration_config, std::move(next_stage));
+
+        return request.send_plain(200);
+    });
+
+    server.on("/remote_access/add_user", HTTP_PUT, [this](WebServerRequest request) {
+        size_t content_len = 0;
+        if (uint16_t s = validate_http_body(request, content_len)) {
+            this->request_cleanup();
+            return request.send_plain(s, s == 400 ? "Empty request body" : "Request body too large");
+        }
+        std::unique_ptr<char[]> req_body = heap_alloc_array<char>(content_len);
+
+        if (req_body == nullptr) {
+            this->request_cleanup();
+            return request.send_plain(500, "Low memory");
+        }
+
+        if (request.receive(req_body.get(), content_len) <= 0) {
+            this->request_cleanup();
+            return request.send_plain(500, "Failed to read request body");
+        }
+
+        uint8_t next_user_id;
+        for (uint8_t i = 1; i < OPTIONS_REMOTE_ACCESS_MAX_USERS() + 1; i++) {
+            next_user_id = i;
+            bool found = false;
+            for (const auto &user : config.get("users")) {
+                if (user.get("id")->asUint8() == i) {
+                    found = true;
+                }
+            }
+            if (!found) {
+                break;
+            }
+        }
+
+        // TODO: use TFJsonDeserializer?
+        StaticJsonDocument<768> doc;
+        {
+            DeserializationError error = deserializeJson(doc, req_body.get(), content_len);
+
+            if (error) {
+                char err_str[64];
+                snprintf(err_str, sizeof(err_str), "Failed to deserialize request body: %s", error.c_str());
+                this->request_cleanup();
+                return request.send_plain(400, err_str);
+            }
+        }
+
+        const String &email = doc["email"];
+        const String &uuid = doc["user_uuid"];
+        if ((email == "null" && uuid == "null") || this->user_already_registered(email)) {
+            this->request_cleanup();
+            return request.send_plain(400, "User already exists or is empty");
+        }
+
+        std::unique_ptr<unsigned char[]> pk = nullptr;
+        if (!doc["secret_key"].isNull()) {
+
+            // TODO: Should we validate the secret{,_nonce,_key} lengths before decoding?
+            // Also validate the decoded lengths!
+            std::unique_ptr<uint8_t[]> secret_key = decode_base64(doc["secret_key"], crypto_secretbox_KEYBYTES);
+            if (secret_key == nullptr) {
+                this->request_cleanup();
+                return request.send_plain(500, "Low memory");
+            }
+
+            if (sodium_init() < 0) {
+                this->request_cleanup();
+                logger.printfln("Failed to initialize libsodium");
+                return request.send_plain(500, "Failed to initialize crypto");
+            }
+
+            unsigned char secret[crypto_box_SECRETKEYBYTES];
+            int ret = crypto_secretbox_open_easy(secret,
+                                                 encrypted_secret.get(),
+                                                 crypto_box_SECRETKEYBYTES + crypto_secretbox_MACBYTES,
+                                                 secret_nonce.get(),
+                                                 secret_key.get());
+            if (ret != 0) {
+                this->request_cleanup();
+                logger.printfln("Failed to decrypt secret");
+                return request.send_plain(500, "Failed to decrypt secret");
+            }
+            pk = heap_alloc_array<unsigned char>(crypto_box_PUBLICKEYBYTES);
+            ret = crypto_scalarmult_base(pk.get(), secret);
+            if (ret < 0) {
+                this->request_cleanup();
+                logger.printfln("Failed to derive public-key");
+                return request.send_plain(500, "Failed to derive public-key");
+            }
+        } else if (!doc["public_key"].isNull()) {
+            pk = decode_base64(doc["public_key"], crypto_box_PUBLICKEYBYTES);
+            if (pk == nullptr) {
+                this->request_cleanup();
+                return request.send_plain(500, "Low memory");
+            }
+        } else {
+            this->request_cleanup();
+            return request.send_plain(400, "No public key provided");
+        }
+
+        const String &note = doc["note"];
+        size_t encrypted_note_size = note.length() + crypto_box_SEALBYTES;
+        size_t bs64_note_size = 4 * ((note.length() + crypto_box_SEALBYTES) / 3) + 5;
+        const String &name = api.getState("info/display_name")->get("display_name")->asString();
+        size_t encrypted_name_size = name.length() + crypto_box_SEALBYTES;
+        size_t bs64_name_size = 4 * (encrypted_name_size / 3) + 5;
+        size_t json_size = 4500 + bs64_note_size + bs64_name_size;
+        auto json = heap_alloc_array<char>(json_size);
+        if (json == nullptr) {
+            this->request_cleanup();
+            return request.send_plain(500, "Low memory");
+        }
+
+        TFJsonSerializer serializer{json.get(), json_size};
+        serializer.addObject();
+
+        std::unique_ptr<uint8_t[]> encrypted_note = heap_alloc_array<uint8_t>(encrypted_note_size);
+        if (encrypted_note == nullptr) {
+            this->request_cleanup();
+            return request.send_plain(500, "Low memory");
+        }
+
+        if (crypto_box_seal(encrypted_note.get(), reinterpret_cast<const unsigned char *>(note.c_str()), note.length(), pk.get())) {
+            this->request_cleanup();
+            return request.send_plain(500, "Failed to encrypt note");
+        }
+
+        auto bs64_note = heap_alloc_array<char>(bs64_note_size);
+        size_t olen;
+        mbedtls_base64_encode(reinterpret_cast<uint8_t *>(bs64_note.get()),
+                              bs64_note_size,
+                              &olen,
+                              encrypted_note.get(),
+                              note.length() + crypto_box_SEALBYTES);
+
+        serializer.addMemberString("note", bs64_note.get());
+
+        std::unique_ptr<uint8_t[]> encrypted_name = heap_alloc_array<uint8_t>(encrypted_name_size);
+        if (encrypted_name == nullptr) {
+            this->request_cleanup();
+            return request.send_plain(500, "Low memory");
+        }
+
+        if (crypto_box_seal(encrypted_name.get(), reinterpret_cast<const unsigned char *>(name.c_str()), name.length(), pk.get())) {
+            this->request_cleanup();
+            return request.send_plain(500, "Failed to encrypt name");
+        }
+
+        auto bs64_name = heap_alloc_array<char>(bs64_name_size);
+        mbedtls_base64_encode(reinterpret_cast<uint8_t *>(bs64_name.get()), bs64_name_size, &olen, encrypted_name.get(), encrypted_name_size);
+
+        serializer.addMemberString("charger_name", bs64_name.get());
+
+        serializer.addMemberString("charger_id", config.get("uuid")->asEphemeralCStr());
+        serializer.addMemberString("charger_password", config.get("password")->asEphemeralCStr());
+        if (email != "null") {
+            serializer.addMemberString("email", email.c_str());
+        }
+        if (uuid != "null") {
+            serializer.addMemberString("user_uuid", uuid.c_str());
+        }
+
+        serializer.addMemberObject("user_auth");
+
+        if (!doc["login_key"].isNull()) {
+            serializer.addMemberString("LoginKey", doc["login_key"]);
+        } else if (!doc["auth_token"].isNull()) {
+            serializer.addMemberString("AuthToken", doc["auth_token"]);
+        } else {
+            this->request_cleanup();
+            return request.send_plain(400, "No login key or auth token provided");
+        }
+        serializer.endObject();
+
+        serializer.addMemberArray("wg_keys");
+        int32_t i = 0;
+        for (auto key : doc["wg_keys"].as<JsonArray>()) {
+            serializer.addObject();
+            int32_t connection_number = (next_user_id - 1) * OPTIONS_REMOTE_ACCESS_MAX_KEYS_PER_USER() + i;
+            serializer.addMemberStringF("charger_address", "10.123.%li.2", connection_number);
+            serializer.addMemberStringF("web_address", "10.123.%li.3", connection_number);
+            serializer.addMemberString("charger_public", key["charger_public"]);
+
+            const String psk = key["psk"];
+            uint8_t encrypted_psk[44 + crypto_box_SEALBYTES];
+            if (crypto_box_seal(encrypted_psk, reinterpret_cast<const unsigned char *>(psk.c_str()), 44, pk.get())) {
+                this->request_cleanup();
+                return request.send_plain(500, "Failed to encrypt psk");
+            }
+            serializer.addMemberArray("psk");
+            for (size_t a = 0; a < ARRAY_SIZE(encrypted_psk); a++) {
+                serializer.addNumber(encrypted_psk[a]);
+            }
+            serializer.endArray();
+
+            const String web_private = key["web_private"];
+            uint8_t encrypted_web_private[44 + crypto_box_SEALBYTES];
+            if (crypto_box_seal(encrypted_web_private, reinterpret_cast<const unsigned char *>(web_private.c_str()), 44, pk.get())) {
+                this->request_cleanup();
+                return request.send_plain(500, "Failed to encrypt web_private");
+            }
+            serializer.addMemberArray("web_private");
+            for (size_t a = 0; a < ARRAY_SIZE(encrypted_web_private); a++) {
+                serializer.addNumber(encrypted_web_private[a]);
+            }
+            serializer.endArray();
+
+            serializer.addMemberNumber("connection_no", connection_number);
+            i++;
+            serializer.endObject();
+        }
+        serializer.endArray();
+        serializer.endObject();
+        uint32_t size = serializer.end();
+
+        const String url = construct_relay_url(config, "/api/allow_user");
+
+        std::queue<WgKey> key_cache;
+        int a = 0;
+        for (const auto key : doc["wg_keys"].as<JsonArray>()) {
+            key_cache.push(WgKey{key["charger_private"], key["psk"], key["web_public"]});
+            ++a;
+            // Ignore rest of keys if there were sent more than we support.
+            if (a == OPTIONS_REMOTE_ACCESS_MAX_KEYS_PER_USER())
+                break;
+        }
+
+        uint8_t public_key[50];
+        mbedtls_base64_encode(public_key, sizeof(public_key), &olen, pk.get(), crypto_box_PUBLICKEYBYTES);
+        const String pub_key(public_key, olen);
+
+        if (https_client == nullptr) {
+            https_client = std::unique_ptr<AsyncHTTPSClient>{new AsyncHTTPSClient(true)};
+        }
+
+        update_registration_state(RegistrationState::InProgress);
+
+        https_client->set_header("Content-Type", "application/json");
+        auto next_stage = [this, key_cache = std::move(key_cache), pub_key = std::move(pub_key), next_user_id, email = std::move(email)](const Config &/*cfg*/) mutable {
+            this->parse_add_user(key_cache, pub_key, email, next_user_id);
+        };
+
+        this->run_request_with_next_stage(url, HTTP_METHOD_PUT, json.get(), size, config, std::move(next_stage));
+
+        return request.send_plain(200);
+    });
+
+    server.on("/remote_access/remove_user", HTTP_PUT, [this](WebServerRequest request) {
+        size_t content_len = 0;
+        if (uint16_t s = validate_http_body(request, content_len)) {
+            // Intentionally no request_cleanup() here, preserving previous behavior
+            return request.send_plain(s, s == 400 ? "Empty request body" : "Request body too large");
+        }
+        std::unique_ptr<char[]> req_body = heap_alloc_array<char>(content_len);
+        if (req_body == nullptr) {
+            return request.send_plain(500, "Low memory");
+        }
+        if (request.receive(req_body.get(), content_len) <= 0) {
+            return request.send_plain(500, "Failed to read request body");
+        }
+
+        // TODO: use TFJsonDeserializer?
+        StaticJsonDocument<768> doc;
+
+        {
+            DeserializationError error = deserializeJson(doc, req_body.get(), content_len);
+
+            if (error) {
+                char err_str[64];
+                snprintf(err_str, sizeof(err_str), "Failed to deserialize request body: %s", error.c_str());
+                return request.send_plain(400, err_str);
+            }
+        }
+
+        uint8_t req_id = doc["id"];
+        size_t idx = 0;
+        for (const auto &user : config.get("users")) {
+            if (user.get("id")->asUint8() == req_id) {
+                break;
+            }
+            idx++;
+        }
+        if (idx >= config.get("users")->count()) {
+            return request.send_plain(400, "User does not exist");
+        }
+
+        config.get("users")->remove(idx);
+        for (uint8_t i = 0; i < OPTIONS_REMOTE_ACCESS_MAX_KEYS_PER_USER(); i++) {
+            remove_key(req_id, i);
+        }
+
+        bool one_left = false;
+        for (const auto &user : config.get("users")) {
+            if (user.get("id")->asUint8() != 255) {
+                one_left = true;
+                break;
+            }
+        }
+
+        if (!one_left) {
+            char json[256];
+            TFJsonSerializer serializer{json, sizeof(json)};
+            serializer.addObject();
+            serializer.addMemberString("uuid", config.get("uuid")->asEphemeralCStr());
+            serializer.addMemberString("password", config.get("password")->asEphemeralCStr());
+            serializer.endObject();
+            size_t json_size = serializer.end();
+
+            if (https_client == nullptr) {
+                https_client = std::unique_ptr<AsyncHTTPSClient>{new AsyncHTTPSClient(true)};
+            }
+            https_client->set_header("Content-Type", "application/json");
+
+            const String url = construct_relay_url(config, "/api/selfdestruct");
+            run_request_with_next_stage(url, HTTP_METHOD_DELETE, json, json_size, config, [this](const Config &/*cfg*/) {
+                this->request_cleanup();
+            });
+
+            remove_key(0, 0);
+
+            config.get("enable")->updateBool(false);
+        }
+
+        API::writeConfig("remote_access/config", &config);
+
+        if (!one_left) {
+            task_scheduler.scheduleOnce([this]() { this->apply_config(); });
+        }
+
+        return request.send_plain(200);
+    });
+
+    if (!config.get("enable")->asBool()) {
+        return;
+    }
+
+    // Check if NTP sync is disabled and log a warning
+    const Config *ntp_config = api.getState("ntp/config", false);
+    if (ntp_config != nullptr && !ntp_config->get("enable")->asBool()) {
+        logger.printfln("WARNING: Remote Access is enabled but NTP sync is disabled.");
+    }
+}
+
+void RemoteAccess::register_events()
+{
+    network.on_network_connected([this](const Config */*connected*/) {
+        this->apply_config();
+        return EventResult::OK;
+    });
+}
+
+void RemoteAccess::start_timeout_task()
+{
+    const millis_t random_delay = millis_t{esp_random() % 4096};
+    this->timeout_task_id = task_scheduler.scheduleWithFixedDelay([this]() {
+        // Check if we got unlucky timing and management request ran
+        // without the management connection getting connected afterwards
+        if (deadline_elapsed(this->last_mgmt_alive + 60_s) && this->management_request_done) {
+            logger.printfln("Management connection timed out");
+
+            // Reset the timeout to prevent log and reconnect spamming
+            this->last_mgmt_alive = now_us();
+            this->management_request_done = false;
+        }
+    }, random_delay, 30_s + random_delay);
+}
+
+void RemoteAccess::apply_config()
+{
+    // Cancel periodic resolve task if running.
+    if (this->task_id) {
+        task_scheduler.cancel(this->task_id);
+        this->task_id = 0;
+    }
+
+    // Cancel management polling task if running.
+    if (this->management_task_id) {
+        task_scheduler.cancel(this->management_task_id);
+        this->management_task_id = 0;
+    }
+
+    // Tear down the management WireGuard tunnel and all remote connections.
+    if (this->management != nullptr) {
+        in_seq_number = 0;
+        this->close_all_remote_connections();
+        if (inner_socket >= 0) {
+            close(inner_socket);
+            inner_socket = -1;
+        }
+        this->management = nullptr;
+    }
+
+    // Reset state flags.
+    this->management_auth_failed = false;
+    this->management_request_failed = false;
+    this->management_request_done = false;
+
+    if (config.get("enable")->asBool() && network.is_connected()) {
+        // Start periodic resolve_management task.
+        const millis_t random_delay = millis_t{esp_random() % 4096};
+        this->task_id = task_scheduler.scheduleWithFixedDelay([this]() {
+            if (!this->management_request_done && !this->management_auth_failed) {
+                this->resolve_management();
+            }
+        }, random_delay, 30_s + random_delay);
+    } else {
+        // Reset connection state to disconnected.
+        for (uint8_t i = 0; i < MAX_USER_CONNECTIONS + 1; i++) {
+            connection_state.get(i)->get("state")->updateEnum(ConnectionState::Disconnected);
+        }
+    }
+}
+
+bool RemoteAccess::user_already_registered(const String &email)
+{
+    for (const auto &user : config.get("users")) {
+        if (email == user.get("email")->asString()) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static bool parse_array_from_json(const JsonArrayConst& json_array, uint8_t* output, size_t n) {
+    if (json_array.size() != n) {
+        return false;
+    }
+
+    for (size_t i = 0; i < n; i++) {
+        output[i] = json_array[i];
+    }
+    return true;
+}
+
+void RemoteAccess::update_registration_state(RegistrationState state, const String& message) {
+    registration_state.get("state")->updateEnum<RegistrationState>(state);
+    if (message.isEmpty()) {
+        registration_state.get("message")->clearString();
+    } else {
+        registration_state.get("message")->updateString(message);
+    }
+}
+
+void RemoteAccess::update_connection_state(uint8_t conn_idx, uint8_t user, uint8_t connection, ConnectionState state_value) {
+    auto conn_state = connection_state.get(conn_idx + 1);
+    conn_state->get("user")->updateUint(user);
+    conn_state->get("connection")->updateUint(connection);
+    conn_state->get("state")->updateEnum(state_value);
+
+    struct timeval now;
+    if (rtc.clock_synced(&now)) {
+        conn_state->get("last_state_change")->updateUint53(static_cast<uint64_t>(now.tv_sec));
+    }
+}
+
+void RemoteAccess::management_auth_fail()
+{
+    this->management_auth_failed = true;
+    logger.printfln("Management authentication failed (401) - not reconnecting");
+    config.get("enable")->updateBool(false);
+    api.writeConfig("remote_access/config", &config);
+}
+
+void RemoteAccess::run_request_with_next_stage(const String &url,
+                                               esp_http_client_method_t method,
+                                               const char *body,
+                                               size_t body_size,
+                                               const Config &next_config,
+                                               std::function<void(const Config &config)> &&next_stage)
+{
+    response_body.clear();
+    std::function<void(AsyncHTTPSClientEvent * event)> callback = [this, next_stage, next_config, url](AsyncHTTPSClientEvent *event) {
+        switch (event->type) {
+            case AsyncHTTPSClientEventType::Error:
+                switch (event->error) {
+                    case AsyncHTTPSClientError::HTTPStatusError: {
+                        if (strstr(url.c_str(), "/management") != nullptr) {
+                            if (!this->management_request_failed) {
+                                this->management_request_failed = true;
+
+                                if (event->error_http_status == 401) {
+                                    this->management_auth_fail();
+                                } else {
+                                    logger.printfln("Management request failed with HTTP-Error-Code %i", event->error_http_status);
+                                }
+                            }
+                        } else {
+                            char err_buf[64];
+                            snprintf(err_buf, sizeof(err_buf), "Received status-code %i", event->error_http_status);
+                            update_registration_state(RegistrationState::Error, String(err_buf));
+                        }
+                        this->cleanup_after();
+                        break;
+                    }
+
+                    case AsyncHTTPSClientError::HTTPError: {
+                        char err_buf[216];
+                        translate_HTTPError_detailed(event->error_handle, err_buf, sizeof(err_buf), true);
+                        if (strstr(url.c_str(), "/management") != nullptr) {
+                            if (!this->management_request_failed) {
+                                this->management_request_failed = true;
+                                logger.printfln("Management request failed with HTTPS error: %s", err_buf);
+                            }
+                        } else {
+                            update_registration_state(RegistrationState::Error, String(err_buf));
+                        }
+                        this->cleanup_after();
+                        break;
+                    }
+
+                    case AsyncHTTPSClientError::NoHTTPSURL:
+                    case AsyncHTTPSClientError::Busy:
+                    case AsyncHTTPSClientError::NoCert:
+                    case AsyncHTTPSClientError::Timeout:
+                    case AsyncHTTPSClientError::ShortRead:
+                    case AsyncHTTPSClientError::HTTPClientInitFailed:
+                    case AsyncHTTPSClientError::HTTPClientSetCookieFailed:
+                    case AsyncHTTPSClientError::HTTPClientSetHeaderFailed:
+                    case AsyncHTTPSClientError::HTTPClientSetBodyFailed:
+                    case AsyncHTTPSClientError::HTTPClientError:
+                    default:
+                        if (strstr(url.c_str(), "/management") != nullptr) {
+                            if (!this->management_request_failed) {
+                                this->management_request_failed = true;
+
+                                if (event->error == AsyncHTTPSClientError::HTTPClientError && event->error_http_client == ESP_ERR_NOT_SUPPORTED) {
+                                    // This specific error is returned by the ESP HTTP client if a 401 error has a chunked body and no authentication header.
+                                    // It's a 401 either way, so treat it as such.
+                                    this->management_auth_fail();
+                                } else {
+                                    logger.printfln("Management request failed with internal error: %s (%u)", translate_error(event), static_cast<uint8_t>(event->error));
+                                }
+                            }
+                        } else {
+                            char err_buf[128];
+                            snprintf(err_buf, sizeof(err_buf), "%s (error code %u)", translate_error(event), static_cast<uint8_t>(event->error));
+                            update_registration_state(RegistrationState::Error, String(err_buf));
+                        }
+                        this->cleanup_after();
+                        break;
+                }
+                response_body.clear();
+                break;
+
+            case AsyncHTTPSClientEventType::Aborted:
+                update_registration_state(RegistrationState::Error, String("Request was aborted"));
+                this->cleanup_after();
+                break;
+
+            case AsyncHTTPSClientEventType::Data:
+                handle_response_chunk(event);
+                break;
+
+            case AsyncHTTPSClientEventType::Finished:
+                task_scheduler.scheduleOnce([this, next_stage, next_config]() {
+                    next_stage(next_config);
+                });
+                break;
+
+            case AsyncHTTPSClientEventType::Redirect:
+                break;
+
+            default:
+                logger.printfln("Unknown HTTPS client event: %d", static_cast<int>(event->type));
+                break;
+        }
+    };
+
+    // https_client should never be a nullptr in normal operation but in case someone uses the api wrong
+    // this ensures that we dont crash
+    if (https_client == nullptr) {
+        https_client = std::unique_ptr<AsyncHTTPSClient>{new AsyncHTTPSClient(true)};
+    }
+
+    https_client->fetch(url.c_str(), next_config.get("cert_id")->asInt(), method, body, body_size, std::move(callback));
+}
+
+void RemoteAccess::get_login_salt(const Config &user_config)
+{
+    update_registration_state(RegistrationState::InProgress);
+
+    char query_buffer[72];
+    StringWriter query(query_buffer, sizeof(query_buffer));
+
+    query.puts("email=");
+    query.puts(user_config.get("email")->asString());
+
+    const String url = construct_relay_url(user_config, "/api/auth/get_login_salt", &query);
+
+    https_client = std::unique_ptr<AsyncHTTPSClient>{new AsyncHTTPSClient(true)};
+    run_request_with_next_stage(url, HTTP_METHOD_GET, nullptr, 0, user_config, [this](const Config &/*cfg*/) {
+        this->parse_login_salt();
+    });
+}
+
+void RemoteAccess::parse_login_salt()
+{
+    uint8_t login_salt[48];
+    {
+        StaticJsonDocument<1024> doc;
+        DeserializationError error = deserializeJson(doc, response_body.c_str(), response_body.length());
+        if (error) {
+            update_registration_state(RegistrationState::Error, String("Error while deserializing login-salt"));
+            this->request_cleanup();
+            return;
+        }
+    if (!parse_array_from_json(doc.as<JsonArrayConst>(), login_salt, ARRAY_SIZE(login_salt))) {
+            update_registration_state(RegistrationState::Error, String("Invalid login-salt array"));
+            this->request_cleanup();
+            return;
+        }
+        response_body.clear();
+    }
+
+    char base64[65] = {};
+    size_t bytes_written;
+    if (mbedtls_base64_encode(reinterpret_cast<uint8_t *>(base64), sizeof(base64), &bytes_written, login_salt, ARRAY_SIZE(login_salt)) != 0) {
+        update_registration_state(RegistrationState::Error, String("Error while encoding login-salt"));
+        this->request_cleanup();
+        return;
+    }
+    update_registration_state(RegistrationState::Success, String(base64));
+    this->management_request_allowed = true;
+}
+
+void RemoteAccess::login(const Config &user_config, const String &login_key)
+{
+    update_registration_state(RegistrationState::InProgress);
+    const String url = construct_relay_url(user_config, "/api/auth/login");
+
+    String body;
+    DynamicJsonDocument doc(512);
+
+    doc["email"] = user_config.get("email")->asString();
+    uint8_t key[24] = {};
+    size_t written;
+    if (mbedtls_base64_decode(key, 24, &written, reinterpret_cast<const uint8_t *>(login_key.c_str()), login_key.length()) != 0) {
+        update_registration_state(RegistrationState::Error, String("Error while decoding login-salt"));
+        this->request_cleanup();
+        return;
+    }
+
+    for (size_t i = 0; i < 24; i++) {
+        doc["login_key"].add(key[i]);
+    }
+    serializeJson(doc, body);
+
+    run_request_with_next_stage(url, HTTP_METHOD_POST, body.c_str(), body.length(), user_config, [this](const Config &/*cfg*/) {
+        update_registration_state(RegistrationState::Success);
+        response_body.clear();
+    });
+}
+
+void RemoteAccess::get_secret(const Config &user_config)
+{
+    update_registration_state(RegistrationState::InProgress);
+    const String url = construct_relay_url(user_config, "/api/user/get_secret");
+
+    run_request_with_next_stage(url, HTTP_METHOD_GET, nullptr, 0, user_config, [this](const Config &/*cfg*/) {
+        this->parse_secret();
+    });
+}
+
+void RemoteAccess::parse_secret()
+{
+    StaticJsonDocument<2048> doc;
+
+    {
+        DeserializationError error = deserializeJson(doc, response_body.c_str());
+        if (error) {
+            char err_str[64];
+            snprintf(err_str, sizeof(err_str), "Error while deserializing Secret: %s", error.c_str());
+            update_registration_state(RegistrationState::Error, String(err_str));
+            this->request_cleanup();
+            return;
+        }
+        response_body.clear();
+    }
+
+    encrypted_secret = heap_alloc_array<uint8_t>(crypto_box_SECRETKEYBYTES + crypto_secretbox_MACBYTES);
+    if (encrypted_secret == nullptr) {
+        update_registration_state(RegistrationState::Error, String("Low memory"));
+        this->request_cleanup();
+        return;
+    }
+    {
+        uint8_t secret_buf[crypto_box_SECRETKEYBYTES + crypto_secretbox_MACBYTES];
+    if (!parse_array_from_json(doc["secret"].as<JsonArrayConst>(), secret_buf, crypto_box_SECRETKEYBYTES + crypto_secretbox_MACBYTES)) {
+            update_registration_state(RegistrationState::Error, String("Invalid secret array"));
+            this->request_cleanup();
+            return;
+        }
+        memcpy(encrypted_secret.get(), secret_buf, sizeof(secret_buf));
+    }
+
+    secret_nonce = heap_alloc_array<uint8_t>(crypto_secretbox_NONCEBYTES);
+    if (encrypted_secret == nullptr) {
+        update_registration_state(RegistrationState::Error, String("Low memory"));
+        this->request_cleanup();
+        return;
+    }
+    {
+        uint8_t nonce_buf[crypto_secretbox_NONCEBYTES];
+    if (!parse_array_from_json(doc["secret_nonce"].as<JsonArrayConst>(), nonce_buf, crypto_secretbox_NONCEBYTES)) {
+            update_registration_state(RegistrationState::Error, String("Invalid secret_nonce array"));
+            this->request_cleanup();
+            return;
+        }
+        memcpy(secret_nonce.get(), nonce_buf, sizeof(nonce_buf));
+    }
+
+    uint8_t secret_salt[48];
+    if (!parse_array_from_json(doc["secret_salt"].as<JsonArrayConst>(), secret_salt, 48)) {
+        update_registration_state(RegistrationState::Error, String("Invalid secret_salt array"));
+        this->request_cleanup();
+        return;
+    }
+    uint8_t encoded_secret_salt[65] = {};
+    size_t olen = 0;
+    if (mbedtls_base64_encode(encoded_secret_salt, ARRAY_SIZE(encoded_secret_salt), &olen, secret_salt, ARRAY_SIZE(secret_salt)) != 0) {
+        update_registration_state(RegistrationState::Error, String("Error while encoding secret-salt"));
+        this->request_cleanup();
+        return;
+    }
+
+    update_registration_state(RegistrationState::Success, String(reinterpret_cast<char *>(encoded_secret_salt)));
+}
+
+void RemoteAccess::parse_registration(const Config &user_config, std::queue<WgKey> &keys, const String &public_key)
+{
+    StaticJsonDocument<256> resp_doc;
+    DeserializationError error = deserializeJson(resp_doc, response_body.begin(), response_body.length());
+
+    if (error) {
+        char err_str[64];
+        snprintf(err_str, sizeof(err_str), "Error while deserializing registration response: %s", error.c_str());
+        update_registration_state(RegistrationState::Error, String(err_str));
+        this->request_cleanup();
+        return;
+    }
+
+    if (resp_doc["charger_uuid"] == "null" || resp_doc["charger_password"] == "null" || resp_doc["management_pub"] == "null") {
+        update_registration_state(RegistrationState::Error, String("Missing fields in registration response"));
+        this->request_cleanup();
+        return;
+    }
+
+    const char *charger_password = resp_doc["charger_password"];
+    const char *management_pub = resp_doc["management_pub"];
+
+    WgKey &mgmt = keys.front();
+    store_key(0, 0, mgmt.priv.c_str(), mgmt.psk.c_str(), management_pub);
+    keys.pop();
+
+    for (uint8_t i = 0; !keys.empty() && i < OPTIONS_REMOTE_ACCESS_MAX_KEYS_PER_USER(); i++, keys.pop()) {
+        WgKey &key = keys.front();
+        store_key(1, i, key.priv.c_str(), key.psk.c_str(), key.pub.c_str());
+    }
+
+    this->config.get("relay_host")->updateString(user_config.get("relay_host")->asString());
+    this->config.get("relay_port")->updateUint(user_config.get("relay_port")->asUint());
+    this->config.get("enable")->updateBool(user_config.get("enable")->asBool());
+    this->config.get("cert_id")->updateInt(user_config.get("cert_id")->asInt());
+    this->config.get("mtu")->updateUint(user_config.get("mtu")->asUint());
+    this->config.get("password")->updateString(charger_password);
+    this->config.get("uuid")->updateString(resp_doc["charger_uuid"]);
+
+    auto users = this->config.get("users");
+    if (users->count() != 0) {
+        esp_system_abort("Expected 'users' to be empty");
+    }
+    auto new_user = users->add();
+    new_user->get("email")->updateString(user_config.get("email")->asString());
+    new_user->get("id")->updateUint(1);
+    new_user->get("public_key")->updateString(public_key);
+    new_user->get("uuid")->updateString(resp_doc["user_id"]);
+
+    API::writeConfig("remote_access/config", &this->config);
+    this->apply_config();
+    update_registration_state(RegistrationState::Success);
+    this->request_cleanup();
+}
+
+void RemoteAccess::parse_add_user(std::queue<WgKey> &key_cache, const String &pub_key, const String &email, uint8_t next_user_id)
+{
+    for (uint8_t i = 0; !key_cache.empty() && i < OPTIONS_REMOTE_ACCESS_MAX_KEYS_PER_USER(); i++, key_cache.pop()) {
+        const WgKey &key = key_cache.front();
+        store_key(next_user_id, i, key.priv.c_str(), key.psk.c_str(), key.pub.c_str());
+    }
+
+    StaticJsonDocument<256> resp_doc;
+    DeserializationError error = deserializeJson(resp_doc, response_body.begin(), response_body.length());
+
+    if (error) {
+        char err_str[64];
+        snprintf(err_str, sizeof(err_str), "Error while deserializing add user response: %s", error.c_str());
+        update_registration_state(RegistrationState::Error, String(err_str));
+        this->request_cleanup();
+        return;
+    }
+
+    if (resp_doc["user_id"] == "null") {
+        update_registration_state(RegistrationState::Error, String("User ID missing in response"));
+        this->request_cleanup();
+        return;
+    }
+    auto new_user = this->config.get("users")->add();
+    new_user->get("email")->updateString(email);
+    new_user->get("id")->updateUint(next_user_id);
+    new_user->get("public_key")->updateString(pub_key);
+    new_user->get("uuid")->updateString(resp_doc["user_id"]);
+    api.writeConfig("remote_access/config", &this->config);
+    update_registration_state(RegistrationState::Success);
+}
+
+#if MODULE_CHARGE_TRACKER_AVAILABLE()
+static std::vector<int> find_charge_tracker_configs(const uint8_t user_id) {
+    std::vector<int> result;
+    for (size_t i = 0; i < charge_tracker.config.get("remote_upload_configs")->count(); i++) {
+        Config::Wrap user = charge_tracker.config.get("remote_upload_configs")->get(i);
+        if (user->get("user_id")->asInt() == user_id) {
+            result.push_back(static_cast<int>(i));
+        }
+    }
+    return result;
+}
+#endif
+
+void RemoteAccess::resolve_management()
+{
+    if (!this->management_request_allowed) {
+        logger.printfln("Management request not allowed, skipping resolve_management");
+        return;
+    }
+
+    task_scheduler.cancel(this->timeout_task_id);
+    this->timeout_task_id = 0;
+
+    const String url = construct_relay_url(config, "/api/management");
+
+    const String &uuid = config.get("uuid")->asString();
+    const String &name = api.getState("info/display_name")->get("display_name")->asString();
+    size_t encrypted_name_size = name.length() + crypto_box_SEALBYTES;
+    size_t encoded_name_size = 4 * (encrypted_name_size / 3) + 5;
+
+    char json[1000];
+    TFJsonSerializer serializer{json, sizeof(json)};
+    serializer.addObject();
+
+    bool old_api;
+    if (uuid.length() == 0) {
+        old_api = true;
+        serializer.addMemberNumber("id", esp32_common.get_uid_num());
+        serializer.addMemberString("password", config.get("password")->asEphemeralCStr());
+        serializer.addMemberObject("data");
+        serializer.addMemberObject("V1");
+        serializer.addMemberNumber("port", network.get_web_server_port());
+        serializer.addMemberString("firmware_version", build_version_full_str());
+        serializer.addMemberNumber("mtu", config.get("mtu")->asUint());
+        serializer.addMemberArray("configured_connections");
+        for (const auto &user : config.get("users")) {
+            uint8_t user_id = user.get("id")->asUint8() - 1;
+            for (uint8_t i = 0; i < OPTIONS_REMOTE_ACCESS_MAX_KEYS_PER_USER(); i++) {
+                serializer.addNumber(static_cast<int32_t>((user_id * OPTIONS_REMOTE_ACCESS_MAX_KEYS_PER_USER()) + i));
+            }
+        }
+        serializer.endArray();
+        serializer.endObject();
+        serializer.endObject();
+    } else {
+        old_api = false;
+        serializer.addMemberObject("data");
+        serializer.addMemberObject("V2");
+        serializer.addMemberString("id", config.get("uuid")->asEphemeralCStr());
+        serializer.addMemberString("password", config.get("password")->asEphemeralCStr());
+        serializer.addMemberNumber("port", network.get_web_server_port());
+        serializer.addMemberString("firmware_version", build_version_full_str());
+        serializer.addMemberNumber("mtu", config.get("mtu")->asUint());
+        serializer.addMemberArray("configured_users");
+        for (const auto &user : config.get("users")) {
+            serializer.addObject();
+
+            // Check if we already have the user_id and use it
+            const String &user_id = user.get("uuid")->asString();
+            if (user_id.length() != 0) {
+                serializer.addMemberString("user_id", user_id.c_str());
+            } else {
+                serializer.addMemberString("email", user.get("email")->asEphemeralCStr());
+            }
+
+            const String &public_key = user.get("public_key")->asString();
+            if (public_key.length() != 0) {
+                auto key = decode_base64(public_key, 32);
+
+                auto encrypted_name = heap_alloc_array<uint8_t>(encrypted_name_size);
+                crypto_box_seal(encrypted_name.get(), reinterpret_cast<const unsigned char *>(name.c_str()), name.length(), key.get());
+
+                auto encoded_name = heap_alloc_array<uint8_t>(encoded_name_size);
+                size_t olen;
+                mbedtls_base64_encode(encoded_name.get(), encoded_name_size, &olen, encrypted_name.get(), encrypted_name_size);
+                serializer.addMemberString("name", reinterpret_cast<char *>(encoded_name.get()));
+            }
+            serializer.endObject();
+        }
+        serializer.endArray();
+        serializer.endObject();
+        serializer.endObject();
+    }
+
+    serializer.endObject();
+    size_t len = serializer.end();
+
+    if (https_client == nullptr) {
+        https_client = std::unique_ptr<AsyncHTTPSClient>{new AsyncHTTPSClient(true)};
+    }
+    https_client->set_header("Content-Type", "application/json");
+    auto callback = [this, old_api](const Config &/*cfg*/) {
+        this->management_request_failed = false;
+        this->management_request_allowed = true;
+        this->management_auth_failed = false;
+
+        if (old_api) {
+            StaticJsonDocument<250> resp;
+            {
+                DeserializationError error = deserializeJson(resp, response_body.c_str());
+                if (error) {
+                    char err_str[64];
+                    snprintf(err_str, sizeof(err_str), "Error while deserializing management response: %s", error.c_str());
+                    this->request_cleanup();
+                    return;
+                }
+                response_body.clear();
+            }
+            config.get("uuid")->updateString(resp["uuid"]);
+            api.writeConfig("remote_access/config", &config);
+
+            this->request_cleanup();
+
+            return;
+        }
+
+        StaticJsonDocument<1024> doc;
+        {
+            DeserializationError error = deserializeJson(doc, response_body.c_str());
+            if (error) {
+                char err_str[64];
+                snprintf(err_str, sizeof(err_str), "Error while deserializing management response: %s", error.c_str());
+                this->request_cleanup();
+                return;
+            }
+            response_body.clear();
+        }
+
+        bool changed = false;
+        auto users = config.get("users");
+        for (int sidx = static_cast<int>(users->count()) - 1; sidx >= 0; sidx--) {
+            size_t idx = static_cast<size_t>(sidx);
+            const String &user_email = doc["configured_users_emails"][idx];
+            const String &user_uuid = doc["configured_users_uuids"][idx];
+            auto user = users->get(idx);
+
+            if (doc["configured_users"][idx] == 0) {
+                uint8_t user_id = user->get("id")->asUint8();
+                for (uint8_t i = 0; i < OPTIONS_REMOTE_ACCESS_MAX_KEYS_PER_USER(); i++) {
+                    remove_key(user_id, i);
+                }
+#if MODULE_CHARGE_TRACKER_AVAILABLE()
+                const std::vector<int> ct_indices = find_charge_tracker_configs(user_id);
+                for (const int ct_idx : ct_indices) {
+                    charge_tracker.config.get("remote_upload_configs")->remove(static_cast<size_t>(ct_idx));
+                }
+#endif
+                users->remove(idx);
+                changed = true;
+            } else if (user_email != "null") {
+                changed |= user->get("email")->updateString(user_email);
+                changed |= user->get("uuid")->updateString(user_uuid);
+            }
+        }
+
+        if (changed) {
+            api.writeConfig("remote_access/config", &config);
+
+#if MODULE_CHARGE_TRACKER_AVAILABLE()
+            api.writeConfig("charge_tracker/config", &charge_tracker.config);
+#endif
+        }
+
+        this->management_request_done = true;
+        this->last_mgmt_alive = now_us();
+        this->request_cleanup();
+        // Don't reconnect if authentication failed
+        if (!this->management_auth_failed) {
+            this->start_timeout_task();
+            this->connect_management();
+        }
+        this->connection_state.get(0)->get("state")->updateEnum(ConnectionState::Disconnected);
+    };
+    this->management_request_allowed = false;
+    run_request_with_next_stage(url, HTTP_METHOD_PUT, json, len, config, std::move(callback));
+}
+
+void RemoteAccess::cleanup_after()
+{
+    task_scheduler.scheduleOnce(
+        [this] {
+            this->request_cleanup();
+        },
+        0_s);
+}
+
+static int management_filter_in(struct pbuf *packet)
+{
+    // When this function is called it is already ensured that the payload contains a valid ip packet.
+    uint8_t *payload = static_cast<uint8_t *>(packet->payload);
+
+    if (payload[9] != 0x1 && payload[9] != 0x6 && payload[9] != 0x11) {
+        logger.printfln("Management blocked invalid incoming packet with protocol: 0x%X", payload[9]);
+        return ERR_VAL;
+    }
+
+    int ip_header_len = (payload[0] & 0xF) * 4;
+
+    uint16_t dest_port = payload[ip_header_len + 2] << 8;
+    dest_port |= payload[ip_header_len + 3];
+    if (dest_port == 0 || (dest_port != 12345 && dest_port != remote_access.send_port)) {
+        logger.printfln("Management blocked invalid incoming packet with destination port: %i.", dest_port);
+        return ERR_VAL;
+    }
+    return ERR_OK;
+}
+
+static int management_filter_out(struct pbuf *packet)
+{
+    uint8_t *payload = static_cast<uint8_t *>(packet->payload);
+
+    // Allow ICMP (0x1), TCP (0x6) packets, and UDP (0x11)
+    if (payload[9] == 0x1 || payload[9] == 0x6 || payload[9] == 0x11) {
+        return ERR_OK;
+    } else {
+        logger.printfln("Management blocked outgoing packet");
+    }
+    return ERR_VAL;
+}
+
+static bool port_valid(uint16_t port)
+{
+    bool port_valid = false;
+    int sock = socket(AF_INET, SOCK_DGRAM, 0);
+    if (sock < 0) {
+        return port_valid;
+    }
+
+    struct sockaddr_in local_addr;
+    memset(&local_addr, 0, sizeof(local_addr));
+
+    //local_addr.sin_addr.s_addr = inet_addr("0.0.0.0"); // address already set by memset
+    local_addr.sin_family = AF_INET;
+    local_addr.sin_port = htons(port);
+    int ret = bind(sock, reinterpret_cast<struct sockaddr *>(&local_addr), sizeof(local_addr));
+    if (ret == 0) {
+        port_valid = true;
+    }
+    close(sock);
+    return port_valid;
+}
+
+// returning 0 means no free port found
+static uint16_t find_next_free_port(uint16_t port)
+{
+    // the largest port we call this function with is 51825 so simply adding 100 is safe
+    const uint16_t start_port = port;
+    while (!port_valid(port) && port < start_port + 100) {
+        port++;
+    }
+
+    if (port >= start_port + 100) {
+        return 0;
+    }
+
+    return port;
+}
+
+void RemoteAccess::request_cleanup()
+{
+    https_client = nullptr;
+    encrypted_secret = nullptr;
+    secret_nonce = nullptr;
+    response_body.clear();
+    management_request_allowed = true;
+}
+
+int RemoteAccess::send_to_mgmt_server(const void *data, size_t len)
+{
+    if (inner_socket < 0) {
+        return -1;
+    }
+
+    struct sockaddr_in dest_addr;
+    memset(&dest_addr, 0, sizeof(dest_addr));
+    dest_addr.sin_family = AF_INET;
+    dest_addr.sin_port = htons(12345);
+    dest_addr.sin_addr.s_addr = inet_addr("10.123.123.3");
+
+    return sendto(inner_socket, data, len, 0,
+                  reinterpret_cast<struct sockaddr *>(&dest_addr), sizeof(dest_addr));
+}
+
+bool RemoteAccess::is_mgmt_connected() const
+{
+    return management != nullptr && management_request_done && inner_socket >= 0;
+}
+
+void RemoteAccess::connect_management()
+{
+    struct timeval tv;
+    if (!rtc.clock_synced(&tv)) {
+        task_scheduler.scheduleOnce(
+            [this]() {
+                this->connect_management();
+            },
+            5_s);
+        return;
+    }
+    management = nullptr;
+
+    const IPAddress internal_ip     { 10,123,123,2};
+    const IPAddress internal_subnet {255,255,255,0};
+    const IPAddress internal_gateway{ 10,123,123,1};
+    const IPAddress allowed_ip      (IPv4); // 0.0.0.0
+    const IPAddress allowed_subnet  (IPv4); // 0.0.0.0
+
+    auto key_buf = heap_alloc_array<char>(3 * (WG_KEY_LENGTH + 1));
+    char *private_key       = key_buf.get() + 0 * (WG_KEY_LENGTH + 1);
+    char *psk               = key_buf.get() + 1 * (WG_KEY_LENGTH + 1);
+    char *remote_public_key = key_buf.get() + 2 * (WG_KEY_LENGTH + 1);
+
+    // WireGuard decodes those (base64 encoded) keys and stores them.
+    if (!get_key(0, 0, private_key, psk, remote_public_key)) {
+        logger.printfln("Can't connect to management server: no WireGuard key installed!");
+        return;
+    }
+
+    // Only used for BLOCKING! DNS resolve. TODO Make this non-blocking in Wireguard-ESP32-Arduino/src/WireGuard.cpp!
+    const char *remote_host = config.get("relay_host")->asUnsafeCStr();
+
+    logger.printfln("Connecting to Management WireGuard peer %s:51820", remote_host);
+
+    management = std::make_unique<WireGuard>();
+
+    const uint16_t local_port = find_next_free_port(51820);
+    if (local_port == 0) {
+        logger.printfln("No free port found for management connection");
+        return;
+    }
+    this->setup_inner_socket();
+    // management->begin copys the keys.
+    management->begin(internal_ip,
+                      internal_subnet,
+                      local_port,
+                      internal_gateway,
+                      private_key,
+                      remote_host,
+                      remote_public_key,
+                      51820,
+                      allowed_ip,
+                      allowed_subnet,
+                      false,
+                      psk,
+                      &management_filter_in,
+                      &management_filter_out,
+                      [](uint8_t peer_index, bool up, const ip_addr_t *addr, uint16_t port, void *user_data) {
+                        // Currently only one peer is supported.
+                        if (peer_index != 0)
+                            return;
+
+                        task_scheduler.scheduleOnce([peer_index, up, addr_cpy=*addr, port]() {
+                            remote_access.update_peer_info(255, peer_index, up, &addr_cpy, port);
+                        });
+                      },
+                      nullptr,
+                      config.get("mtu")->asUint16());
+
+    if (!management_task_id) {
+        management_task_id = task_scheduler.scheduleWithFixedDelay(
+            [this]() {
+                this->run_management();
+            },
+            250_ms);
+    }
+}
+
+void RemoteAccess::connect_remote_access(uint8_t i, uint16_t local_port)
+{
+    struct timeval tv;
+    if (!rtc.clock_synced(&tv)) {
+        task_scheduler.scheduleOnce(
+            [this, i, local_port]() {
+                this->connect_remote_access(i, local_port);
+            },
+            5_s);
+        return;
+    }
+
+    const IPAddress internal_ip     { 10,123,  i,2};
+    const IPAddress internal_subnet {255,255,255,0};
+    const IPAddress internal_gateway{ 10,123,  i,1};
+    const IPAddress allowed_ip      (IPv4); // 0.0.0.0
+    const IPAddress allowed_subnet  (IPv4); // 0.0.0.0
+
+    // WireGuard decodes those (base64 encoded) keys and stores them.
+    char private_key[WG_KEY_LENGTH + 1];
+    char psk[WG_KEY_LENGTH + 1];
+    char remote_public_key[WG_KEY_LENGTH + 1];
+
+    uint8_t conn_id = i % OPTIONS_REMOTE_ACCESS_MAX_KEYS_PER_USER();
+    uint8_t user_id = i / OPTIONS_REMOTE_ACCESS_MAX_KEYS_PER_USER();
+    if (!get_key(user_id + 1, conn_id, private_key, psk, remote_public_key)) {
+        logger.printfln("Can't connect to web interface: no WireGuard key installed!");
+        return;
+    }
+
+    // Only used for BLOCKING! DNS resolve. TODO Make this non-blocking in Wireguard-ESP32-Arduino/src/WireGuard.cpp!
+    const char *remote_host = config.get("relay_host")->asUnsafeCStr();
+
+    uint8_t conn_idx = get_connection(i);
+    if (conn_idx == 255) {
+        logger.printfln("No free connection found");
+        return;
+    }
+    remote_connections[conn_idx].id = i;
+    remote_connections[conn_idx].conn = std::make_unique<WireGuard>();
+
+    remote_connections[conn_idx].conn->begin(internal_ip,
+                   internal_subnet,
+                   local_port,
+                   internal_gateway,
+                   private_key,
+                   remote_host,
+                   remote_public_key,
+                   51820,
+                   allowed_ip,
+                   allowed_subnet,
+                   false,
+                   psk,
+                   nullptr,
+                   nullptr,
+                   [](uint8_t peer_index, bool up, const ip_addr_t *addr, uint16_t port, void *user_data) {
+                    // Currently only one peer is supported.
+                    if (peer_index != 0)
+                        return;
+                    uint8_t connection_idx = static_cast<uint8_t>(reinterpret_cast<uintptr_t>(user_data));
+
+                    task_scheduler.scheduleOnce([connection_idx, peer_index, up, addr_cpy=*addr, port]() {
+                        remote_access.update_peer_info(connection_idx, peer_index, up, &addr_cpy, port);
+                    });
+                   },
+                   reinterpret_cast<void *>(conn_idx),
+                   config.get("mtu")->asUint16());
+
+    update_connection_state(conn_idx, user_id, conn_id, ConnectionState::Disconnected);
+}
+
+void RemoteAccess::update_peer_info(uint8_t conn_idx, uint8_t peer_index, bool up, const ip_addr_t *addr, uint16_t port) {
+    if (conn_idx == 255) { // Management connection
+        struct timeval now;
+        if (!rtc.clock_synced(&now)) {
+            // This should never happen
+            logger.printfln("Management connection established but no RTC sync?");
+        }
+
+        ConnectionState state = ConnectionState::Disconnected;
+        // This check was necessary before, but can probably removed now?
+        // Can management be reset to nullptr while this task is in flight?
+        if (management != nullptr) {
+            state = up ? ConnectionState::Connected : ConnectionState::Disconnected;
+        }
+        if (state == ConnectionState::Connected) {
+            this->last_mgmt_alive = now_us();
+        }
+
+        auto mgmt_state = this->connection_state.get(0);
+        if (mgmt_state->get("state")->updateEnum(state)) {
+            mgmt_state->get("last_state_change")->updateUint53(static_cast<uint64_t>(now.tv_sec));
+            if (state == ConnectionState::Connected) {
+                logger.printfln("Management connection connected");
+                task_scheduler.cancel(this->timeout_task_id);
+                this->timeout_task_id = 0;
+            } else {
+                in_seq_number = 0;
+                this->management_request_done = false;
+                logger.printfln("Management connection disconnected");
+                // Close all remote access connections when management connection is lost
+                this->close_all_remote_connections();
+            }
+        }
+    } else {
+        struct timeval now;
+        if (!rtc.clock_synced(&now)) {
+            now.tv_sec = 0;
+        }
+        ConnectionState state = ConnectionState::Disconnected;
+        if (this->remote_connections[conn_idx].conn != nullptr) {
+            state = up ? ConnectionState::Connected : ConnectionState::Disconnected;
+        }
+
+        auto conn_state = this->connection_state.get(conn_idx + 1); // 0 is the management connection
+        if (conn_state->get("state")->updateEnum(state)) {
+            uint32_t conn = conn_state->get("connection")->asUint();
+            uint32_t user = conn_state->get("user")->asUint();
+            conn_state->get("last_state_change")->updateUint53(static_cast<uint64_t>(now.tv_sec));
+            if (state == ConnectionState::Connected) {
+                logger.printfln("Connection %lu for user %lu connected", conn, user);
+            } else if (state == ConnectionState::Disconnected && conn != 255 && user != 255) {
+                logger.printfln("Connection %lu for user %lu disconnected", conn, user);
+            }
+        }
+    }
+}
+
+void RemoteAccess::setup_inner_socket()
+{
+    if (inner_socket >= 0) {
+        return;
+    }
+
+    inner_socket = socket(AF_INET, SOCK_DGRAM, IPPROTO_IP);
+    if (inner_socket < 0) {
+        logger.printfln("Failed to create inner socket: %s (%i)", strerror(errno), errno);
+        return;
+    }
+
+    struct sockaddr_in local_addr;
+    memset(&local_addr, 0, sizeof(local_addr));
+
+    //local_addr.sin_addr.s_addr = inet_addr("0.0.0.0"); // address is already set by memset
+    local_addr.sin_family = AF_INET;
+    local_addr.sin_port = htons(12345);
+    int ret = bind(inner_socket, reinterpret_cast<struct sockaddr *>(&local_addr), sizeof(local_addr));
+    if (ret < 0) {
+        logger.printfln("Binding socket to port 12345 caused an error: %s (%i)", strerror(errno), errno);
+        close(inner_socket);
+        inner_socket = -1;
+        return;
+    }
+
+    ret = fcntl(inner_socket, F_SETFL, O_NONBLOCK);
+    if (ret < 0) {
+        logger.printfln("Setting socket to non-blocking caused an error: %s (%i)", strerror(errno), errno);
+        close(inner_socket);
+        inner_socket = -1;
+    }
+}
+
+uint8_t RemoteAccess::get_connection(int32_t conn_id)
+{
+    uint8_t first_free_idx = 255;
+    for (uint8_t i = 0; i < MAX_USER_CONNECTIONS; i++) {
+        if (remote_connections[i].id == static_cast<uint8_t>(conn_id)) {
+            return i;
+        } else if (remote_connections[i].conn == nullptr && first_free_idx == 255) {
+            first_free_idx = i;
+        }
+    }
+
+    return first_free_idx;
+}
+
+void RemoteAccess::run_management()
+{
+    if (inner_socket < 0) {
+        return;
+    }
+
+    uint8_t buf[sizeof(management_command_packet)];
+    struct sockaddr from;
+    socklen_t from_len = sizeof(sockaddr);
+    int ret = recvfrom(inner_socket, &buf, sizeof(management_command_packet), 0, &from, &from_len);
+
+    if (ret < 0) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            return;
+        }
+        close(inner_socket);
+        inner_socket = -1;
+        setup_inner_socket();
+        return;
+    }
+
+    // Try to feed Ack/Nack packets to the charge tracker's charge log send state machine.
+#if MODULE_CHARGE_TRACKER_AVAILABLE()
+    if (ret >= static_cast<int>(sizeof(management_packet_header))) {
+        const auto *header = reinterpret_cast<const management_packet_header *>(buf);
+        if (header->magic == 0x1234 && (header->type != PacketType::ManagementCommand)) {
+            NackReason nack_reason = {};
+            if (header->type == PacketType::Nack && ret >= static_cast<int>(sizeof(management_packet_header) + 1)) {
+                nack_reason = static_cast<NackReason>(buf[sizeof(management_packet_header)]);
+            }
+            if (charge_tracker.handle_charge_log_send_packet(header->type, nack_reason)) {
+                return;
+            }
+        }
+    }
+#endif
+
+    if (ret != sizeof(management_command_packet)) {
+        logger.printfln("Didnt receive Management command.");
+        return;
+    }
+
+    management_command_packet *command_packet = reinterpret_cast<management_command_packet *>(buf);
+    if (command_packet->header.magic != 0x1234 || command_packet->header.length != sizeof(management_command)) {
+        return;
+    }
+
+    if (static_cast<int16_t>(command_packet->header.seq_num - in_seq_number) > 0) {
+        in_seq_number = command_packet->header.seq_num;
+    } else {
+        return;
+    }
+
+    management_command *command = &command_packet->command;
+    if (static_cast<uint32_t>(command->connection_no) >= OPTIONS_REMOTE_ACCESS_MAX_KEYS_PER_USER() * OPTIONS_REMOTE_ACCESS_MAX_USERS()) {
+        return;
+    }
+
+    uint8_t conn_idx = get_connection(command->connection_no);
+    if (conn_idx == 255) {
+        logger.printfln("No free connection found");
+        return;
+    }
+    auto &conn = remote_connections[conn_idx].conn;
+    switch (command->command_id) {
+        case management_command_id::Connect: {
+            remote_connections[conn_idx].id = static_cast<uint8_t>(command->connection_no);
+            // Check if connection is already established or currently being set up
+            if (conn != nullptr || remote_connections[conn_idx].in_progress) {
+                return;
+            }
+
+            remote_connections[conn_idx].in_progress = true;
+
+            uint8_t conn_no = static_cast<uint8_t>(command->connection_no);
+
+            if (conn == nullptr) {
+                uint8_t conn_id = conn_no % OPTIONS_REMOTE_ACCESS_MAX_KEYS_PER_USER();
+                uint8_t user_id = conn_no / OPTIONS_REMOTE_ACCESS_MAX_KEYS_PER_USER();
+                logger.printfln("Opening connection %u for user %u", conn_id, user_id);
+            }
+
+            uint16_t local_port = 51821;
+            port_discovery_packet response;
+            response.charger_id = esp32_common.get_uid_num();
+            response.connection_no = command->connection_no;
+            memcpy(&response.connection_uuid, &command->connection_uuid, 16);
+
+            const String &remote_host = config.get("relay_host")->asString();
+            if (conn != nullptr) {
+                conn->end();
+                conn = nullptr;
+            }
+            local_port = find_next_free_port(local_port);
+            if (local_port == 0) {
+                logger.printfln("No free port found for remote access connection");
+                remote_connections[conn_idx].in_progress = false;
+                return;
+            }
+
+            dns_gethostbyname_addrtype_lwip_ctx_async(remote_host.c_str(), [this, response, local_port, conn_no, conn_idx](dns_gethostbyname_addrtype_lwip_ctx_async_data *data) {
+                if (data->err != ERR_OK) {
+                    if (data->err == ERR_CONN) {
+                        logger.printfln("Failed to resolve remote host: no address associated with hostname");
+                    } else {
+                        logger.printfln("Failed to resolve remote host: DNS error %i", data->err);
+                    }
+                    return;
+                }
+
+                create_sock_and_send_to(&response, sizeof(response), data->addr, 51820, local_port);
+                connect_remote_access(conn_no, local_port);
+                // Clear in_progress flag after connection setup is initiated
+                remote_connections[conn_idx].in_progress = false;
+            }, LWIP_DNS_ADDRTYPE_IPV4);
+        } break;
+
+        case management_command_id::Disconnect: {
+            remote_connections[conn_idx].id = 255;
+            remote_connections[conn_idx].in_progress = false;
+            if (conn == nullptr) {
+                logger.printfln("Not found");
+                break;
+            }
+            auto conn_state = connection_state.get(conn_idx + 1);
+            logger.printfln("Closing connection %lu for user %lu",
+                            conn_state->get("connection")->asUint(),
+                            conn_state->get("user")->asUint());
+            conn->end();
+            conn = nullptr;
+            update_connection_state(conn_idx, 255, 255, ConnectionState::Disconnected);
+        } break;
+
+        default:
+            logger.printfln("Unknown management command: %d", command->command_id);
+            break;
+    }
+}
+
+void RemoteAccess::close_all_remote_connections() {
+    timeval now;
+    if (!rtc.clock_synced(&now)) {
+        now.tv_sec = 0;
+    }
+    for (uint8_t i = 0; i < MAX_USER_CONNECTIONS; i++) {
+        // Always clear in_progress flag when closing all connections
+        remote_connections[i].in_progress = false;
+        if (remote_connections[i].conn != nullptr) {
+            auto conn_state = connection_state.get(i + 1);
+            logger.printfln("Closing connection %lu for user %lu",
+                            conn_state->get("connection")->asUint(),
+                            conn_state->get("user")->asUint());
+            remote_connections[i].conn->end();
+            remote_connections[i].conn = nullptr;
+            remote_connections[i].id = 255;
+            update_connection_state(i, 255, 255, ConnectionState::Disconnected);
+        }
+    }
+}
+
+static void on_ping_success(esp_ping_handle_t handle, void *args) {
+    uint8_t ttl;
+    uint16_t seqno;
+    uint32_t elapsed_time, recv_len;
+    ip_addr_t target_addr;
+
+    esp_ping_get_profile(handle, ESP_PING_PROF_SEQNO, &seqno, sizeof(seqno));
+    esp_ping_get_profile(handle, ESP_PING_PROF_TTL, &ttl, sizeof(ttl));
+    esp_ping_get_profile(handle, ESP_PING_PROF_IPADDR, &target_addr, sizeof(target_addr));
+    esp_ping_get_profile(handle, ESP_PING_PROF_SIZE, &recv_len, sizeof(recv_len));
+    esp_ping_get_profile(handle, ESP_PING_PROF_TIMEGAP, &elapsed_time, sizeof(elapsed_time));
+    logger.printfln("Ping: seqno=%u, ttl=%u, elapsed_time=%lu ms, recv_len=%lu bytes", seqno, ttl, elapsed_time, recv_len);
+
+    PingArgs *ping_args = static_cast<PingArgs *>(args);
+    ping_args->packets_sent++;
+
+    ping_args->packets_received++;
+    task_scheduler.scheduleOnce(
+        [ping_args]() {
+            Config &ping_state = remote_access.get_ping_state();
+
+            ping_state.get("packets_sent")->updateUint(ping_args->packets_sent);
+            ping_state.get("packets_received")->updateUint(ping_args->packets_received);
+            ping_state.get("time_elapsed_ms")->updateUptime(now_us() - remote_access.get_ping_start());
+        },
+    0_ms);
+}
+
+static void on_ping_timeout(esp_ping_handle_t handle, void *args) {
+    uint16_t seqno;
+    ip_addr_t target_addr;
+
+    esp_ping_get_profile(handle, ESP_PING_PROF_SEQNO, &seqno, sizeof(seqno));
+    esp_ping_get_profile(handle, ESP_PING_PROF_IPADDR, &target_addr, sizeof(target_addr));
+    logger.printfln("Ping timeout: seqno=%u", seqno);
+
+    PingArgs *ping_args = static_cast<PingArgs *>(args);
+    ping_args->packets_sent++;
+    task_scheduler.scheduleOnce(
+        [ping_args]() {
+            Config &ping_state = remote_access.get_ping_state();
+
+            ping_state.get("packets_sent")->updateUint(ping_args->packets_sent);
+            ping_state.get("packets_received")->updateUint(ping_args->packets_received);
+            ping_state.get("time_elapsed_ms")->updateUptime(now_us() - remote_access.get_ping_start());
+        },
+    0_ms);
+}
+
+static void on_ping_end(esp_ping_handle_t handle, void *args) {
+    uint32_t transmitted;
+    uint32_t received;
+    uint32_t total_time_ms;
+
+    esp_ping_get_profile(handle, ESP_PING_PROF_REQUEST, &transmitted, sizeof(transmitted));
+    esp_ping_get_profile(handle, ESP_PING_PROF_REPLY, &received, sizeof(received));
+    esp_ping_get_profile(handle, ESP_PING_PROF_DURATION, &total_time_ms, sizeof(total_time_ms));
+    logger.printfln("Ping end: packets transmitted=%lu, received=%lu, total_time_ms=%lu", transmitted, received, total_time_ms);
+
+    PingArgs *ping_args = static_cast<PingArgs *>(args);
+    task_scheduler.scheduleOnce(
+        [ping_args, transmitted, received]() {
+            Config &ping_state = remote_access.get_ping_state();
+
+            ping_state.get("packets_sent")->updateUint(transmitted);
+            ping_state.get("packets_received")->updateUint(received);
+            ping_state.get("time_elapsed_ms")->updateUptime(now_us() - remote_access.get_ping_start());
+
+            delete ping_args;
+        },
+    0_s);
+}
+
+int RemoteAccess::start_ping() {
+    const char *host = config.get("relay_host")->asEphemeralCStr();
+
+    dns_gethostbyname_addrtype_lwip_ctx_async( host, [this, host](dns_gethostbyname_addrtype_lwip_ctx_async_data *data) {
+        if (data->err != ERR_OK) {
+            if (data->err == ERR_CONN) {
+                logger.printfln("Failed to resolve '%s' for ping: no address associated with hostname", host);
+            } else {
+                logger.printfln("Failed to resolve '%s' for ping: DNS error %i", host, data->err);
+            }
+            return;
+        }
+
+        PingArgs *ping_args = new PingArgs();
+
+        esp_ping_config_t ping_config = ESP_PING_DEFAULT_CONFIG();
+        ping_config.target_addr = data->addr;
+        ping_config.count = ESP_PING_COUNT_INFINITE;
+
+        esp_ping_callbacks_t cbs;
+        cbs.on_ping_success = on_ping_success;
+        cbs.on_ping_timeout = on_ping_timeout;
+        cbs.on_ping_end = on_ping_end;
+        cbs.cb_args = static_cast<void *>(ping_args);
+        esp_ping_new_session(&ping_config, &cbs, &ping);
+        esp_ping_start(ping);
+
+        ping_start = now_us();
+
+        char str[INET_ADDRSTRLEN];
+        inet_ntop(AF_INET, &data->addr, str, sizeof(str));
+        logger.printfln("Start pinging %s(%s)", host, str);
+    }, LWIP_DNS_ADDRTYPE_IPV4);
+
+    return 0;
+}
+
+int RemoteAccess::stop_ping() {
+    if (ping != nullptr) {
+        esp_ping_stop(ping);
+        esp_ping_delete_session(ping);
+        ping = nullptr;
+    }
+
+    return 0;
+}
+
+bool RemoteAccess::parse_uuid_string(const char *uuid_str, uint8_t *out)
+{
+    if (strnlen(uuid_str, 37) != 36) return false;
+
+    // Check dashes are at the correct positions
+    if (uuid_str[8] != '-' || uuid_str[13] != '-' || uuid_str[18] != '-' || uuid_str[23] != '-') return false;
+
+    // Check version field (position 14 must be '4' for UUID v4)
+    if (uuid_str[14] != '4') return false;
+
+    // Check variant bits (position 19 must be 8, 9, a, b, A, or B)
+    char variant = uuid_str[19];
+    if (variant != '8' && variant != '9' &&
+        variant != 'a' && variant != 'b' &&
+        variant != 'A' && variant != 'B') return false;
+
+    size_t out_idx = 0;
+    for (size_t i = 0; i < 35 && out_idx < 16; i++) {
+        if (uuid_str[i] == '-') continue;
+        char hex[3] = {uuid_str[i], uuid_str[i + 1], '\0'};
+        if (!isxdigit(uuid_str[i]) || !isxdigit(uuid_str[i + 1])) return false;
+        out[out_idx++] = static_cast<uint8_t>(strtoul(hex, nullptr, 16));
+        i++; // Skip the second hex digit
+    }
+    return out_idx == 16;
+}
+
+int RemoteAccess::poll_for_mgmt_response(uint32_t timeout_ms, uint8_t *nack_reason)
+{
+    TickType_t start_tick = xTaskGetTickCount();
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wold-style-cast"
+    TickType_t timeout_ticks = timeout_ms / portTICK_PERIOD_MS;
+#pragma GCC diagnostic pop
+
+    while ((xTaskGetTickCount() - start_tick) < timeout_ticks) {
+        fd_set readfds;
+        FD_ZERO(&readfds);
+        FD_SET(inner_socket, &readfds);
+
+        struct timeval tv;
+        tv.tv_sec = 0;
+        tv.tv_usec = 100000; // 100ms increments
+
+        int sel_ret = select(inner_socket + 1, &readfds, NULL, NULL, &tv);
+        if (sel_ret <= 0) {
+            continue;
+        }
+
+        uint8_t buf[32];
+        struct sockaddr_in from;
+        socklen_t from_len = sizeof(from);
+        int received = recvfrom(inner_socket, buf, sizeof(buf), 0,
+                                reinterpret_cast<struct sockaddr *>(&from), &from_len);
+
+        if (received < static_cast<int>(sizeof(management_packet_header))) {
+            continue;
+        }
+
+        management_packet_header *header = reinterpret_cast<management_packet_header *>(buf);
+        if (header->magic != 0x1234) {
+            continue;
+        }
+
+        if (header->type == PacketType::Ack) {
+            return 1;
+        }
+
+        if (header->type == PacketType::Nack && received >= static_cast<int>(sizeof(management_packet_header) + 1)) {
+            if (nack_reason) {
+                *nack_reason = buf[sizeof(management_packet_header)];
+            }
+            return -1;
+        }
+
+        // Ignore other packet types that might arrive
+    }
+
+    return 0; // timeout
+}
+
+void RemoteAccess::release_inner_socket()
+{
+    this->charge_log_sending = false;
+}
+
+int RemoteAccess::begin_charge_log_send(
+    const char *filename, size_t filename_len,
+    const char *display_name, size_t display_name_len,
+    const char *user_uuid_str,
+    Language language)
+{
+    if (!is_mgmt_connected()) {
+        logger.printfln("Cannot send charge log: management connection not established");
+        return -1;
+    }
+
+    if (inner_socket < 0) {
+        logger.printfln("Cannot send charge log: inner socket not available");
+        return -2;
+    }
+
+    // Parse user UUID
+    uint8_t user_uuid[16];
+    if (!parse_uuid_string(user_uuid_str, user_uuid)) {
+        logger.printfln("Cannot send charge log: invalid user UUID '%s'", user_uuid_str);
+        return -3;
+    }
+
+    // Take over inner socket from run_management
+    auto await_ret = task_scheduler.await([this]() {
+        this->charge_log_sending = true;
+        // Flush any pending data
+        uint8_t dummy[128];
+        while (recvfrom(inner_socket, dummy, sizeof(dummy), 0, nullptr, nullptr) > 0) {}
+    });
+    if (!await_ret) {
+        logger.printfln("Cannot send charge log: await failed");
+        return -4;
+    }
+
+    struct sockaddr_in dest_addr;
+    memset(&dest_addr, 0, sizeof(dest_addr));
+    dest_addr.sin_family = AF_INET;
+    dest_addr.sin_port = htons(12345);
+    dest_addr.sin_addr.s_addr = inet_addr("10.123.123.3");
+
+    // Step 1: Send RequestChargeLogSend
+    management_packet_header request_header;
+    request_header.magic = 0x1234;
+    request_header.length = 0;
+    request_header.seq_num = 0;
+    request_header.version = 1;
+    request_header.type = PacketType::RequestChargeLogSend;
+
+    int ret = sendto(inner_socket, &request_header, sizeof(request_header), 0,
+                     reinterpret_cast<struct sockaddr *>(&dest_addr), sizeof(dest_addr));
+    if (ret < 0) {
+        logger.printfln("Failed to send charge log request: %s (%i)", strerror(errno), errno);
+        release_inner_socket();
+        return -5;
+    }
+
+    logger.printfln("Sent RequestChargeLogSend packet");
+
+    // Step 2: Wait for potential Nack (2 seconds)
+    uint8_t nack_reason = 0;
+    int poll_ret = poll_for_mgmt_response(2000, &nack_reason);
+    if (poll_ret < 0) {
+        const char *reason_str = "unknown";
+        switch (static_cast<NackReason>(nack_reason)) {
+            case NackReason::Busy: reason_str = "server busy"; break;
+            case NackReason::TooManyRequests: reason_str = "too many requests"; break;
+            case NackReason::OngoingRequest: reason_str = "ongoing request"; break;
+            case NackReason::Timeout: reason_str = "timeout"; break;
+            case NackReason::Unauthorized: reason_str = "unauthorized"; break;
+            case NackReason::InternalError: reason_str = "internal error"; break;
+            case NackReason::AlreadySent: reason_str = "already sent"; break;
+            default: esp_system_abort("How did we end here? The switch statement should be exhaustive!");
+        }
+        logger.printfln("Charge log request was rejected: %s", reason_str);
+        release_inner_socket();
+        return -6;
+    }
+    // poll_ret == 0 means timeout (expected - server accepted silently)
+    // poll_ret > 0 means unexpected Ack (shouldn't happen but is OK)
+
+    // Step 3: Small delay to ensure server has set up the channel
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wold-style-cast"
+    vTaskDelay(200 / portTICK_PERIOD_MS);
+#pragma GCC diagnostic pop
+
+    // Step 4: Send MetadataForChargeLog
+    const char *lang_str = nullptr;
+    switch (language) {
+        case Language::German:  lang_str = "de"; break;
+        case Language::English: lang_str = "en"; break;
+        case Language::Default: esp_system_abort("This function should not be called with Language::Default");
+        default: esp_system_abort("How did we end here? The switch statement should be exhaustive!");
+    }
+    uint8_t lang[2] = {static_cast<uint8_t>(lang_str[0]), static_cast<uint8_t>(lang_str[1])};
+
+    size_t meta_total = sizeof(management_packet_header) + 16 + sizeof(uint16_t) + sizeof(uint16_t) + 2 + 1 + filename_len + display_name_len;
+    auto meta_buf = heap_alloc_array<uint8_t>(meta_total);
+    if (!meta_buf) {
+        logger.printfln("Cannot send charge log: out of memory for metadata");
+        release_inner_socket();
+        return -7;
+    }
+
+    management_packet_header meta_header;
+    meta_header.magic = 0x1234;
+    meta_header.length = static_cast<uint16_t>(meta_total - sizeof(management_packet_header));
+    meta_header.seq_num = 0;
+    meta_header.version = 1;
+    meta_header.type = PacketType::MetadataForChargeLog;
+
+    size_t written = charge_log_send_metadata_packet::write_to_buffer(
+        meta_buf.get(), meta_total,
+        meta_header,
+        user_uuid,
+        lang,
+        false,
+        filename, static_cast<uint16_t>(filename_len),
+        display_name, static_cast<uint16_t>(display_name_len)
+    );
+
+    if (written == 0) {
+        logger.printfln("Cannot send charge log: metadata buffer too small");
+        release_inner_socket();
+        return -8;
+    }
+
+    ret = sendto(inner_socket, meta_buf.get(), written, 0,
+                 reinterpret_cast<struct sockaddr *>(&dest_addr), sizeof(dest_addr));
+    if (ret < 0) {
+        logger.printfln("Failed to send charge log metadata: %s (%i)", strerror(errno), errno);
+        release_inner_socket();
+        return -9;
+    }
+
+    logger.printfln("Sent MetadataForChargeLog packet (%zu bytes)", written);
+
+    // Step 5: Wait for Ack from server (up to 2 seconds)
+    nack_reason = 0;
+    poll_ret = poll_for_mgmt_response(2000, &nack_reason);
+    if (poll_ret < 0) {
+        logger.printfln("Charge log metadata was rejected (reason: %u)", nack_reason);
+        release_inner_socket();
+        return -10;
+    }
+    if (poll_ret == 0) {
+        logger.printfln("Timed out waiting for Ack after metadata");
+        release_inner_socket();
+        return -11;
+    }
+
+    logger.printfln("Received Ack, opening TCP connection to 10.123.123.3:8080...");
+
+    // Step 6: Open TCP connection to management server
+    int tcp_sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (tcp_sock < 0) {
+        logger.printfln("Failed to create TCP socket: %s (%i)", strerror(errno), errno);
+        release_inner_socket();
+        return -12;
+    }
+
+    struct sockaddr_in local_addr;
+    memset(&local_addr, 0, sizeof(local_addr));
+    local_addr.sin_family = AF_INET;
+    local_addr.sin_port = 0; // Let OS assign a port
+    local_addr.sin_addr.s_addr = inet_addr("10.123.123.2");
+
+    ret = bind(tcp_sock, reinterpret_cast<struct sockaddr *>(&local_addr), sizeof(local_addr));
+    if (ret < 0) {
+        logger.printfln("Failed to bind TCP socket: %s (%i)", strerror(errno), errno);
+        close(tcp_sock);
+        release_inner_socket();
+        return -13;
+    }
+
+    struct sockaddr_in src_addr;
+    socklen_t addr_len = sizeof(src_addr);
+    getsockname(tcp_sock, reinterpret_cast<struct sockaddr *>(&src_addr), &addr_len);
+    logger.printfln("Connected from %u", ntohs(src_addr.sin_port));
+
+    send_port = ntohs(src_addr.sin_port);
+
+    struct sockaddr_in tcp_dest;
+    memset(&tcp_dest, 0, sizeof(tcp_dest));
+    tcp_dest.sin_family = AF_INET;
+    tcp_dest.sin_port = htons(8080);
+    tcp_dest.sin_addr.s_addr = inet_addr("10.123.123.3");
+
+    ret = connect(tcp_sock, reinterpret_cast<struct sockaddr *>(&tcp_dest), sizeof(tcp_dest));
+    if (ret < 0) {
+        logger.printfln("Failed to connect TCP socket: %s (%i)", strerror(errno), errno);
+        close(tcp_sock);
+        release_inner_socket();
+        return -14;
+    }
+
+    logger.printfln("TCP connection established");
+    return tcp_sock;
+}
+
+int RemoteAccess::end_charge_log_send(int tcp_sock)
+{
+    // Send FIN to signal end of data
+    shutdown(tcp_sock, SHUT_WR);
+    close(tcp_sock);
+
+    logger.printfln("TCP connection closed, waiting for final Ack...");
+
+    // Wait for final Ack (up to 60 seconds - server processes and emails the file)
+    uint8_t nack_reason = 0;
+    int poll_ret = poll_for_mgmt_response(60000, &nack_reason);
+
+    // Release the inner socket back to run_management
+    release_inner_socket();
+
+    if (poll_ret < 0) {
+        logger.printfln("Charge log send completed but server reported error (reason: %u)", nack_reason);
+        return -1;
+    }
+    if (poll_ret == 0) {
+        logger.printfln("Timed out waiting for final Ack (data may still have been processed)");
+        return -2;
+    }
+
+    logger.printfln("Charge log send completed successfully");
+    return 0;
+}
+
+int RemoteAccess::send_charge_log_metadata(const char *filename, size_t filename_len, const char *display_name, size_t display_name_len, int user_id, Language language)
+{
+    if (!is_mgmt_connected()) {
+        logger.printfln("Cannot send charge log metadata: management connection not established");
+        return -1;
+    }
+
+    if (inner_socket < 0) {
+        logger.printfln("Cannot send charge log metadata: inner socket not available");
+        return -2;
+    }
+
+    String user_uuid_str;
+    for (const auto &user : config.get("users")) {
+        if (user.get("id")->asUint8() == static_cast<uint8_t>(user_id)) {
+            user_uuid_str = user.get("uuid")->asString();
+            break;
+        }
+    }
+    if (user_uuid_str.length() == 0) {
+        logger.printfln("Cannot send charge log metadata: user %i not found", user_id);
+        return -3;
+    }
+
+    uint8_t user_uuid[16];
+
+    if (user_uuid_str.length() != 36) {
+        logger.printfln("Cannot send charge log metadata: invalid user UUID format");
+        return -7;
+    }
+
+    // Parse and validate UUID v4 string to binary conversion
+    // Format: xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx
+    // where y is one of 8, 9, a, b (variant bits)
+    auto parse_uuid = [](const String &uuid_str, uint8_t *out) -> bool {
+        if (uuid_str.length() != 36) return false;
+
+        const char *p = uuid_str.c_str();
+
+        // Check dashes are at the correct positions
+        if (p[8] != '-' || p[13] != '-' || p[18] != '-' || p[23] != '-') return false;
+
+        // Check version field (position 14 must be '4' for UUID v4)
+        if (p[14] != '4') return false;
+
+        // Check variant bits (position 19 must be 8, 9, a, b, A, or B)
+        char variant = p[19];
+        if (variant != '8' && variant != '9' &&
+            variant != 'a' && variant != 'b' &&
+            variant != 'A' && variant != 'B') return false;
+
+        logger.printfln("Parsing UUID: %s", p);
+        size_t out_idx = 0;
+        for (size_t i = 0; i < 35 && out_idx < 16; i++) {
+            if (p[i] == '-') continue;
+            logger.printfln("i: %zu", i);
+            char hex[3] = {p[i], p[i + 1], '\0'};
+            logger.printfln("Hex: %s", hex);
+            if (!isxdigit(p[i]) || !isxdigit(p[i + 1])) return false;
+            out[out_idx++] = static_cast<uint8_t>(strtoul(hex, nullptr, 16));
+            i++; // Skip the second hex digit
+        }
+        return out_idx == 16;
+    };
+
+    if (!parse_uuid(user_uuid_str, user_uuid)) {
+        logger.printfln("Cannot send charge log metadata: failed to parse user UUID");
+        return -9;
+    }
+
+    // Calculate buffer size needed the fixed size is at least 31 bytes
+    size_t total_size = 31 + filename_len + display_name_len;
+    std::unique_ptr<uint8_t[]> buf = heap_alloc_array<uint8_t>(total_size);
+    if (buf == nullptr) {
+        logger.printfln("Cannot send charge log metadata: out of memory");
+        return -10;
+    }
+
+    // Convert language enum to ISO 639-1 language code (2 characters)
+    const char *lang_str;
+    switch (language) {
+        case Language::German:
+            lang_str = "de";
+            break;
+        case Language::English:
+            lang_str = "en";
+            break;
+        case Language::Default:
+             esp_system_abort("This function should not be called with Language::Default");
+        default:
+            esp_system_abort("How did we end here? The switch statement should be exhaustive!");
+    }
+
+    uint8_t lang[2];
+    lang[0] = static_cast<uint8_t>(lang_str[0]);
+    lang[1] = static_cast<uint8_t>(lang_str[1]);
+
+    // Build the header
+    management_packet_header header;
+    header.magic = 0x1234;
+    header.length = static_cast<uint16_t>(total_size - sizeof(management_packet_header));
+    header.seq_num = 0; // Server doesn't check sequence number for incoming packets
+    header.version = 1;
+    header.type = PacketType::MetadataForChargeLog; // Charge log metadata packet type
+
+    size_t written = charge_log_send_metadata_packet::write_to_buffer(
+        buf.get(), total_size,
+        header,
+        user_uuid,
+        lang,
+        false,
+        filename, static_cast<uint16_t>(filename_len),
+        display_name, static_cast<uint16_t>(display_name_len)
+    );
+
+    if (written == 0) {
+        logger.printfln("Cannot send charge log metadata: buffer too small");
+        return -11;
+    }
+
+    // Send the packet through the inner socket to the management server
+    struct sockaddr_in dest_addr;
+    memset(&dest_addr, 0, sizeof(dest_addr));
+    dest_addr.sin_family = AF_INET;
+    dest_addr.sin_port = htons(12345);
+    // Management server is at 10.123.123.3
+    dest_addr.sin_addr.s_addr = inet_addr("10.123.123.3");
+
+    int ret = sendto(inner_socket, buf.get(), written, 0, reinterpret_cast<struct sockaddr *>(&dest_addr), sizeof(dest_addr));
+    if (ret < 0) {
+        logger.printfln("Failed to send charge log metadata: %s (%i)", strerror(errno), errno);
+        return -12;
+    }
+
+    logger.printfln("Sent charge log metadata packet (%zu bytes)", written);
+    return 0;
+}
+
+bool RemoteAccess::is_connected_local_ip(const IPAddress &local_ip, const IPAddress &remote_ip) {
+    const uint32_t ip = static_cast<uint32_t>(local_ip);
+    const uint32_t masked_ip = ip & 0xFF00FFFFul; // Mask connection ID in third octet
+    constexpr uint32_t expected_masked_ip = ntohl((10u << 24) + (123u << 16) + (0u << 8) + (2u << 0)); // 10.123.x.2
+
+    if (masked_ip != expected_masked_ip) {
+        return false;
+    }
+
+    const uint32_t remote = static_cast<uint32_t>(remote_ip);
+
+    if (remote != ip + ntohl(1)) { // Remote must be local address + 1
+        return false;
+    }
+
+    const uint8_t conn_id = (ip >> 16) & 0xFF; // Third octet
+    size_t conn_idx;
+
+    for (size_t i = 0; i < MAX_USER_CONNECTIONS; i++) {
+        if (remote_connections[i].id == conn_id) {
+            conn_idx = i;
+            goto conn_idx_found;
+        }
+    }
+
+    logger.printfln("Local IP query couldn't find connection ID %hhu", conn_id);
+    return false;
+
+conn_idx_found:
+    // The connection state is currently updated up to 400ms after the WireGuard tunnel is established,
+    // which is too late for checking the immediately established HTTP connection.
+    // Use only the IP address checks for now.
+    //const ConnectionState conn_state = connection_state.get(conn_idx + 1)->get("state")->asEnum<ConnectionState>();
+    //return conn_state == ConnectionState::Connected;
+    (void)conn_idx;
+
+    return true;
+}
+
+[[gnu::const]]
+Config &RemoteAccess::get_ping_state() {
+    return ping_state;
+}
+
+micros_t RemoteAccess::get_ping_start() {
+    return ping_start;
+}

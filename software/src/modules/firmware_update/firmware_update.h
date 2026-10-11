@@ -1,0 +1,164 @@
+/* esp32-firmware
+ * Copyright (C) 2020-2021 Erik Fleckstein <erik@tinkerforge.com>
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, write to the
+ * Free Software Foundation, Inc., 59 Temple Place - Suite 330,
+ * Boston, MA 02111-1307, USA.
+ */
+
+#pragma once
+
+#include <stdint.h>
+#include <IPAddress.h> // FIXME: without this include here there is a problem with the IPADDR_NONE define in <lwip/ip4_addr.h>
+#include <esp_http_client.h>
+#include <esp_partition.h>
+#include <esp_ota_ops.h>
+#include <sodium.h>
+#include <atomic>
+#include <mbedtls/sha256.h>
+
+#include "module.h"
+#include "config.h"
+#include "tools/semantic_version.h"
+#include "async_https_client.h"
+#include "generated/signature_verify.h"
+#include "generated/install_state.enum.h"
+
+struct TFJsonSerializer;
+
+#define BLOCK_READER_MAGIC_LENGTH 7
+
+template <typename T>
+class BlockReader
+{
+public:
+    BlockReader(size_t block_offset, size_t block_len, const uint8_t expected_magic[BLOCK_READER_MAGIC_LENGTH]);
+
+    void reset();
+    bool handle_chunk(size_t chunk_offset, uint8_t *chunk_data, size_t chunk_len);
+
+    size_t block_offset;
+    size_t block_len;
+    uint8_t expected_magic[BLOCK_READER_MAGIC_LENGTH];
+
+    union {
+        T block;
+        uint8_t block_bytes[sizeof(T)];
+    };
+    size_t read_block_len = 0;
+    bool block_found = false;
+
+    uint32_t actual_checksum = 0;
+    union {
+        uint32_t expected_checksum = 0;
+        uint8_t expected_checksum_bytes[4];
+    };
+    size_t read_expected_checksum_len = 0;
+};
+
+class FirmwareUpdate final : public IModule
+{
+public:
+    enum class EraseType {
+        Beginning,
+        All,
+        InUse,
+    };
+
+    FirmwareUpdate();
+    void pre_setup() override;
+    void setup() override;
+    void register_urls() override;
+    void pre_reboot() override;
+
+    bool vehicle_connected = false;
+
+    bool erase_other_partition(String &msg, EraseType erase_type);
+
+    void handle_index_data(const void *data, size_t data_len);
+
+    int change_running_partition_from_pending_verify_to_valid(const char *reason, bool silent = false);
+    int change_running_partition_from_pending_verify_to_new(const char *reason, bool silent = false);
+    int change_update_partition_from_aborted_to_invalid(const char *reason, bool silent = false);
+    int change_update_partition_to_invalid(const char *reason, bool silent = false);
+
+private:
+    int change_partition_ota_state_from_to(const esp_partition_t *partition, esp_ota_img_states_t expected_ota_state, esp_ota_img_states_t new_ota_state, const char *reason, bool silent);
+    bool is_vehicle_blocking_update() const;
+#if signature_sodium_public_key_length != 0
+    InstallState check_signature_info();
+#endif
+    InstallState check_firmware_info(bool detect_downgrade, bool log, TFJsonSerializer *json_ptr);
+    InstallState handle_firmware_chunk(size_t chunk_offset, uint8_t *chunk, size_t chunk_len, size_t complete_len, bool is_complete, TFJsonSerializer *json_ptr);
+    void check_for_update();
+    void install_firmware(const char *url);
+    void read_app_partition_state();
+    void report_flash_firmware_progress_http_thread(bool force = false);
+    void update_install_state();
+    bool sbv2_sign_app(uint8_t *scratch_buffer, size_t scratch_buffer_len);
+
+    ConfigRoot config;
+    ConfigRoot state;
+    ConfigRoot install_state;
+    ConfigRoot install_firmware_config;
+    ConfigRoot override_signature;
+
+    std::atomic<bool> check_firmware_in_progress = false;
+    std::atomic<bool> flash_firmware_in_progress = false;
+    InstallState flash_firmware_state = InstallState::Idle;
+    InstallState flash_firmware_state_last_reported = InstallState::Idle;
+    uint32_t flash_firmware_progress = 0;
+    uint32_t flash_firmware_progress_last_reported = 0;
+
+    struct firmware_info_t {
+        uint8_t magic[BLOCK_READER_MAGIC_LENGTH] = {};
+        uint8_t version = 0;
+        char product_name[61] = {};
+        uint8_t fw_version_major = 0;
+        uint8_t fw_version_minor = 0;
+        uint8_t fw_version_patch = 0;
+        uint32_t fw_build_timestamp = 0;
+        uint8_t fw_version_beta = 0; // since firmware info version 2, before it's 0xFF
+        char product_id[61] = {}; // since firmware info version 3, before it's 0xFF
+        uint8_t padded_application_sha256sum[32] = {}; // since firmware info version 4, before it's 0xFF
+    };
+
+    BlockReader<firmware_info_t> firmware_info;
+    mbedtls_sha256_context sha256_ctx;
+
+#if signature_sodium_public_key_length != 0
+    struct signature_info_t {
+        uint8_t magic[BLOCK_READER_MAGIC_LENGTH] = {};
+        uint8_t version = 0;
+        char publisher[64] = {};
+        unsigned char signature[crypto_sign_BYTES] = {};
+    };
+
+    BlockReader<signature_info_t> signature_info;
+    unsigned char signature_info_signature[crypto_sign_BYTES];
+    crypto_sign_state signature_state;
+    uint32_t signature_override_cookie = 0;
+#endif
+
+    String update_url;
+    AsyncHTTPSClient https_client;
+    int cert_id = -1;
+    char index_buf[64 + 1];
+    size_t index_buf_used;
+    bool check_for_update_in_progress = false;
+    bool install_firmware_in_progress = false;
+    bool mark_update_partition_invalid = true;
+    size_t application_len;
+    size_t padded_application_len;
+};

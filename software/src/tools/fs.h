@@ -1,0 +1,42 @@
+/* esp32-firmware
+ * Copyright (C) 2024 Mattias Schäffersmann <mattias@tinkerforge.com>
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, write to the
+ * Free Software Foundation, Inc., 59 Temple Place - Suite 330,
+ * Boston, MA 02111-1307, USA.
+ */
+
+#pragma once
+
+#include <functional>
+
+#include <FS.h>
+#include <LittleFS.h>
+#include "stdint.h"
+
+extern bool should_factory_reset_bricklets;
+bool mount_or_format_data_partition();
+bool rewrite_data_partition(const std::function<bool(void)> &unmounted_task_fn);
+
+bool for_file_in(const char *dir, bool (*callback)(File *open_file), bool skip_directories = true);
+bool for_filename_in(const char *dir, std::function<bool(const char *, size_t, bool)> callback);
+bool for_filename_in(const char *dir, std::function<bool(const String &, bool)> callback);
+
+void remove_directory(const char *path);
+
+ssize_t file_size(fs::LittleFSFS &file_system, const char *path);
+ssize_t file_size(fs::LittleFSFS &file_system, const String &path);
+
+bool file_exists(fs::LittleFSFS &file_system, const char *path);
+bool file_exists(fs::LittleFSFS &file_system, const String &path);

@@ -1,0 +1,1513 @@
+#!/usr/bin/env -S uv run --active --script
+
+import datetime
+import sys
+import queue
+import threading
+import time
+import traceback
+import typing
+import functools
+import json
+from tinkerforge_util.colored import red, green, blue, yellow
+import tinkerforge_util as tfutil
+
+tfutil.create_parent_module(__file__, 'provisioning')
+
+from provisioning.tinkerforge.ip_connection import IPConnection
+from provisioning.tinkerforge.device_factory import create_device
+from provisioning.tinkerforge.brick_master import BrickMaster
+from provisioning.tinkerforge.bricklet_industrial_dual_relay import BrickletIndustrialDualRelay
+from provisioning.tinkerforge.bricklet_industrial_quad_relay_v2 import BrickletIndustrialQuadRelayV2
+from provisioning.tinkerforge.bricklet_industrial_dual_ac_relay import BrickletIndustrialDualACRelay
+from provisioning.tinkerforge.bricklet_energy_monitor import BrickletEnergyMonitor
+from provisioning.tinkerforge.bricklet_servo_v2 import BrickletServoV2
+from provisioning.tinkerforge.bricklet_led_strip_v2 import BrickletLEDStripV2
+from provisioning.tinkerforge.bricklet_color_v2 import BrickletColorV2
+from provisioning.tinkerforge.bricklet_piezo_speaker_v2 import BrickletPiezoSpeakerV2
+from provisioning.tinkerforge.bricklet_nfc import BrickletNFC
+from provisioning.provision_common.inventory import Inventory
+from provisioning.provision_common.provision_common import FatalError, fatal_error
+import provisioning.blackbox as blackbox
+
+IPCON_HOST = 'localhost'
+IPCON_TIMEOUT = 1.0 # seconds
+
+ACTION_INTERVAL = 0.5 # seconds
+ACTION_COMPLETION_TIMEOUT = 30.0 # seconds
+ACTION_TRY_COUNT = 3
+
+MONOFLOP_DURATION = (IPCON_TIMEOUT * ACTION_TRY_COUNT + ACTION_INTERVAL) * 1000 # milliseconds
+
+RELAY_SETTLE_DURATION = 0.25 # seconds
+
+EVSE_SETTLE_DURATION = 2.0 # seconds
+
+DC_PROTECT_SETTLE_DURATION = 5.0 # seconds
+
+METER_SETTLE_DURATION = 5.0 # seconds
+
+VOLTAGE_SETTLE_DURATION = 1.0 # seconds
+VOLTAGE_OFF_THRESHOLD = 5.0 # Volt
+VOLTAGE_ON_THRESHOLD = 200.0 # Volt
+
+IEC_STATE_CHECK_DURATION = 0.1 # seconds
+IEC_STATE_CHECK_INTERVAL = 0.01 # seconds
+
+PHASE_SWITCH_SETTLE_DURATION = 10.0 # seconds
+
+ISO15118_CONNECT_DURATION = 3 # seconds
+
+STACK_MASTER_UIDS = {
+    '0': '61SMKP',
+    '2': '6DY5kB',
+}
+
+EXPECTED_DEVICE_IDENTIFIERS = {
+    '00': BrickMaster.DEVICE_IDENTIFIER,
+    '00A': BrickletIndustrialDualRelay.DEVICE_IDENTIFIER,
+    '00B': BrickletIndustrialDualRelay.DEVICE_IDENTIFIER,
+    '00C': BrickletIndustrialDualRelay.DEVICE_IDENTIFIER,
+    '00D': BrickletIndustrialDualRelay.DEVICE_IDENTIFIER,
+    '01': BrickMaster.DEVICE_IDENTIFIER,
+    '01A': BrickletIndustrialDualRelay.DEVICE_IDENTIFIER,
+    '01B': BrickletIndustrialDualRelay.DEVICE_IDENTIFIER,
+    '01C': BrickletIndustrialDualRelay.DEVICE_IDENTIFIER,
+    '01D': BrickletIndustrialQuadRelayV2.DEVICE_IDENTIFIER,
+    '02': BrickMaster.DEVICE_IDENTIFIER,
+    '02A': BrickletIndustrialDualACRelay.DEVICE_IDENTIFIER,
+    '02B': BrickletEnergyMonitor.DEVICE_IDENTIFIER,
+    '02C': BrickletEnergyMonitor.DEVICE_IDENTIFIER,
+    '02D': BrickletEnergyMonitor.DEVICE_IDENTIFIER,
+    '03': BrickMaster.DEVICE_IDENTIFIER,
+    '03A': BrickletIndustrialDualRelay.DEVICE_IDENTIFIER,
+    '03B': BrickletPiezoSpeakerV2.DEVICE_IDENTIFIER,
+    '03C': BrickletIndustrialDualRelay.DEVICE_IDENTIFIER,
+    '20': BrickMaster.DEVICE_IDENTIFIER,
+    '20A': BrickletLEDStripV2.DEVICE_IDENTIFIER,
+    '20B': BrickletNFC.DEVICE_IDENTIFIER,
+    '20C': BrickletServoV2.DEVICE_IDENTIFIER,
+    '20D': BrickletColorV2.DEVICE_IDENTIFIER,
+}
+
+# maximum of each bin seen with the first ~ 180 chargers + 5 dB
+ATTENUATION_PROFILE_THRESHOLD = [
+    28, 28, 28, 33, 30, 29, 34, 31,
+    30, 33, 31, 31, 32, 31, 31, 31,
+    30, 31, 31, 32, 31, 32, 33, 33,
+    31, 31, 36, 36, 36, 36, 36, 36,
+    35, 35, 35, 37, 36, 36, 36, 37,
+    38, 40, 37, 38, 38, 40, 39, 40,
+    40, 44, 41, 40, 41, 40, 43, 43,
+    45, 59
+]
+
+sys_print = print
+
+def orig_print(*args, **kwargs):
+    sys_print(*args, **kwargs)
+    sys.stdout.flush()
+    sys.stderr.flush()
+
+def tprint(*args, **kwargs):
+    global orig_print
+
+    prefix = ''
+    args = tuple(str(x) for x in args)
+
+    if len(args) > 0 and args[0].startswith('\r'):
+        args = (args[0][1:],) + args[1:]
+        prefix = '\r'
+
+    orig_print(prefix + datetime.datetime.now().isoformat(), *args, **kwargs)
+
+print = tprint
+
+class Stage3:
+    def __init__(self,
+                 generation,
+                 is_front_panel_button_pressed_function,
+                 get_evse_error_function,
+                 get_dc_fault_current_bits_function,
+                 get_iec_state_function,
+                 reset_dc_fault_function,
+                 switch_phases_function,
+                 get_contactor_state_function,
+                 get_evse_uptime_function,
+                 reset_evse_function,
+                 get_cp_pwm_function,
+                 get_meter_voltages_function,
+                 set_iso15118_enabled_function,
+                 get_iso15118_ev_mac_function,
+                 get_iso15118_attenuation_profile_function,
+                 get_gpio_state_function):
+        self.generation = generation
+        self.is_front_panel_button_pressed_function = is_front_panel_button_pressed_function
+        self.get_evse_error_function = get_evse_error_function
+        self.get_dc_fault_current_bits_function = get_dc_fault_current_bits_function
+        self.get_iec_state_function = get_iec_state_function
+        self.reset_dc_fault_function = reset_dc_fault_function
+        self.switch_phases_function = switch_phases_function
+        self.get_contactor_state_function = get_contactor_state_function
+        self.get_evse_uptime_function = lambda: get_evse_uptime_function() / 1000.0
+        self.reset_evse_function = reset_evse_function
+        self.get_cp_pwm_function = get_cp_pwm_function
+        self.get_meter_voltages_function = get_meter_voltages_function
+        self.set_iso15118_enabled_function = set_iso15118_enabled_function
+        self.get_iso15118_ev_mac_function = get_iso15118_ev_mac_function
+        self.get_iso15118_attenuation_profile_function = get_iso15118_attenuation_profile_function
+        self.get_gpio_state_function = get_gpio_state_function
+
+        self.ipcon = IPConnection()
+        self.inventory = Inventory(self.ipcon)
+        self.devices = {} # by position path
+        self.prepared = False
+        self.action_stop_queue = None
+        self.action_enabled_ref = None
+        self.action_thread = None
+        self.wall_clock_start = None
+
+        self.ipcon.set_timeout(IPCON_TIMEOUT)
+
+    # internal
+    def try_action(self, position, function):
+        tries = ACTION_TRY_COUNT
+
+        while tries > 0:
+            try:
+                return function(self.devices[position])
+            except Exception as e:
+                tries -= 1
+
+                if tries == 1:
+                    print(yellow('WARNING: Could not complete action for device at position {0}, 1 try left: {1}'.format(position, e)))
+                elif tries > 1:
+                    print(yellow('WARNING: Could not complete action for device at position {0}, {1} tries left: {2}'.format(position, tries, e)))
+                else:
+                    fatal_error('Could not complete action for device at position {0}: {1}'.format(position, e), other_exception=e)
+
+    # internal
+    def action_loop(self, stop_queue, enabled_ref):
+        timestamp = -ACTION_INTERVAL
+        actions = {} # by position path
+        events = {} # by position path
+        tries = {} # by position path
+
+        while enabled_ref[0]:
+            elapsed = time.monotonic() - timestamp
+            remaining = max(ACTION_INTERVAL - elapsed, 0)
+
+            try:
+                action = stop_queue.get(timeout=remaining)
+            except queue.Empty:
+                action = False
+
+            if not enabled_ref[0] or action == None:
+                break
+
+            timestamp = time.monotonic()
+
+            if action != False:
+                position, function, event = action
+                actions[position] = function
+                events[position] = event
+                tries[position] = ACTION_TRY_COUNT
+
+            for position, function in actions.items():
+                try:
+                    function(self.devices[position[0]])
+                except Exception as e:
+                    tries[position] -= 1
+
+                    if tries[position] == 1:
+                        print(yellow('WARNING: Could not complete action {0} for device at position {1}, 1 try left: {2}'.format(position[1], position[0], e)))
+                    elif tries[position] > 1:
+                        print(yellow('WARNING: Could not complete action {0} for device at position {1}, {2} tries left: {3}'.format(position[1], position[0], tries[position], e)))
+                    else:
+                        fatal_error('Could not complete action {0} for device at position {1}: {2}'.format(position[1], position[0], e), other_exception=e)
+                else:
+                    event = events.pop(position, None)
+
+                    if event != None:
+                        event.set()
+
+                    tries[position] = ACTION_TRY_COUNT
+
+    # internal
+    def connect_warp_power(self, phases):
+        assert set(phases).issubset({'L1', 'L2', 'L3'}), phases
+
+        events = [
+            threading.Event(),
+            threading.Event(),
+        ]
+
+        if len(phases) == 0:
+            self.action_stop_queue.put((('00D', 0), lambda device: device.set_value(False, False), events[0]))
+            self.action_stop_queue.put((('01A', 0), lambda device: device.set_value(False, False), events[1]))
+        else:
+            assert 'L1' in phases, phases
+
+            self.action_stop_queue.put((('00D', 0), lambda device: [device.set_monoflop(0, True, MONOFLOP_DURATION), device.set_monoflop(1, True, MONOFLOP_DURATION)], events[0]))
+
+            if 'L2' in phases and 'L3' in phases:
+                self.action_stop_queue.put((('01A', 0), lambda device: [device.set_monoflop(0, True, MONOFLOP_DURATION), device.set_monoflop(1, True, MONOFLOP_DURATION)], events[1]))
+            elif 'L2' in phases:
+                self.action_stop_queue.put((('01A', 0), lambda device: [device.set_selected_value(0, False), device.set_monoflop(1, True, MONOFLOP_DURATION)], events[1]))
+            elif 'L3' in phases:
+                self.action_stop_queue.put((('01A', 0), lambda device: [device.set_monoflop(0, True, MONOFLOP_DURATION), device.set_selected_value(1, False)], events[1]))
+            else:
+                self.action_stop_queue.put((('01A', 0), lambda device: [device.set_value(False, False)], events[1]))
+
+        timeout_remaining = ACTION_COMPLETION_TIMEOUT
+
+        for event in events:
+            start = time.monotonic()
+
+            if not event.wait(timeout=timeout_remaining):
+                fatal_error('Action did not complete in time')
+
+            timeout_remaining -= time.monotonic() - start
+
+        if len(phases) > 0 and self.wall_clock_start != None:
+            self.verify_evse_not_crashed()
+            self.reset_evse_function()
+            time.sleep(5)
+
+            self.evse_uptime_start = self.get_evse_uptime_function()
+            self.wall_clock_start = time.time()
+
+    # internal
+    def connect_outlet(self, outlet):
+        assert outlet in ['Basic', 'Smart', 'Pro', 'CEE']
+
+        event = threading.Event()
+
+        if outlet in ['Basic', 'Smart']:
+            self.action_stop_queue.put((('02A', 0), lambda device: [device.set_monoflop(0, True, MONOFLOP_DURATION), device.set_selected_value(1, False)], event))
+        elif outlet == 'Pro':
+            self.action_stop_queue.put((('02A', 0), lambda device: [device.set_selected_value(0, False), device.set_monoflop(1, True, MONOFLOP_DURATION)], event))
+        elif outlet == 'CEE':
+            self.action_stop_queue.put((('02A', 0), lambda device: device.set_value(False, False), event))
+        else:
+            assert False, outlet
+
+        if not event.wait(timeout=ACTION_COMPLETION_TIMEOUT):
+            fatal_error('Action did not complete in time')
+
+    # internal
+    def connect_voltage_monitors(self, connect):
+        events = [
+            threading.Event(),
+            threading.Event(),
+        ]
+
+        if connect:
+            self.action_stop_queue.put((('01B', 0), lambda device: [device.set_monoflop(0, True, MONOFLOP_DURATION), device.set_monoflop(1, True, MONOFLOP_DURATION)], events[0]))
+            self.action_stop_queue.put((('01C', 0), lambda device: [device.set_monoflop(0, True, MONOFLOP_DURATION), device.set_monoflop(1, True, MONOFLOP_DURATION)], events[1]))
+        else:
+            self.action_stop_queue.put((('01B', 0), lambda device: device.set_value(False, False), events[0]))
+            self.action_stop_queue.put((('01C', 0), lambda device: device.set_value(False, False), events[1]))
+
+        timeout_remaining = ACTION_COMPLETION_TIMEOUT
+
+        for event in events:
+            start = time.monotonic()
+
+            if not event.wait(timeout=timeout_remaining):
+                fatal_error('Action did not complete in time')
+
+            timeout_remaining -= time.monotonic() - start
+
+    # internal
+    def connect_front_panel(self, connect):
+        event = threading.Event()
+
+        if connect:
+            self.action_stop_queue.put((('03A', 0), lambda device: device.set_monoflop(0, True, MONOFLOP_DURATION), event))
+        else:
+            self.action_stop_queue.put((('03A', 0), lambda device: device.set_selected_value(0, False), event))
+
+        if not event.wait(timeout=ACTION_COMPLETION_TIMEOUT):
+            fatal_error('Action did not complete in time')
+
+    # internal
+    def connect_type2_pe(self, connect):
+        event = threading.Event()
+
+        if connect:
+            self.action_stop_queue.put((('03A', 1), lambda device: device.set_selected_value(1, False), event))
+        else:
+            self.action_stop_queue.put((('03A', 1), lambda device: device.set_monoflop(1, True, MONOFLOP_DURATION), event))
+
+        if not event.wait(timeout=ACTION_COMPLETION_TIMEOUT):
+            fatal_error('Action did not complete in time')
+
+    # internal
+    def connect_iso_15118_simulator(self, connect):
+        event = threading.Event()
+
+        if connect:
+            self.action_stop_queue.put((('03C', 0), lambda device: [device.set_monoflop(0, True, MONOFLOP_DURATION), device.set_monoflop(1, True, MONOFLOP_DURATION)], event))
+        else:
+            self.action_stop_queue.put((('03C', 0), lambda device: device.set_value(False, False), event))
+
+        if not event.wait(timeout=ACTION_COMPLETION_TIMEOUT):
+            fatal_error('Action did not complete in time')
+
+    # internal
+    def change_cp_pe_state(self, state, quiet=False):
+        if not quiet:
+            print('Changing CP-PE state to {0}'.format(state))
+
+        if state == 'A':
+            value = [False, False, False, False]
+        elif state == 'B':
+            value = [False, True,  False, False]
+        elif state == 'C':
+            value = [False, True,  True,  False]
+        elif state == 'D':
+            value = [False, True,  False, True]
+        else:
+            assert False, state
+
+        event = threading.Event()
+
+        self.action_stop_queue.put((('01D', 0), lambda device: device.set_value(value), event))
+
+        if not event.wait(timeout=ACTION_COMPLETION_TIMEOUT):
+            fatal_error('Action did not complete in time')
+
+    # internal
+    def change_meter_state(self, state, quiet=False):
+        if not quiet:
+            print('Changing meter state to {0}'.format(state))
+
+        if state == 'Type2-L1':
+            value = [(True,  True),  (False, False), (False, False)]
+        elif state == 'Type2-L2':
+            value = [(True,  True),  (True,  False), (False, False)]
+        elif state == 'Type2-L3':
+            value = [(True,  True),  (True,  False), (True,  False)]
+        elif state == 'WARP-L1':
+            value = [(False, False), (False, False), (False, False)]
+        elif state == 'WARP-L2':
+            value = [(False, False), (False, True),  (False, False)]
+        elif state == 'WARP-L3':
+            value = [(False, False), (False, True),  (False, True)]
+        else:
+            assert False, state
+
+        events = [
+            threading.Event(),
+            threading.Event(),
+            threading.Event(),
+        ]
+
+        self.action_stop_queue.put((('00A', 0), lambda device: device.set_value(*value[0]), events[0]))
+        self.action_stop_queue.put((('00B', 0), lambda device: device.set_value(*value[1]), events[1]))
+        self.action_stop_queue.put((('00C', 0), lambda device: device.set_value(*value[2]), events[2]))
+
+        timeout_remaining = ACTION_COMPLETION_TIMEOUT
+
+        for event in events:
+            start = time.monotonic()
+
+            if not event.wait(timeout=timeout_remaining):
+                fatal_error('Action did not complete in time')
+
+            timeout_remaining -= time.monotonic() - start
+
+    # internal
+    def read_voltage_monitors(self):
+        return [
+            self.try_action('02B', lambda device: device.get_energy_data()[0] / 100),
+            self.try_action('02C', lambda device: device.get_energy_data()[0] / 100),
+            self.try_action('02D', lambda device: device.get_energy_data()[0] / 100),
+        ]
+
+    # internal
+    def set_servo_position(self, servo, channel, position):
+        self.try_action(servo, lambda device: device.set_position(channel, position))
+
+        current_position = self.try_action(servo, lambda device: device.get_current_position(channel))
+
+        # FIXME: add timeout?
+        while current_position != position:
+            time.sleep(0.1)
+
+            current_position = self.try_action(servo, lambda device: device.get_current_position(channel))
+
+    def is_color_bricklet_crashed(self):
+        for _ in range(5):
+            color = self.try_action('20D', lambda device: device.get_color())
+
+            if max(color) > 50000:
+                return True
+
+            time.sleep(0.2)
+
+        return False
+
+    # internal
+    def is_front_panel_led_blue(self):
+        color = self.try_action('20D', lambda device: device.get_color())
+        return color[2] / color[3] > 0.65 and color[3] > 10000
+
+    # internal
+    def is_front_panel_led_red(self):
+        color = self.try_action('20D', lambda device: device.get_color())
+
+        return color[0] / color[3] > 0.85 and color[3] > 5000
+
+    # internal
+    def is_front_panel_led_green(self):
+        color = self.try_action('20D', lambda device: device.get_color())
+
+        return color[1] / color[3] > 0.60 and color[3] > 10000
+
+    # internal
+    def is_front_panel_led_white(self):
+        color = self.try_action('20D', lambda device: device.get_color())
+
+        # White can saturate the sensor
+        if color[0] >= 60000 and color[1] >= 60000 and color[2] >= 60000 and color[3] >= 60000:
+            return True
+
+        return color[0] / color[3] < 0.5 and color[1] / color[3] < 0.5 and color[2] / color[3] < 0.5 and color[3] > 10000
+
+    # internal
+    def check_iec_state(self, expected_state):
+        assert self.get_iec_state_function != None
+        assert self.get_evse_error_function != None
+        assert self.get_dc_fault_current_bits_function != None
+        assert self.get_gpio_state_function != None
+
+        actual_states = set()
+        start = time.monotonic()
+        error_counter = 0
+
+        while time.monotonic() < start + IEC_STATE_CHECK_DURATION:
+            try:
+                actual_states.add(self.get_iec_state_function()) # FIXME: missing error handling
+            except:
+                error_counter += 1
+
+                if error_counter == 3:
+                    raise
+
+            time.sleep(IEC_STATE_CHECK_INTERVAL)
+
+        success = actual_states == set(expected_state)
+
+        if not success:
+            error = self.get_evse_error_function()
+            dc_fault_bits = self.get_dc_fault_current_bits_function() & 0b111111  # ignore sensor type
+            gpio = [int(x) for x in self.get_gpio_state_function()]
+
+            if len(actual_states) == 0:
+                actual_states_str = 'none'
+            elif len(actual_states) == 1:
+                actual_states_str = list(actual_states)[0]
+            else:
+                actual_states_str = str(actual_states)
+
+            print(yellow(f'WARNING: Charger in wrong IEC state {actual_states_str}, instead of {expected_state}, evse_error={error} evse_dc_fault_bits={dc_fault_bits:#b} evse_gpio={gpio}'))
+
+        return success
+
+    def setup(self):
+        assert not self.prepared
+
+        print('Connecting to brickd')
+
+        try:
+            self.ipcon.connect(IPCON_HOST, 4223)
+        except Exception as e:
+            fatal_error('Could not connect to brickd: {0}'.format(e), other_exception=e)
+
+        print('Enumerating Bricklets')
+
+        self.inventory.clear()
+        self.inventory.update(timeout=0.5)
+
+        self.devices = {}
+
+        for stack_position, positions in [('0', {'0': ['A', 'B', 'C', 'D'], '1': ['A', 'B', 'C', 'D'], '2': ['A', 'B', 'C', 'D'], '3': ['A', 'B', 'C']}),
+                                          ('2', {'0': ['A', 'B', 'C', 'D']})]:
+            for brick_position, bricklet_positions in positions.items():
+                full_position = stack_position + brick_position
+
+                if brick_position == '0':
+                    brick_entry = self.inventory.get_one(uid=STACK_MASTER_UIDS[stack_position], connected_uid='0', position=brick_position)
+                else:
+                    brick_entry = self.inventory.get_one(connected_uid=STACK_MASTER_UIDS[stack_position], position=brick_position)
+
+                if brick_entry == None:
+                    fatal_error('Missing Brick at postion {0}'.format(full_position))
+
+                if EXPECTED_DEVICE_IDENTIFIERS[full_position] != brick_entry.device_identifier:
+                    fatal_error('Wrong Brick at postion {0}'.format(full_position))
+
+                device = create_device(brick_entry.device_identifier, brick_entry.uid, self.ipcon)
+                device.set_response_expected_all(True)
+
+                self.devices[full_position] = device
+
+                for bricklet_position in bricklet_positions:
+                    full_position = stack_position + brick_position + bricklet_position
+                    bricklet_entry = self.inventory.get_one(connected_uid=brick_entry.uid, position=bricklet_position)
+
+                    if bricklet_entry == None:
+                        fatal_error('Missing Bricklet at postion {0}'.format(full_position))
+
+                    if EXPECTED_DEVICE_IDENTIFIERS[full_position] != bricklet_entry.device_identifier:
+                        fatal_error('Wrong Bricklet at postion {0}'.format(full_position))
+
+                    device = create_device(bricklet_entry.device_identifier, bricklet_entry.uid, self.ipcon)
+
+                    # Don't reset the servo bricklets. Resetting can move the motor a bit.
+                    if bricklet_entry.device_identifier != BrickletServoV2.DEVICE_IDENTIFIER:
+                        device.reset()
+                        device = create_device(bricklet_entry.device_identifier, bricklet_entry.uid, self.ipcon)
+
+                    device.set_response_expected_all(True)
+
+                    if bricklet_entry.device_identifier == BrickletColorV2.DEVICE_IDENTIFIER:
+                        try:
+                            device.set_status_led_config(BrickletColorV2.STATUS_LED_CONFIG_OFF)
+                        except Exception as e:
+                            fatal_error('Could not disable status LED for Color Bricklet 2.0 at postion {0}: {1}'.format(full_position, e), other_exception=e)
+                    elif bricklet_entry.device_identifier == BrickletNFC.DEVICE_IDENTIFIER:
+                        try:
+                            device.set_mode(BrickletNFC.MODE_SIMPLE)
+                        except Exception as e:
+                            fatal_error('Could not set simple mode for NFC Bricklet at postion {0}: {1}'.format(full_position, e), other_exception=e)
+                    elif bricklet_entry.device_identifier == BrickletLEDStripV2.DEVICE_IDENTIFIER:
+                        try:
+                            device.set_chip_type(BrickletLEDStripV2.CHIP_TYPE_WS2812)
+                            device.set_channel_mapping(BrickletLEDStripV2.CHANNEL_MAPPING_GRB)
+                        except Exception as e:
+                            fatal_error('Could not set chip type and channel mapping for LED Strip Bricklet 2.0 at postion {0}: {1}'.format(full_position, e), other_exception=e)
+
+                    self.devices[full_position] = device
+
+        self.try_action('20B', lambda device: device.simple_get_tag_id(255)) # clear tags from last test run
+
+        self.action_stop_queue = queue.Queue()
+        self.action_enabled_ref = [True]
+        self.action_thread = threading.Thread(target=self.action_loop, args=(self.action_stop_queue, self.action_enabled_ref), daemon=True)
+        self.action_thread.start()
+
+        self.prepared = True
+
+    def teardown(self):
+        assert self.prepared
+
+        self.prepared = False
+
+        self.action_enabled_ref[0] = False
+        self.action_stop_queue.put(None)
+        self.action_thread.join()
+
+        self.action_stop_queue = None
+        self.action_enabled_ref = None
+        self.action_thread = None
+
+    def power_off(self):
+        assert self.prepared
+
+        print('Switching power off')
+
+        self.connect_warp_power([])
+
+        time.sleep(RELAY_SETTLE_DURATION)
+
+        self.connect_outlet('CEE')
+        self.connect_voltage_monitors(False)
+        self.connect_front_panel(False)
+        self.connect_type2_pe(True)
+        self.change_cp_pe_state('A', quiet=True)
+        self.change_meter_state('Type2-L1', quiet=True)
+
+        time.sleep(RELAY_SETTLE_DURATION)
+
+    def power_on(self, outlet, phases=['L1']):
+        assert self.prepared
+        assert outlet in ['Basic', 'Smart', 'Pro', 'CEE']
+
+        print('Switching power on for {} outlet'.format(outlet))
+
+        self.connect_warp_power([])
+
+        time.sleep(RELAY_SETTLE_DURATION)
+
+        self.connect_outlet(outlet)
+        self.connect_voltage_monitors(False)
+        self.connect_front_panel(False)
+        self.connect_type2_pe(True)
+        self.change_cp_pe_state('A', quiet=True)
+        self.change_meter_state('Type2-L1', quiet=True)
+
+        time.sleep(RELAY_SETTLE_DURATION)
+
+        self.connect_warp_power(phases)
+
+        time.sleep(RELAY_SETTLE_DURATION)
+
+    # requires power_on
+    def test_front_panel_button(self, automatic):
+        assert self.is_front_panel_button_pressed_function != None
+
+        servo = '20C'
+        channel = 0
+
+        try:
+            button_before = self.is_front_panel_button_pressed_function()
+            led_before = self.is_front_panel_led_blue() if automatic else True
+
+            if button_before:
+                fatal_error('Front panel button is already pressed before test')
+
+            if not led_before:
+                fatal_error('Front panel LED is not blue before test')
+
+            if automatic:
+                self.set_servo_position(servo, channel, -3000)
+
+                if not self.try_action(servo, lambda device: device.get_enabled(channel)):
+                    self.try_action(servo, lambda device: device.set_enable(channel, True))
+
+                self.set_servo_position(servo, channel, 2500)
+                time.sleep(1.5) # wait for Color Bricklet 2.0 integration time and servo travel
+            else:
+                print(green('Waiting for front panel button press'))
+                self.beep_notify()
+
+                while not self.is_front_panel_button_pressed_function():
+                    time.sleep(0.25)
+
+                print('Front panel button is pressed')
+
+            button_pressed = self.is_front_panel_button_pressed_function()
+            led_pressed = self.is_front_panel_led_blue() if automatic else False
+
+            if automatic:
+                self.set_servo_position(servo, channel, -3000)
+                time.sleep(1.5) # wait for Color Bricklet 2.0 integration time and servo travel
+
+            if not button_pressed:
+                fatal_error('Front panel button is not pressed during test')
+
+            if led_pressed:
+                fatal_error('Front panel LED is still blue during test')
+
+            if not automatic:
+                print(green('Waiting for front panel button release'))
+                self.beep_notify()
+
+                while self.is_front_panel_button_pressed_function():
+                    time.sleep(0.25)
+
+                print('Front panel button is released')
+                self.beep_notify()
+
+            button_after = self.is_front_panel_button_pressed_function()
+            led_after = self.is_front_panel_led_blue() if automatic else True
+
+            if button_after:
+                fatal_error('Front panel button is still pressed after test')
+
+            if not led_after:
+                fatal_error('Front panel LED is not on after test')
+        except Exception as e:
+            fatal_error('Could not test front panel button: {0}'.format(e))
+
+    def get_nfc_tag_ids(self):
+        return [self.try_action('20B', lambda device: device.simple_get_tag_id(i)) for i in range(8)]
+
+    def set_led_strip_color(self, left, middle=None, right=None):
+        if middle == None:
+            middle = left
+
+        if right == None:
+            right = middle
+
+        self.try_action('20A', lambda device: device.set_led_values(0, right * 3 + middle * 5 + left * 3))
+
+    def beep_success(self):
+        volume = 5
+        beep_duration = 400
+
+        self.try_action('03B', lambda device: device.set_beep(1200, volume, beep_duration))
+        time.sleep(beep_duration / 1000)
+
+    def beep_failure(self):
+        volume = 8
+        beep_duration = 175
+        pause_duration = 50
+
+        self.try_action('03B', lambda device: device.set_beep(400, volume, beep_duration))
+        time.sleep((beep_duration + pause_duration) / 1000)
+        self.try_action('03B', lambda device: device.set_beep(400, volume, beep_duration))
+        time.sleep((beep_duration + pause_duration) / 1000)
+        self.try_action('03B', lambda device: device.set_beep(400, volume, beep_duration))
+        time.sleep((beep_duration) / 1000)
+
+    def beep_notify(self):
+        volume = 8
+        beep_duration = 150
+
+        self.try_action('03B', lambda device: device.set_beep(2400, volume, beep_duration))
+        time.sleep(beep_duration / 1000)
+
+    def reset_dc_fault(self, cp_pe_state):
+        print('Waiting for DC fault to clear')
+
+        start = time.monotonic()
+        duration = -1
+        timeout = 30
+
+        while duration < timeout:
+            gpio_state = self.get_gpio_state_function()
+
+            if not any(gpio_state[:3]):
+                if duration < 0:
+                    print('DC fault already cleared')
+                else:
+                    print(f'DC fault cleared after {duration:.3f}s')
+
+                break
+
+            time.sleep(0.025)
+
+            duration = time.monotonic() - start
+        else:
+            fatal_error(f'DC fault still present after {timeout:.3f}s')
+
+        print('Waiting for DC fault to stay cleared')
+
+        start = time.monotonic()
+        duration = -1
+        timeout = 5
+
+        while duration < timeout:
+            gpio_state = self.get_gpio_state_function()
+
+            if any(gpio_state[:3]):
+                if duration < 0:
+                    fatal_error('DC fault immediately present again')
+                else:
+                    fatal_error(f'DC fault present again after {duration:.3f}s')
+
+            time.sleep(0.025)
+
+            duration = time.monotonic() - start
+
+        print(f'DC fault stayed cleared for {timeout:.3f}s')
+
+        print('Resetting DC fault state')
+
+        self.reset_dc_fault_function()
+
+        print('Waiting for DC protect calibration')
+
+        time.sleep(DC_PROTECT_SETTLE_DURATION)
+
+        self.change_cp_pe_state('A')
+
+        time.sleep(RELAY_SETTLE_DURATION + EVSE_SETTLE_DURATION)
+
+        if not self.check_iec_state('A'):
+            fatal_error('Charger not in IEC state A')
+
+        print('Waiting for DC protect calibration')
+
+        time.sleep(DC_PROTECT_SETTLE_DURATION)
+
+        # change to target CP/PE state
+        if cp_pe_state != 'A':
+            self.change_cp_pe_state(cp_pe_state)
+
+            time.sleep(RELAY_SETTLE_DURATION + EVSE_SETTLE_DURATION)
+
+            if not self.check_iec_state(cp_pe_state):
+                fatal_error('Charger not in IEC state ' + cp_pe_state)
+
+    def verify_evse_not_crashed(self):
+        wall_clock_now = time.time()
+        wall_clock_elapsed = wall_clock_now - self.wall_clock_start
+
+        evse_uptime_now = self.get_evse_uptime_function()
+        evse_uptime_elapsed = evse_uptime_now - self.evse_uptime_start
+
+        if abs(wall_clock_elapsed - evse_uptime_elapsed) > 0.05 and not wall_clock_elapsed * 0.9 < evse_uptime_elapsed < wall_clock_elapsed * 1.1:
+            fatal_error(f'EVSE uptime not elapsing as expected:\n\t'
+                        f'EVSE start {self.evse_uptime_start} now {evse_uptime_now} elapsed {evse_uptime_elapsed}\n\t'
+                        f'WALL start {self.wall_clock_start} now {wall_clock_now} elapsed {wall_clock_elapsed}')
+
+    # EVSE firmwares >= 2.2.12 require that the vehicle switches to B in 3 seconds after stopping the PWM.
+    # Otherwise the EVSE will wait for 60 seconds before going back to C when phase switching.
+    def switch_phases(self, phases):
+        self.switch_phases_function(phases)
+        while self.get_cp_pwm_function() != 1000:
+            time.sleep(0.1)
+        self.change_cp_pe_state('B')
+        while self.get_cp_pwm_function() == 1000:
+            time.sleep(0.1)
+        self.change_cp_pe_state('C')
+        time.sleep(PHASE_SWITCH_SETTLE_DURATION)
+
+    def verify_voltages(self, p_type2: list[typing.Literal['L1', 'L2', 'L3']], p_meter: list[typing.Literal['L1', 'L2', 'L3']] | None = None, missing_type2_voltage_cb = fatal_error):
+        voltages = self.read_voltage_monitors()
+        voltages_str = ', '.join([f'{x:.2f} V' for x in voltages])
+        print(f'Reading voltages as {voltages_str}, expecting {", ".join(p_type2) if len(p_type2) > 0 else "none"}')
+
+        meter_voltages = self.get_meter_voltages_function()
+
+        if p_meter is None:
+            p_meter = p_type2
+
+        if meter_voltages is None:
+            # Set meter voltages to voltages if there's no energy meter connected
+            # (i.e. this is not a Pro): voltages are checked first.
+            meter_voltages = voltages
+            # Also set meter phases to phases.
+            # This results in the same check being run twice below, which is fine(tm)
+            p_meter = p_type2
+        else:
+            meter_voltages_str = ', '.join([f'{x:.2f} V' for x in meter_voltages])
+            print(f'Energy meter measured voltages as {meter_voltages_str}, expecting {", ".join(p_meter) if len(p_meter) > 0 else "none"}')
+
+        for i in range(3):
+            name = ['L1', 'L2', 'L3'][i]
+            expect_on = name in p_type2
+            expect_on_meter = name in p_meter
+            if expect_on and voltages[i] < VOLTAGE_ON_THRESHOLD:
+                missing_type2_voltage_cb(f'Type-2: Missing voltage on {name}')
+                return
+            elif not expect_on and voltages[i] > VOLTAGE_OFF_THRESHOLD:
+                fatal_error(f'Type-2: Unexpected voltage on {name}')
+
+            if expect_on_meter and meter_voltages[i] < VOLTAGE_ON_THRESHOLD:
+                fatal_error(f'Energy meter: Missing voltage on {name}')
+            elif not expect_on_meter and meter_voltages[i] > VOLTAGE_OFF_THRESHOLD:
+                fatal_error(f'Energy meter: Unexpected voltage on {name}')
+
+    def blackbox_enable(self):
+        status = blackbox.bb_get_status()._asdict()
+
+        if not status['success']:
+            fatal_error('Could not get electrical tester status')
+
+        if status['response'] == 'ENABLE = 0':
+            tester_enable = blackbox.bb_enable()._asdict()
+
+            if not tester_enable['success']:
+                fatal_error('Could not enable electrical tester blackbox mode')
+
+        reset = blackbox.bb_reset()._asdict()
+
+        if not reset['success']:
+            fatal_error('Could not reset electrical tester')
+
+        return blackbox.bb_get_device_info()._asdict()
+
+    # requires power_on
+    def measure_front_panel_rlow(self, report):
+        report['device_info'] = self.blackbox_enable()
+        day, month, year = (int(x) for x in report['device_info']['calibration_date'].split('.'))
+        calibration_due_date_offset = (datetime.date(year, month, day) + datetime.timedelta(365 * 2) - datetime.datetime.now().date()).days
+
+        if calibration_due_date_offset < 0:
+            print(red('=================================================================='))
+            print('')
+            print(red(f'   Electrical tester out of calibration since {-calibration_due_date_offset} day(s)'))
+            print('')
+            print(red('=================================================================='))
+        elif calibration_due_date_offset < 60:
+            print(blue('=================================================================='))
+            print('')
+            print(blue(f'   Electrical tester due for calibration in {calibration_due_date_offset} day(s)'))
+            print('')
+            print(blue('=================================================================='))
+
+        self.connect_warp_power(['L1', 'L2', 'L3'])
+        time.sleep(RELAY_SETTLE_DURATION)
+
+        print('Connecting front panel')
+
+        self.connect_front_panel(True)
+        time.sleep(RELAY_SETTLE_DURATION)
+
+        print('Electrical test R low front panel')
+
+        report['rlow'] = blackbox.bb_measure_rlow()._asdict()
+
+        if not report['rlow']['passed']:
+            fatal_error(f'Electrical test failed: {json.dumps(report["rlow"], indent=4)}')
+
+        print('Disconnecting front panel')
+
+        self.connect_front_panel(False)
+        time.sleep(RELAY_SETTLE_DURATION)
+
+        self.connect_warp_power(['L1'])
+        time.sleep(RELAY_SETTLE_DURATION)
+
+        blackbox.bb_disable()
+
+    def test_zauto_strict(self, phase, report):
+        key = f'zauto_{phase}'
+        report[key] = blackbox.bb_measure_zauto()._asdict()
+
+        if not report[key]['passed']:
+            fatal_error(f'Electrical test failed: {json.dumps(report[key], indent=4)}')
+
+        value, unit = report[key]['results']['ZLPE_Auto'].split(' ')
+
+        if unit != 'Ohm':
+            fatal_error(f'Electrical test failed (unexpected unit): {json.dumps(report[key], indent=4)}')
+
+        if float(value) < 1:
+            fatal_error(f'Electrical test failed (< 1 Ohm): {json.dumps(report[key], indent=4)}')
+
+    def test_zauto_relaxed(self, phase, report):
+        key = f'zauto_{phase}'
+        all_results = []
+
+        for _ in range(4):
+            report[key] = blackbox.bb_measure_zauto()._asdict()
+
+            if report[key]['passed']:
+                if self.generation <= 2:
+                    return
+
+                value, unit = report[key]['results']['ZLPE_Auto'].split(' ')
+
+                if unit == 'Ohm' and float(value) > 1:
+                    return
+
+            all_results.append(report[key])
+
+            time.sleep(2)
+
+        fatal_error(f'Electrical test failed: {json.dumps(all_results, indent=4)}')
+
+    def test_zauto(self, phase, report):
+        self.test_zauto_relaxed(phase, report)
+
+    def test_zline(self, phase, report):
+        key = f'zline_{phase}'
+        report[key] = blackbox.bb_measure_zline()._asdict()
+
+        if not report[key]['passed']:
+            fatal_error(f'Electrical test failed: {json.dumps(report[key], indent=4)}')
+
+    def test_zloop(self, phase, report):
+        key = f'zloop_{phase}'
+        report[key] = blackbox.bb_measure_zloop(max_tries=5)._asdict()
+
+        if not report[key]['passed']:
+            fatal_error(f'Electrical test failed: {json.dumps(report[key], indent=4)}')
+
+        if report[key]['try_count'] > 1:
+            print(yellow(f'WARNING: Electrical test required {report[key]['try_count']} tries to pass'))
+
+    def test_uc(self, phase, report):
+        key = f'uc_{phase}'
+        report[key] = blackbox.bb_measure_uc()._asdict()
+
+        if not report[key]['passed']:
+            fatal_error(f'Electrical test failed: {json.dumps(report[key], indent=4)}')
+
+    # requires power_on
+    def test_charger(self, result, has_phase_switch, is_warp2):
+        assert self.get_evse_error_function != None
+        assert self.get_dc_fault_current_bits_function != None
+        assert self.get_iec_state_function != None
+        assert self.reset_dc_fault_function != None
+        assert self.get_evse_uptime_function != None
+        assert self.reset_evse_function != None
+        assert self.get_gpio_state_function != None
+
+        report = result["electrical_tests"]
+
+        if has_phase_switch:
+            assert self.switch_phases_function != None
+
+        self.blackbox_enable()
+
+        self.evse_uptime_start = self.get_evse_uptime_function()
+        self.wall_clock_start = time.time()
+
+        # step 01
+        print('Electrical test IEC states')
+        print('Connecting power to L1, L2 and L3')
+
+        self.connect_warp_power(['L1', 'L2', 'L3'])
+        self.connect_voltage_monitors(True)
+        time.sleep(RELAY_SETTLE_DURATION)
+
+        # step 01: test IEC states
+        def clear_contactor(counter, message):
+            max_counter = 15
+
+            if counter >= max_counter:
+                fatal_error('Giving up to clear contactor')
+
+            print(blue(message))
+            print(blue(f'Trying to clear contactor ({counter + 1}/{max_counter})'))
+
+            self.change_cp_pe_state('B')
+
+            time.sleep(RELAY_SETTLE_DURATION + EVSE_SETTLE_DURATION)
+
+            self.change_cp_pe_state('C')
+
+            time.sleep(RELAY_SETTLE_DURATION + EVSE_SETTLE_DURATION + VOLTAGE_SETTLE_DURATION)
+
+            self.verify_voltages(['L1', 'L2', 'L3'], missing_type2_voltage_cb=functools.partial(clear_contactor, counter + 1))
+
+        for state in ['A', 'B', 'C', 'B', 'C', 'B', 'C', 'D']:
+            self.change_cp_pe_state(state)
+
+            time.sleep(RELAY_SETTLE_DURATION + EVSE_SETTLE_DURATION)
+
+            if not self.check_iec_state(state):
+                if state == 'D' and self.get_iec_state_function() == 'E':
+                    fatal_error('Charger not in IEC state {0}. If the DC fault protector has triggered, please check whether the CP wire is (wronly) placed in the DC fault protector ring.'.format(state))
+
+                fatal_error('Charger not in IEC state {0}. Is CP wire connected correctly to the EVSE?'.format(state))
+
+            if self.get_evse_error_function() != 0:
+                if state != 'D':
+                    fatal_error('Unexpected EVSE error')
+            else:
+                if state == 'D':
+                    fatal_error('Missing EVSE error for IEC state D')
+
+            time.sleep(VOLTAGE_SETTLE_DURATION)
+
+            if state == 'D':
+                time.sleep(6) # EVSE opens the contactor if the car does not react to missing PWM after 6 seconds.
+
+            if state == 'C':
+                self.verify_voltages(['L1', 'L2', 'L3'], missing_type2_voltage_cb=functools.partial(clear_contactor, 0))
+                if (e := self.get_contactor_state_function()) != (3 if is_warp2 else 0b11011):
+                    fatal_error(f"EVSE reports contactor state {e}. Is an auxillary contact broken?")
+            else:
+                self.verify_voltages(p_type2=[], p_meter=['L1', 'L2', 'L3'])
+                if (e := self.get_contactor_state_function()) != (1 if is_warp2 else 0b10000):
+                    fatal_error(f"EVSE reports contactor state {e}. Is an auxillary contact stuck?")
+
+            self.verify_evse_not_crashed()
+
+        # since EVSE 2.0 firmware 2.1.14 the contactor stays off for 30 seconds
+        # after state D. the previous test ends with state D, so we need to leave
+        # state D and then wait here for at least 30 seconds
+        self.change_cp_pe_state('A')
+        time.sleep(RELAY_SETTLE_DURATION + EVSE_SETTLE_DURATION)
+
+        if not self.check_iec_state('A'):
+            fatal_error('Charger not in IEC state A')
+
+        self.verify_evse_not_crashed()
+
+        if self.generation >= 4:
+            print('Test ISO 15118')
+
+            # only connect the ISO 15118 vehicle simulator while its needed, as
+            # the communication on the CP line affects the Z auto L-PE measurement
+            self.connect_iso_15118_simulator(True)
+
+            self.set_iso15118_enabled_function(True)
+
+            self.change_cp_pe_state('B')
+            time.sleep(RELAY_SETTLE_DURATION + EVSE_SETTLE_DURATION)
+
+            time.sleep(ISO15118_CONNECT_DURATION)
+            ev_mac = self.get_iso15118_ev_mac_function()
+            result['iso15118_ev_mac'] = ev_mac
+
+            if ev_mac == '00:00:00:00:00:00':
+                fatal_error(f"Failed to connect to simulated car via ISO 15118 {ev_mac=}")
+
+            ap = self.get_iso15118_attenuation_profile_function()
+            result['iso15118_attenuation_profile'] = ap
+
+            for i, v in enumerate(ap[:-1]):
+                if v >= (ATTENUATION_PROFILE_THRESHOLD[i] + 10): # temporary +10 until we have more data
+                    fatal_error(f"ISO 15118 attenuation profile entry {i} out of range: {v} >= {ATTENUATION_PROFILE_THRESHOLD[i]}!\nProfile: {",".join([str(x) for x in ap])}")
+
+            self.change_cp_pe_state('A')
+            time.sleep(RELAY_SETTLE_DURATION + EVSE_SETTLE_DURATION)
+
+            self.set_iso15118_enabled_function(False)
+            self.connect_iso_15118_simulator(False)
+
+        # step 01: test phase separation
+        self.change_cp_pe_state('C')
+        time.sleep(RELAY_SETTLE_DURATION + EVSE_SETTLE_DURATION + VOLTAGE_SETTLE_DURATION)
+
+        if not self.check_iec_state('C'):
+            fatal_error('Charger not in IEC state C')
+
+        for phases in [['L1', 'L2'],
+                       ['L1'],
+                       ['L1', 'L3'],
+                       ['L1', 'L2', 'L3']]:
+            print('Connecting power to', ', '.join(phases))
+
+            self.connect_warp_power(phases)
+            time.sleep(RELAY_SETTLE_DURATION + VOLTAGE_SETTLE_DURATION)
+
+            self.verify_voltages(phases)
+
+        if has_phase_switch:
+            print('Testing phase switch')
+
+            # To test the phase switch while a charge is running,
+            # we would have to emulate a "sane" vehicle
+            # or else the EVSE imposes a delay of 60 seconds
+            # before closing the contactor again.
+            # We only want to test that the EVSE can toggle
+            # the L1+N contactor and the L2+L3 contactor independently.
+            # Starting a single phase charge is sufficient to test this.
+
+            self.change_cp_pe_state('A')
+            time.sleep(RELAY_SETTLE_DURATION)
+            self.switch_phases_function(1)
+            time.sleep(0.5)
+            self.change_cp_pe_state('C')
+            time.sleep(RELAY_SETTLE_DURATION + EVSE_SETTLE_DURATION + VOLTAGE_SETTLE_DURATION + 2)  # FIXME: for unknown reason +2 is necessary here for proper voltage measurement
+            self.verify_voltages(p_type2=['L1'], p_meter=['L1', 'L2', 'L3'])
+
+            self.change_cp_pe_state('A')
+            time.sleep(RELAY_SETTLE_DURATION)
+            self.switch_phases_function(3)
+            time.sleep(0.5)
+            self.change_cp_pe_state('C')
+            time.sleep(RELAY_SETTLE_DURATION + EVSE_SETTLE_DURATION + VOLTAGE_SETTLE_DURATION + 2)  # FIXME: for unknown reason +2 is necessary here for proper voltage measurement
+            self.verify_voltages(['L1', 'L2', 'L3'])
+
+        self.connect_voltage_monitors(False)
+        time.sleep(RELAY_SETTLE_DURATION)
+
+        self.verify_evse_not_crashed()
+
+        # step 01: test PE disconnect
+        print('Disconnecting PE')
+
+        self.connect_type2_pe(False)
+        time.sleep(RELAY_SETTLE_DURATION + EVSE_SETTLE_DURATION)
+
+        if not self.check_iec_state('A'):
+            fatal_error('Charger not in IEC state A')
+
+        print('Reconnecting PE')
+
+        self.connect_type2_pe(True)
+        time.sleep(RELAY_SETTLE_DURATION + EVSE_SETTLE_DURATION)
+
+        self.verify_evse_not_crashed()
+
+        # step 02: test voltage L1
+        self.change_cp_pe_state('C')
+        time.sleep(RELAY_SETTLE_DURATION + EVSE_SETTLE_DURATION)
+
+        if not self.check_iec_state('C'):
+            fatal_error('Charger not in IEC state C. Check contactor!')
+
+        self.change_meter_state('Type2-L1')
+        time.sleep(RELAY_SETTLE_DURATION)
+
+        print('Electrical test voltage L1')
+
+        report['voltage_L1'] = blackbox.bb_measure_voltage()._asdict()
+
+        if not report['voltage_L1']['passed']:
+            fatal_error(f'Electrical test failed: {json.dumps(report["voltage_L1"], indent=4)}')
+
+        self.verify_evse_not_crashed()
+
+        # step 03: test voltage L2
+        self.change_meter_state('Type2-L2')
+        time.sleep(RELAY_SETTLE_DURATION)
+
+        print('Electrical test voltage L2')
+
+        report['voltage_L2'] = blackbox.bb_measure_voltage()._asdict()
+
+        if not report['voltage_L2']['passed']:
+            fatal_error(f'Electrical test failed: {json.dumps(report["voltage_L2"], indent=4)}')
+
+        self.verify_evse_not_crashed()
+
+        # step 04: test voltage L3
+        self.change_meter_state('Type2-L3')
+        time.sleep(RELAY_SETTLE_DURATION)
+
+        print('Electrical test voltage L3')
+
+        report['voltage_L3'] = blackbox.bb_measure_voltage()._asdict()
+
+        if not report['voltage_L3']['passed']:
+            fatal_error(f'Electrical test failed: {json.dumps(report["voltage_L3"], indent=4)}')
+
+        self.verify_evse_not_crashed()
+
+        # step 05: test RCD positive
+        self.change_meter_state('Type2-L1')
+        time.sleep(RELAY_SETTLE_DURATION)
+
+        print('Electrical test RCD positive')
+
+        report['rcdi_positive'] = blackbox.bb_measure_rcdi('+')._asdict()
+
+        if not report['rcdi_positive']['passed']:
+            fatal_error(f'Electrical test failed: {json.dumps(report["rcdi_positive"], indent=4)}')
+
+        if float(report['rcdi_positive']['results']['Id'].split(' ')[0]) < 5.4:
+            fatal_error(f'Electrical test failed (Id < 5.4 mA): {json.dumps(report["rcdi_positive"], indent=4)}')
+
+        self.reset_dc_fault('C')
+        self.verify_evse_not_crashed()
+
+        # step 06: test RCD negative
+        print('Electrical test RCD negative')
+
+        report['rcdi_negative'] = blackbox.bb_measure_rcdi('-')._asdict()
+
+        if not report['rcdi_negative']['passed']:
+            fatal_error(f'Electrical test failed: {json.dumps(report["rcdi_negative"], indent=4)}')
+
+        if float(report['rcdi_negative']['results']['Id'].split(' ')[0]) < 5.4:
+            fatal_error(f'Electrical test failed (Id < 5.4 mA): {json.dumps(report["rcdi_negative"], indent=4)}')
+
+        self.reset_dc_fault('C')
+        self.verify_evse_not_crashed()
+
+        # step 07a: test Z line L1
+        print('Electrical test Z line L1')
+
+        self.test_zline('L1', report)
+
+        self.verify_evse_not_crashed()
+
+        # step 07b: test Z loop L1
+        print('Electrical test Z loop L1')
+
+        self.test_zloop('L1', report)
+
+        self.verify_evse_not_crashed()
+
+        # step 07c: test Uc L1
+        print('Electrical test Uc L1')
+
+        self.test_uc('L1', report)
+
+        self.verify_evse_not_crashed()
+
+        # step 08a: test Z line L2
+        self.change_meter_state('Type2-L2')
+        time.sleep(RELAY_SETTLE_DURATION)
+
+        print('Electrical test Z line L2')
+
+        self.test_zline('L2', report)
+
+        self.verify_evse_not_crashed()
+
+        # step 08b: test Z loop L2
+        print('Electrical test Z loop L2')
+
+        self.test_zloop('L2', report)
+
+        self.verify_evse_not_crashed()
+
+        # step 08c: test Uc L2
+        print('Electrical test Uc L2')
+
+        self.test_uc('L2', report)
+
+        self.verify_evse_not_crashed()
+
+        # step 09a: test Z line L3
+        self.change_meter_state('Type2-L3')
+        time.sleep(RELAY_SETTLE_DURATION)
+
+        print('Electrical test Z line L3')
+
+        self.test_zline('L3', report)
+
+        self.verify_evse_not_crashed()
+
+        # step 09b: test Z loop L3
+        print('Electrical test Z loop L3')
+
+        self.test_zloop('L3', report)
+
+        self.verify_evse_not_crashed()
+
+        # step 09c: test Uc L3
+        print('Electrical test Uc L3')
+
+        self.test_uc('L3', report)
+
+        self.verify_evse_not_crashed()
+
+        # step 10: test R iso L1
+        self.change_meter_state('Type2-L1')
+        time.sleep(RELAY_SETTLE_DURATION)
+
+        self.change_cp_pe_state('A')
+        time.sleep(RELAY_SETTLE_DURATION + EVSE_SETTLE_DURATION)
+
+        if not self.check_iec_state('A'):
+            fatal_error('Charger not in IEC state A')
+
+        print('Electrical test R iso L1')
+
+        report['riso_L1'] = blackbox.bb_measure_riso('L1/PE', limit='250 kOhm' if is_warp2 else '1 MOhm')._asdict()
+
+        if not report['riso_L1']['passed']:
+            fatal_error(f'Electrical test failed: {json.dumps(report["riso_L1"], indent=4)}')
+
+        self.verify_evse_not_crashed()
+
+        # step 11: test R iso L2
+        self.change_meter_state('Type2-L2')
+        time.sleep(RELAY_SETTLE_DURATION)
+
+        print('Electrical test R iso L2')
+
+        report['riso_L2'] = blackbox.bb_measure_riso('L2/PE')._asdict()
+
+        if not report['riso_L2']['passed']:
+            fatal_error(f'Electrical test failed: {json.dumps(report["riso_L2"], indent=4)}')
+
+        self.verify_evse_not_crashed()
+
+        # step 12: test R iso L3
+        self.change_meter_state('Type2-L3')
+        time.sleep(RELAY_SETTLE_DURATION)
+
+        print('Electrical test R iso L3')
+
+        report['riso_L3'] = blackbox.bb_measure_riso('L3/PE')._asdict()
+
+        if not report['riso_L3']['passed']:
+            fatal_error(f'Electrical test failed: {json.dumps(report["riso_L3"], indent=4)}')
+
+        self.verify_evse_not_crashed()
+
+        # step 13: test R iso N
+        self.change_meter_state('Type2-L1')
+        time.sleep(RELAY_SETTLE_DURATION)
+
+        print('Electrical test R iso N')
+
+        report['riso_N'] = blackbox.bb_measure_riso('N/PE')._asdict()
+
+        if not report['riso_N']['passed']:
+            fatal_error(f'Electrical test failed: {json.dumps(report["riso_N"], indent=4)}')
+
+        self.verify_evse_not_crashed()
+
+        # clean up
+        self.connect_warp_power(['L1'])
+        time.sleep(RELAY_SETTLE_DURATION)
+
+        blackbox.bb_disable()
+
+        print('Electrical test done')
+
+        return report
+
+def main():
+    from PySide6.QtWidgets import QApplication, QWidget, QVBoxLayout, QPushButton, QFrame
+
+    stage3 = Stage3(3,
+                    is_front_panel_button_pressed_function=lambda: False,
+                    get_evse_error_function=lambda: 0,
+                    get_dc_fault_current_bits_function=lambda: 0,
+                    get_iec_state_function=lambda: 'A',
+                    reset_dc_fault_function=lambda: None,
+                    switch_phases_function=lambda x: None,
+                    get_contactor_state_function=lambda: None,
+                    get_evse_uptime_function=lambda: None,
+                    reset_evse_function=lambda: None,
+                    get_cp_pwm_function=lambda: 1000,
+                    get_meter_voltages_function=lambda: None,
+                    set_iso15118_enabled_function=lambda: None,
+                    get_iso15118_ev_mac_function=lambda: None,
+                    get_iso15118_attenuation_profile_function=lambda: None,
+                    get_gpio_state_function=lambda: None)
+
+    stage3.setup()
+
+    app = QApplication([])
+    window = QWidget()
+    window.setWindowTitle('Manual WARP Control')
+    window.setMinimumWidth(450)
+    layout = QVBoxLayout()
+
+    def add_button(text, command):
+        button = QPushButton(text)
+
+        button.setMinimumHeight(button.sizeHint().height() * 2)
+        font = button.font()
+        font.setPointSizeF(font.pointSizeF() * 1.5)
+        button.setFont(font)
+
+        button.clicked.connect(command)
+        layout.addWidget(button)
+
+    def add_line():
+        line = QFrame()
+        line.setFrameShape(QFrame.HLine)
+        line.setFrameShadow(QFrame.Plain)
+        line.setLineWidth(2)
+
+        layout.addWidget(line)
+
+    add_button('Power On - WARP3/4 L1', lambda: stage3.power_on('Smart'))
+    add_button('Power On - WARP3/4 L1/L2/L3', lambda: stage3.power_on('Smart', phases=['L1', 'L2', 'L3']))
+    add_button('Power On - WARP2 Pro L1', lambda: stage3.power_on('Pro'))
+    add_button('Power On - WARP2 Pro L1/L2/L3', lambda: stage3.power_on('Pro', phases=['L1', 'L2', 'L3']))
+    add_button('Power On - CEE L1', lambda: stage3.power_on('CEE'))
+    add_button('Power On - CEE L1/L2/L3', lambda: stage3.power_on('CEE', phases=['L1', 'L2', 'L3']))
+    add_line()
+    add_button('Power Off', lambda: stage3.power_off())
+    add_line()
+    add_button('CP/PE State A', lambda: stage3.change_cp_pe_state('A'))
+    add_button('CP/PE State B', lambda: stage3.change_cp_pe_state('B'))
+    add_button('CP/PE State C', lambda: stage3.change_cp_pe_state('C'))
+    add_button('CP/PE State D', lambda: stage3.change_cp_pe_state('D'))
+    add_line()
+    add_button('Meter State Type2 L1', lambda: stage3.change_meter_state('Type2-L1'))
+    add_button('Meter State Type2 L2', lambda: stage3.change_meter_state('Type2-L2'))
+    add_button('Meter State Type2 L3', lambda: stage3.change_meter_state('Type2-L3'))
+
+    window.setLayout(layout)
+    window.show()
+    app.exec()
+
+    stage3.power_off()
+    stage3.teardown()
+
+    print('Done')
+
+if __name__ == '__main__':
+    try:
+        main()
+        input('Press return to exit ')
+    except FatalError as e:
+        print(red(str(e)))
+        input('Press return to exit ')
+        sys.exit(1)
+    except Exception:
+        traceback.print_exc()
+        input('Press return to exit ')
+        sys.exit(1)

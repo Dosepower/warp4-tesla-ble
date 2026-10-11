@@ -1,0 +1,125 @@
+/** @jsxImportSource preact */
+import { h } from "preact";
+import * as options from "../../options";
+import { __ } from "../../ts/translation";
+let x = {
+    "wifi": {
+        "status": {
+            "wifi_connection": "WLAN-Verbindung",
+            "not_configured": "Deaktiviert",
+            "not_connected": "Getrennt",
+            "connecting": "Verbinde",
+            "connected": "Verbunden",
+            "weak_signal": /*SFN*/(rssi: number) => "Schwaches Signal (" + rssi + " dBm)"/*NF*/,
+            "wifi_ap": "WLAN-Access-Point",
+            "disabled": "Deaktiviert",
+            "enabled": "Aktiviert",
+            "fallback_inactive": "Fallback inaktiv",
+            "fallback_active": "Fallback aktiv",
+            "ipv6_connected": "IPv6 verbunden",
+            "ipv6_no_address": "IPv6 keine Adresse"
+        },
+        "navbar": {
+            "wifi_sta": "WLAN-Verbindung",
+            "wifi_ap": "WLAN-Access-Point"
+        },
+        "content": {
+            "sta_settings": "WLAN-Verbindung",
+            "sta_mac": "Geräte-MAC-Adresse",
+            "sta_connected_bssid": "Verbundene BSSID",
+            "sta_connection": "WLAN-Verbindung",
+            "status_sta_ip": "IP-Adresse",
+            "status_sta_ipv6": "IPv6-Adresse",
+            "status_sta_ip_none": "Keine IP-Adresse",
+            "status_sta_rssi": "Signalstärke",
+            "status_sta_rssi_weak": "Schwache Signalstärke! Erwäge einen WLAN-Repeater oder Ethernet zu verwenden.",
+            "status_sta_disconnect_reason": "Trennungsgrund",
+            "status_sta_disconnect_reason_no_ap": "Access-Point nicht gefunden. Ist der Empfang zu schlecht oder die SSID falsch?",
+            "status_sta_disconnect_reason_auth": "Authentifizierung fehlgeschlagen. Ist die Passphrase korrekt?",
+            "status_sta_disconnect_reason_ap_full": "Access-Point voll: Zu viele verbundene Geräte.",
+            "status_sta_disconnect_reason_no_dhcp": "Keine IP-Adresse per DHCP erhalten.",
+            "status_sta_disconnect_reason_poor_reception": "Empfang zu schlecht.",
+            "status_sta_disconnect_reason_generic": "Verbindung fehlgeschlagen.",
+            "sta_enable_sta": "WLAN-Verbindung aktiviert",
+            "sta_enable_sta_desc": <>{__("The_device")} verbindet sich beim Start automatisch zum konfigurierten Netzwerk.</>,
+            "sta_ssid": "Netzwerkname (SSID)",
+            "sta_scan": "Netzwerksuche",
+            "sta_bssid": "BSSID",
+            "sta_bssid_lock": "BSSID-Sperre",
+            "sta_bssid_invalid": "Die BSSID muss aus sechs Gruppen mit jeweils einer zweistelligen Hexadezimalzahl, getrennt durch einen Doppelpunkt, bestehen. Zum Beispiel 01:23:45:67:89:AB",
+            "sta_bssid_lock_desc": "Verbindet sich nur mit der eingestellten BSSID, auch wenn andere Access Points oder Repeater im Netzwerk verfügbar sind. Wenn diese Option deaktiviert ist, wird üblicherweise der mit der besten Empfangsstärke ausgewählt.",
+            "sta_enable_11b": "Empfangsoptimierung",
+            "sta_enable_11b_desc": <>Verwendet den veralteten, langsamen 802.11b-Modus für etwas höhere Reichweite. <strong>Dieser verlangsamt auch andere Geräte, die zum WLAN verbunden sind</strong>, kann aber die Empfangsqualität und Robustheit der Verbindung leicht verbessern.</>,
+            "sta_passphrase": "Passphrase",
+
+            "ap_settings": "WLAN-Access-Point",
+            "ap_bssid": "BSSID",
+            "ap_bssid_none": "Access-Point nicht aktiv",
+            "ap_state": "Access Point",
+            "status_ap_ip": "IP-Adresse",
+            "ap_disabled_but_active": "Der WLAN-Access-Point wurde deaktiviert und wird nach dem nächsten Neustart nicht mehr zur Verfügung stehen. Dies wird nicht empfohlen, da es dazu führen kann, dass das Gerät nicht mehr erreichbar ist.",
+            "ap_disabled_auto_revert": /*SFN*/(seconds: number) => `Die Einstellung wird in ${seconds} Sekunden automatisch zurückgesetzt.`/*NF*/,
+            "ap_reboot_now": "Jetzt neustarten.",
+            "ap_reboot_body": "Der WLAN-Access-Point wurde deaktiviert. Jetzt neustarten um die Änderung anzuwenden?",
+            "ap_reboot_with_wifi_disabled": "Mit deaktiviertem WLAN-AP neustarten",
+            "ap_cannot_disable": "Mindestens eine Netzwerkschnittstelle muss aktiviert bleiben. Aktiviere zuerst die WLAN-Verbindung oder die LAN-Verbindung.",
+            "ap_cannot_disable_no_ethernet": "Mindestens eine Netzwerkschnittstelle muss aktiviert bleiben. Aktiviere zuerst die WLAN-Verbindung.",
+            "sta_disabled_but_active": "Die WLAN-Verbindung wurde deaktiviert und wird nach dem nächsten Neustart nicht mehr zur Verfügung stehen.",
+            "sta_disabled_auto_revert": /*SFN*/(seconds: number) => `Die Einstellung wird in ${seconds} Sekunden automatisch zurückgesetzt.`/*NF*/,
+            "sta_reboot_now": "Jetzt neustarten.",
+            "sta_reboot_body": "Die WLAN-Verbindung wurde deaktiviert. Jetzt neustarten um die Änderung anzuwenden?",
+            "sta_reboot_with_wifi_disabled": "Mit deaktiviertem WLAN neustarten",
+            "sta_cannot_disable": "Mindestens eine Netzwerkschnittstelle muss aktiviert bleiben. Aktiviere zuerst den WLAN-Access-Point oder die LAN-Verbindung.",
+            "sta_cannot_disable_no_ethernet": "Mindestens eine Netzwerkschnittstelle muss aktiviert bleiben. Aktiviere zuerst den WLAN-Access-Point.",
+            "ap_enable": "Access Point",
+            "ap_enable_help": <>
+                <p>Der Access-Point kann in einem von zwei Modi betrieben werden: Entweder kann er immer aktiv sein oder nur dann, wenn die Verbindung zu einem anderen WLAN bzw. zu einem LAN nicht konfiguriert oder fehlgeschlagen ist. </p>
+                <p><strong>Wir empfehlen, den Access-Point nie komplett zu deaktivieren, da sonst bei einer fehlgeschlagenen Verbindung zu einem anderen Netzwerk das Webinterface nicht mehr erreicht werden kann.</strong></p>
+            </>,
+            "ap_enabled": "Aktiviert",
+            "ap_fallback_only": "Nur als Fallback",
+            "ap_disabled": "Deaktiviert",
+            "ap_ssid": "Netzwerkname (SSID)",
+            "ap_hide_ssid": "Netzwerkname versteckt",
+            "ap_hide_ssid_desc": "Einige Geräte können versteckte WLANs auf Kanal 12 und 13 nicht finden.",
+            "ap_passphrase": "Passphrase",
+            "ap_channel": "Kanal",
+            "ap_channel_muted": "ignoriert, wenn WLAN-Verbindung aktiv ist",
+            "ap_channel_auto_select": "Automatische Auswahl",
+
+            "confirm_title": "WLAN-Access-Point deaktivieren?",
+            "confirm_content": <>Soll der WLAN-Access-Point wirklich komplett deaktiviert werden? Falls zukünftig keine Verbindung zu einem konfigurierten Netzwerk möglich ist, <b>kann nicht mehr auf das Webinterface zugegriffen werden</b>. {__("The_device")} muss dann auf den Werkszustand zurückgesetzt werden. {options.MANUAL_URL.length > 0 ? <a href={options.MANUAL_URL}>Siehe Betriebsanleitung für Details.</a> : undefined}</>,
+            "confirm_abort": "Abbrechen",
+            "confirm_confirm": "Deaktivieren",
+
+            "wpa_personal": "WPA2/3 Personal",
+            "wpa_auth_type": "Authentifizierung",
+            "eap_tls": "WPA2 Enterprise - EAP-TLS",
+            "eap_peap_ttls": "WPA2 Enterprise - EAP-PEAP/TTLS",
+            "eap_identity": "Identität",
+            "eap_username": "Benutzername",
+            "eap_password": "Passwort",
+            "eap_ca_cert": "CA-Zertifikat",
+            "eap_client_cert": "Client-Zertifikat",
+            "eap_client_key": "Client-Schlüssel",
+            "eap_cert_placeholder": "Kein Zertifikat",
+            "eap_key_placeholder": "Kein Schlüssel",
+            "optional_eap_cert_muted": /*FFN*/ (is_key: boolean) => {
+                return <><a href="#certs">{is_key ? "Schlüssel" : "Zertifikat"} hinzufügen</a>; optional</>
+            } /*NF*/,
+            "eap_cert_muted": /*FFN*/ (is_key: boolean) => {
+                return <a href="#certs">{is_key ? "Schlüssel" : "Zertifikat"} hinzufügen</a>
+            } /*NF*/,
+            "optional": "optional"
+        },
+        "script": {
+            "scan_wifi_init_failed": "Suche nach Netzwerken fehlgeschlagen. Konnte Scan nicht starten.",
+            "scan_wifi_results_failed": "Suche nach Netzwerken fehlgeschlagen. Konnte Ergebnisse nicht abholen.",
+            "no_ap_found": "Kein Netzwerk gefunden.",
+            "hidden_ap": "[Versteckter AP]",
+
+            "sta_save_failed": "Speichern der Verbindungseinstellungen fehlgeschlagen.",
+            "ap_save_failed": "Speichern der Access Point-Einstellungen fehlgeschlagen."
+        }
+    }
+}

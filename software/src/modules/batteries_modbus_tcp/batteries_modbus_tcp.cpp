@@ -1,0 +1,702 @@
+/* esp32-firmware
+ * Copyright (C) 2024-2025 Matthias Bolte <matthias@tinkerforge.com>
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, write to the
+ * Free Software Foundation, Inc., 59 Temple Place - Suite 330,
+ * Boston, MA 02111-1307, USA.
+ */
+
+#define EVENT_LOG_PREFIX "batteries_mbtcp"
+
+#include "batteries_modbus_tcp.h"
+
+#include <TFJson.h>
+
+#include "battery_modbus_tcp.h"
+#include "event_log_prefix.h"
+#include "generated/module_dependencies.h"
+#include "generated/battery_modbus_tcp_specs.h"
+#include "modules/modbus_tcp_client/generated/modbus_register_address_mode.enum.h"
+#include "tools/printf.h"
+
+#include "gcc_warnings.h"
+
+#define trace(fmt, ...) \
+    do { \
+        trace_timestamp(); \
+        logger.tracefln_plain(trace_buffer_index, fmt __VA_OPT__(,) __VA_ARGS__); \
+    } while (0)
+
+void BatteriesModbusTCP::pre_setup()
+{
+    this->trace_buffer_index = logger.alloc_trace_buffer("batteries_mbtcp");
+
+    for (size_t i = 0; i < OPTIONS_BATTERIES_MAX_SLOTS(); ++i) {
+        instances[i] = nullptr;
+    }
+
+    table_prototypes.push_back({BatteryModbusTCPTableID::None, *Config::Null()});
+
+    table_custom_register_block_prototype = Config::Object({
+        {"desc", Config::Str("", 0, 32)},
+        {"func", Config::Enum(ModbusFunctionCode::WriteMultipleRegisters)},
+        {"addr", Config::Uint16(0)},
+        {"vals", Config::Array({},
+            Config::get_prototype_uint16_0(),
+            1,
+            OPTIONS_BATTERIES_MODBUS_TCP_MAX_CUSTOM_VALUES_PER_REGISTER_BLOCK(),
+            Config::type_id<Config::ConfUint>()
+        )},
+    });
+
+    table_prototypes.push_back({BatteryModbusTCPTableID::Custom, Config::Object({
+        {"device_address", Config::Uint8(1)},
+        {"repeat_interval", Config::Uint16(60)},
+        {"register_address_mode", Config::Enum(ModbusRegisterAddressMode::Address)},
+        {"battery_modes", Config::Tuple({
+            Config::Object({
+                {"effective_mode", Config::Enum(BatteryMode::Block, BatteryMode::Block, BatteryMode::ForceDischarge)},
+                {"register_blocks", Config::Array({},
+                    &table_custom_register_block_prototype,
+                    0,
+                    OPTIONS_BATTERIES_MODBUS_TCP_MAX_CUSTOM_REGISTER_BLOCKS(),
+                    Config::type_id<Config::ConfObject>()
+                )},
+            }),
+            Config::Object({
+                {"effective_mode", Config::Enum(BatteryMode::Normal, BatteryMode::Block, BatteryMode::ForceDischarge)},
+                {"register_blocks", Config::Array({},
+                    &table_custom_register_block_prototype,
+                    0,
+                    OPTIONS_BATTERIES_MODBUS_TCP_MAX_CUSTOM_REGISTER_BLOCKS(),
+                    Config::type_id<Config::ConfObject>()
+                )},
+            }),
+            Config::Object({
+                {"effective_mode", Config::Enum(BatteryMode::BlockDischarge, BatteryMode::Block, BatteryMode::ForceDischarge)},
+                {"register_blocks", Config::Array({},
+                    &table_custom_register_block_prototype,
+                    0,
+                    OPTIONS_BATTERIES_MODBUS_TCP_MAX_CUSTOM_REGISTER_BLOCKS(),
+                    Config::type_id<Config::ConfObject>()
+                )},
+            }),
+            Config::Object({
+                {"effective_mode", Config::Enum(BatteryMode::ForceCharge, BatteryMode::Block, BatteryMode::ForceDischarge)},
+                {"register_blocks", Config::Array({},
+                    &table_custom_register_block_prototype,
+                    0,
+                    OPTIONS_BATTERIES_MODBUS_TCP_MAX_CUSTOM_REGISTER_BLOCKS(),
+                    Config::type_id<Config::ConfObject>()
+                )},
+            }),
+            Config::Object({
+                {"effective_mode", Config::Enum(BatteryMode::BlockCharge, BatteryMode::Block, BatteryMode::ForceDischarge)},
+                {"register_blocks", Config::Array({},
+                    &table_custom_register_block_prototype,
+                    0,
+                    OPTIONS_BATTERIES_MODBUS_TCP_MAX_CUSTOM_REGISTER_BLOCKS(),
+                    Config::type_id<Config::ConfObject>()
+                )},
+            }),
+            Config::Object({
+                {"effective_mode", Config::Enum(BatteryMode::ForceDischarge, BatteryMode::Block, BatteryMode::ForceDischarge)},
+                {"register_blocks", Config::Array({},
+                    &table_custom_register_block_prototype,
+                    0,
+                    OPTIONS_BATTERIES_MODBUS_TCP_MAX_CUSTOM_REGISTER_BLOCKS(),
+                    Config::type_id<Config::ConfObject>()
+                )},
+            })
+        })},
+    })});
+
+    get_battery_modbus_tcp_table_prototypes(&table_prototypes);
+
+    config_prototype = Config::Object({
+        {"display_name", Config::Str("", 0, 32)},
+        {"host", Config::Str("", 0, 64)},
+        {"port", Config::Uint16(502)},
+        {"table", Config::Union<BatteryModbusTCPTableID>(*Config::Null(),
+            BatteryModbusTCPTableID::None,
+            table_prototypes.data(),
+            static_cast<uint8_t>(table_prototypes.size())
+        )},
+    });
+
+    state_prototype = Config::Object({
+        {"active_mode", Config::Enum(BatteryMode::None)},
+        {"effective_mode", Config::Enum(BatteryMode::None)},
+        {"discovering", Config::Bool(false)},
+        {"checking", Config::Bool(false)},
+        {"testing", Config::Bool(false)},
+    });
+
+    /*errors_prototype = Config::Object({
+        {"timeout", Config::Uint32(0)},
+    });*/
+
+    batteries.register_battery_generator(get_class(), this);
+
+    test_table_prototypes.push_back({BatteryModbusTCPTableID::Custom, Config::Object({
+        {"device_address", Config::Uint8(1)},
+        {"repeat_interval", Config::Uint16(60)},
+        {"mode", Config::Enum(BatteryMode::Block)},
+        {"effective_mode", Config::Enum(BatteryMode::Normal, BatteryMode::Block, BatteryMode::ForceDischarge)},
+        {"register_blocks", Config::Array({},
+            &table_custom_register_block_prototype,
+            0,
+            OPTIONS_BATTERIES_MODBUS_TCP_MAX_CUSTOM_REGISTER_BLOCKS(),
+            Config::type_id<Config::ConfObject>()
+        )},
+    })});
+
+    get_battery_modbus_tcp_test_table_prototypes(&test_table_prototypes);
+
+    test_config = ConfigRoot{Config::Object({
+        {"slot", Config::Uint(0, 0, OPTIONS_BATTERIES_MAX_SLOTS() - 1)},
+        {"host", Config::Str("", 0, 64)},
+        {"port", Config::Uint16(502)},
+        {"table", Config::Union<BatteryModbusTCPTableID>(*Config::Null(),
+            BatteryModbusTCPTableID::None,
+            test_table_prototypes.data(),
+            static_cast<uint8_t>(test_table_prototypes.size())
+        )},
+        {"cookie", Config::Uint32(0)},
+    })};
+
+    test_continue_config = ConfigRoot{Config::Object({
+        {"cookie", Config::Uint32(0)},
+    })};
+
+    test_stop_config = test_continue_config;
+}
+
+void BatteriesModbusTCP::register_urls()
+{
+    api.addCommand("batteries_modbus_tcp/test", &test_config, {}, [this](Language language, String &errmsg) {
+        BatteryModbusTCPTableID table_id = test_config.get("table")->getTag<BatteryModbusTCPTableID>();
+        Config *table_config = static_cast<Config *>(test_config.get("table")->get());
+
+        defer {
+            // When done parsing the test command, drop Strings and Array items from config to free memory
+            test_config.get("host")->clearString();
+
+            if (table_id == BatteryModbusTCPTableID::Custom) {
+                table_config->get("register_blocks")->removeAll();
+            }
+        };
+
+        if (test != nullptr) {
+            errmsg = language == Language::English
+                     ? "Another test is already in progress, please try again later!"
+                     : "Ein anderer Test läuft bereits, bitte später noch einmal versuchen!";
+            return;
+        }
+
+        test = new Test;
+        test->language = language;
+        test->last_keep_alive = now_us();
+        test->slot = test_config.get("slot")->asUint();
+        test->host = test_config.get("host")->asString();
+        test->port = static_cast<uint16_t>(test_config.get("port")->asUint());
+        test->cookie = test_config.get("cookie")->asUint();
+        test->state = TestState::Start;
+        test->table_id = table_id;
+
+        if (table_id == BatteryModbusTCPTableID::SAXPowerHomeBasicMode) {
+            test->transaction_id_mask = UINT8_MAX; // SAX Power has a bug that the first byte of the Modbus/TCP transaction ID is always 0 in a write response
+        }
+
+        switch (table_id) {
+        case BatteryModbusTCPTableID::None:
+            errmsg = language == Language::English ? "No table" : "Keine Tabelle";
+            return;
+
+        case BatteryModbusTCPTableID::Custom:
+            test->device_address = table_config->get("device_address")->asUint8();
+            test->repeat_interval = table_config->get("repeat_interval")->asUint16();
+            test->mode = table_config->get("mode")->asEnum<BatteryMode>();
+            break;
+
+#include "generated/batteries_modbus_tcp_test_setup.inc"
+
+        default:
+            errmsg = language == Language::English ? "Unknown table" : "Unbekannte Tabelle";
+            return;
+        }
+
+        if (table_id == BatteryModbusTCPTableID::KostalPlenticorePlusG2
+         || table_id == BatteryModbusTCPTableID::KostalPlenticoreG3) {
+            test->discover_table_config = new Config(*table_config);
+        }
+        else {
+            test_load_table(table_config);
+        }
+
+        test_printfln(language == Language::English
+                      ? "Starting test for mode \"%s\""
+                      : "Starte Test für Modus \"%s\"",
+                      Batteries::get_battery_mode_display_name(test->mode, language));
+    }, true);
+
+    api.addCommand("batteries_modbus_tcp/test_continue", &test_continue_config, {}, [this](Language language, String &errmsg) {
+        if (test == nullptr) {
+            return;
+        }
+
+        uint32_t cookie = test_continue_config.get("cookie")->asUint();
+
+        if (cookie != test->cookie) {
+            errmsg = language == Language::English ? "Cannot continue another test" : "Kann keinen anderen Test fortsetzen";
+            return;
+        }
+
+        test->language        = language;
+        test->last_keep_alive = now_us();
+    }, true);
+
+    api.addCommand("batteries_modbus_tcp/test_stop", &test_stop_config, {}, [this](Language language, String &errmsg) {
+        if (test == nullptr) {
+            return;
+        }
+
+        uint32_t cookie = test_stop_config.get("cookie")->asUint();
+
+        if (cookie != test->cookie) {
+            errmsg = language == Language::English ? "Cannot stop another test" : "Kann keinen anderen Test stoppen";
+            return;
+        }
+
+        test->language = language;
+        test->stop     = true;
+    }, true);
+}
+
+void BatteriesModbusTCP::loop()
+{
+    if (test == nullptr) {
+        return;
+    }
+
+    if (test->printfln_buffer_used > 0 && deadline_elapsed(test->printfln_last_flush + 500_ms)) {
+        test_flush_log();
+    }
+
+    if (!test->stop && deadline_elapsed(test->last_keep_alive + 10_s)) {
+        const char *message = test->language == Language::English
+                              ? "Stopping test because no continue call was received for more than 10 seconds"
+                              : "Stoppe Test, da für mehr als 10 Sekunden kein Fortsetzen-Aufruf empfangen wurde";
+
+        logger.printfln("%s", message);
+        test_printfln("%s", message);
+
+        test->stop = true;
+    }
+
+    switch (test->state) {
+    case TestState::Start:
+        if (instances[test->slot] != nullptr) {
+            instances[test->slot]->set_testing(true);
+        }
+
+        test->state = TestState::Connect;
+        break;
+
+    case TestState::Connect:
+        if (test->stop) {
+            test->state = TestState::Done;
+            break;
+        }
+
+        test_printfln(test->language == Language::English ? "Connecting to %s:%u" : "Verbinde zu %s:%u", test->host.c_str(), test->port);
+
+        test->reconnect = false;
+        test->state = TestState::Connecting;
+
+        modbus_tcp_client.get_pool()->acquire(test->host.c_str(), test->port, &test->shared_client,
+        [this](TFGenericTCPClientConnectResult result, int error_number, TFGenericTCPSharedClient *shared_client, TFGenericTCPClientPoolShareLevel share_level) {
+            trace("b%lu t1 cc%d sl%d", test->slot, static_cast<int>(result), static_cast<int>(share_level));
+
+            test->shared_client = shared_client;
+
+            if (result != TFGenericTCPClientConnectResult::Connected) {
+                char buf[256] = "";
+
+                GenericTCPClientPoolConnector::format_connect_error(result, error_number, share_level, test->host.c_str(), test->port, buf, sizeof(buf), test->language);
+                test_printfln("%s", buf);
+
+                test->state = TestState::Done;
+                return;
+            }
+
+            if (test->table_id == BatteryModbusTCPTableID::KostalPlenticorePlusG2
+             || test->table_id == BatteryModbusTCPTableID::KostalPlenticoreG3) {
+                test->state = TestState::CreateDiscover;
+            }
+            else {
+                test->state = TestState::CreateWriter;
+            }
+        },
+        [this](TFGenericTCPClientDisconnectReason reason, int error_number, TFGenericTCPSharedClient *shared_client, TFGenericTCPClientPoolShareLevel share_level) {
+            trace("b%lu t1 cd%d sl%d", test->slot, static_cast<int>(reason), static_cast<int>(share_level));
+
+            char buf[256] = "";
+
+            GenericTCPClientPoolConnector::format_disconnect_reason(reason, error_number, share_level, test->host.c_str(), test->port, buf, sizeof(buf), test->language);
+            test_printfln("%s", buf);
+
+            test->shared_client = nullptr;
+            test->reconnect = reason == TFGenericTCPClientDisconnectReason::Forced;
+
+            if (test->state == TestState::Discovering) {
+                test->state = TestState::DestroyDiscover;
+                test->state_after_destroy_discover = TestState::Disconnect;
+
+                // immediately destroy the discover to stop the separate
+                // discover task from accessing the disconnected client
+                BatteryModbusTCP::destroy_discover(test->discover_ctx);
+                test->discover_ctx = nullptr;
+            }
+            else {
+                test->state = TestState::DestroyWriter;
+
+                // immediately destroy the writer to stop the separate
+                // writer task from accessing the disconnected client
+                BatteryModbusTCP::destroy_writer(test->writer_ctx);
+                test->writer_ctx = nullptr;
+            }
+        });
+
+        break;
+
+    case TestState::Connecting:
+        break;
+
+    case TestState::Disconnect:
+        if (test->shared_client != nullptr) {
+            modbus_tcp_client.get_pool()->release(test->shared_client);
+        }
+        else {
+            test->state = TestState::Done;
+        }
+
+        break;
+
+    case TestState::Done: {
+            test_printfln(test->language == Language::English
+                          ? (test->stop ? "Test stopped" : "Test finished")
+                          : (test->stop ? "Test gestoppt" : "Test abgeschlossen"));
+            test_flush_log();
+
+#if MODULE_WS_AVAILABLE()
+            char buf[128];
+            TFJsonSerializer json{buf, sizeof(buf)};
+
+            json.addObject();
+            json.addMemberNumber("cookie", test->cookie);
+            json.endObject();
+            json.end();
+
+            if (!ws.pushRawStateUpdate(buf, "batteries_modbus_tcp/test_done")) {
+                break; // need to report the test as done before doing something else
+            }
+#endif
+
+            if (instances[test->slot] != nullptr) {
+                instances[test->slot]->set_testing(false);
+            }
+
+            delete test->discover_table_config;
+            delete test;
+            test = nullptr;
+        }
+
+        break;
+
+    case TestState::CreateDiscover:
+        if (test->stop) {
+            test->state = TestState::Disconnect;
+            break;
+        }
+
+        test->state = TestState::Discovering;
+
+#if defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wsuggest-attribute=format"
+#endif
+        test->discover_ctx = BatteryModbusTCP::create_discover(instances[test->slot], test->slot, true,
+                                                               static_cast<TFModbusTCPSharedClient *>(test->shared_client),
+                                                               test->device_address, test->transaction_id_mask,
+        [this](bool event_log, const char *fmt, va_list args) {
+            test_vprintfln(fmt, args);
+        },
+        test->language);
+#if defined(__GNUC__)
+#pragma GCC diagnostic pop
+#endif
+
+        if (test->table_id == BatteryModbusTCPTableID::KostalPlenticorePlusG2) {
+            BatteryModbusTCP::discover_kostal_plenticore_plus_g2_variant(test->discover_ctx,
+            [this](KostalPlenticorePlusG2Variant variant) {
+                test->kostal_plenticore_plus_g2_variant = variant;
+
+                test_load_table(test->discover_table_config);
+
+                test->state = TestState::DestroyDiscover;
+                test->state_after_destroy_discover = TestState::CreateWriter;
+            });
+        }
+        else if (test->table_id == BatteryModbusTCPTableID::KostalPlenticoreG3) {
+            BatteryModbusTCP::discover_kostal_plenticore_g3_variant(test->discover_ctx,
+            [this](KostalPlenticoreG3Variant variant) {
+                test->kostal_plenticore_g3_variant = variant;
+
+                test_load_table(test->discover_table_config);
+
+                test->state = TestState::DestroyDiscover;
+                test->state_after_destroy_discover = TestState::CreateWriter;
+            });
+        }
+        else {
+            esp_system_abort("Entered battery discover mode without anything to discover");
+        }
+
+        break;
+
+    case TestState::DestroyDiscover:
+        BatteryModbusTCP::destroy_discover(test->discover_ctx);
+        test->discover_ctx = nullptr;
+
+        test->state = test->state_after_destroy_discover;
+        break;
+
+    case TestState::Discovering:
+        if (test->stop) {
+            test->state = TestState::DestroyDiscover;
+            test->state_after_destroy_discover = TestState::Disconnect;
+            break;
+        }
+
+        break;
+
+    case TestState::CreateWriter:
+        if (test->stop) {
+            test->state = TestState::Disconnect;
+            break;
+        }
+
+        test->state = TestState::Writing;
+
+#if defined(__GNUC__)
+    #pragma GCC diagnostic push
+    #pragma GCC diagnostic ignored "-Wsuggest-attribute=format"
+#endif
+        test->writer_ctx = BatteryModbusTCP::create_writer(instances[test->slot], test->slot, true,
+                                                           static_cast<TFModbusTCPSharedClient *>(test->shared_client),
+                                                           test->device_address, test->transaction_id_mask, test->repeat_interval,
+                                                           test->mode, test->table, "",
+        [this](bool event_log, const char *fmt, va_list args) {
+            test_vprintfln(fmt, args);
+        },
+        [this]() {
+            test->state = TestState::DestroyWriter;
+        },
+        test->language);
+#if defined(__GNUC__)
+    #pragma GCC diagnostic pop
+#endif
+
+        break;
+
+    case TestState::DestroyWriter:
+        BatteryModbusTCP::destroy_writer(test->writer_ctx);
+        test->writer_ctx = nullptr;
+
+        if (!test->reconnect) {
+            BatteryModbusTCP::free_table(test->table);
+            test->table = nullptr;
+        }
+
+        if (test->shared_client != nullptr) {
+            test->state = TestState::Disconnect;
+        }
+        else if (test->reconnect) {
+            test->state = TestState::Connect;
+        }
+        else {
+            test->state = TestState::Done;
+        }
+
+        break;
+
+    case TestState::Writing:
+        if (test->stop) {
+            test->state = TestState::DestroyWriter;
+            break;
+        }
+
+        break;
+
+    default:
+        esp_system_abortf<48>("Invalid state during test: %d", static_cast<int>(test->state));
+    }
+}
+
+[[gnu::const]] BatteryClassID BatteriesModbusTCP::get_class() const
+{
+    return BatteryClassID::ModbusTCP;
+}
+
+IBattery *BatteriesModbusTCP::new_battery(uint32_t slot, Config *state, Config *errors)
+{
+    BatteryModbusTCP *battery = new BatteryModbusTCP(slot, state, errors, modbus_tcp_client.get_pool());
+
+    instances[slot] = battery;
+
+    return battery;
+}
+
+const Config *BatteriesModbusTCP::get_config_prototype()
+{
+    return &config_prototype;
+}
+
+const Config *BatteriesModbusTCP::get_state_prototype()
+{
+    return &state_prototype;
+}
+
+const Config *BatteriesModbusTCP::get_errors_prototype()
+{
+    return Config::Null();//&errors_prototype;
+}
+
+String BatteriesModbusTCP::validate_config(Config &update, ConfigSource source)
+{
+    if (update.get("table")->getTag<BatteryModbusTCPTableID>() != BatteryModbusTCPTableID::Custom) {
+        return String();
+    }
+
+    size_t total_values_count = 0;
+
+    for (size_t i = 0; i < 6; ++i) {
+        auto register_blocks = update.get("table")->get()->get("battery_modes")->get(i)->get("register_blocks");
+
+        for (size_t k = 0; k < register_blocks->count(); ++k) {
+            // FIXME: validate func is valid and vals length match func restrictions
+
+            auto start_address = register_blocks->get(k)->get("addr")->asUint();
+            auto values_count  = register_blocks->get(k)->get("vals")->count();
+
+            total_values_count += values_count;
+
+            if (start_address + values_count > 65536) {
+                return "Register address + number of values must be less than 65536!";
+            }
+        }
+    }
+
+    if (total_values_count > OPTIONS_BATTERIES_MODBUS_TCP_MAX_CUSTOM_TOTAL_VALUES()) {
+        return "At most " MACRO_VALUE_TO_STRING(OPTIONS_BATTERIES_MODBUS_TCP_MAX_CUSTOM_TOTAL_VALUES()) " total values are allowed!";
+    }
+
+    return String();
+}
+
+void BatteriesModbusTCP::test_flush_log()
+{
+    if (test == nullptr) {
+        return;
+    }
+
+#if MODULE_WS_AVAILABLE()
+    char buf[1024];
+    TFJsonSerializer json{buf, sizeof(buf)};
+
+    json.addObject();
+    json.addMemberNumber("cookie", test->cookie);
+    json.addMemberString("message", test->printfln_buffer);
+    json.endObject();
+    json.end();
+#endif
+
+    test->printfln_buffer_used = 0;
+    test->printfln_last_flush = now_us();
+
+#if MODULE_WS_AVAILABLE()
+    ws.pushRawStateUpdate(buf, "batteries_modbus_tcp/test_log"); // FIXME: error handling
+#endif
+}
+
+void BatteriesModbusTCP::test_vprintfln(const char *fmt, va_list args)
+{
+    if (test == nullptr) {
+        return;
+    }
+
+    va_list args_copy;
+    va_copy(args_copy, args);
+    size_t used = vsnprintf_u(nullptr, 0, fmt, args_copy);
+    va_end(args);
+
+    if (test->printfln_buffer_used + used + 1 /* for \n */ >= sizeof(test->printfln_buffer)) {
+        test_flush_log();
+    }
+
+    test->printfln_buffer_used += vsnprintf_u(test->printfln_buffer + test->printfln_buffer_used, sizeof(test->printfln_buffer) - test->printfln_buffer_used, fmt, args);
+
+    test->printfln_buffer[test->printfln_buffer_used++] = '\n';
+    test->printfln_buffer[test->printfln_buffer_used] = '\0';
+}
+
+void BatteriesModbusTCP::test_printfln(const char *fmt, ...)
+{
+    va_list args;
+    va_start(args, fmt);
+    test_vprintfln(fmt, args);
+    va_end(args);
+}
+
+void BatteriesModbusTCP::test_load_table(const Config *table_config)
+{
+    // free potential old table first. table might be reloaded if rediscover happens
+    BatteryModbusTCP::free_table(test->table);
+    test->table = nullptr;
+
+    switch (test->table_id) {
+    case BatteryModbusTCPTableID::None:
+        test_printfln(test->language == Language::English ? "No table" : "Keine Tabelle");
+        break;
+
+    case BatteryModbusTCPTableID::Custom:
+        BatteryModbusTCP::load_custom_table(&test->table, table_config);
+        break;
+
+#include "generated/batteries_modbus_tcp_test_load_table.inc"
+
+    default:
+        test_printfln(test->language == Language::English ? "Unknown table" : "Unbekannte Tabelle");
+        break;
+    }
+}
+
+void BatteriesModbusTCP::trace_timestamp()
+{
+    if (last_trace_timestamp < 0_us || deadline_elapsed(last_trace_timestamp + 1_min)) {
+        last_trace_timestamp = now_us();
+        logger.trace_timestamp(trace_buffer_index);
+    }
+}

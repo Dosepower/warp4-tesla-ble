@@ -1,0 +1,9 @@
+import { BatteryClassID } from "./generated/battery_class_id.enum";
+{{{imports}}}
+
+export interface config {
+    enabled: boolean;
+}
+
+type BatteryConfig =
+    [BatteryClassID.None, null]{{{config_types}}};

@@ -1,0 +1,74 @@
+/* esp32-firmware
+ * Copyright (C) 2024 Matthias Bolte <matthias@tinkerforge.com>
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, write to the
+ * Free Software Foundation, Inc., 59 Temple Place - Suite 330,
+ * Boston, MA 02111-1307, USA.
+ */
+
+#pragma once
+
+#include <stdint.h>
+#include <TFRCTPowerClient.h>
+#include <TFRCTPowerClientPool.h>
+
+#include "modules/meters/imeter.h"
+#include "modules/meters/generated/meter_value_id.h"
+#include "modules/network_lib/generic_tcp_client_pool_connector.h"
+#include "generated/virtual_meter.enum.h"
+
+class MeterRCTPower final : protected GenericTCPClientPoolConnector, public IMeter
+{
+public:
+    struct ValueSpec {
+        uint32_t id;
+        float scale_factor;
+    };
+
+    MeterRCTPower(uint32_t slot_, Config *state_, Config *errors_, TFRCTPowerClientPool *pool) :
+        GenericTCPClientPoolConnector("meter_rct_power", format_meter_slot(slot_), pool), slot(slot_), state(state_), errors(errors_) {}
+
+    [[gnu::const]] MeterClassID get_class() const override;
+    void setup(Config *ephemeral_config) override;
+    void register_events() override;
+    void pre_reboot() override;
+
+    bool supports_power() override          {return true;}
+    bool supports_energy_import() override  {return true;}
+    bool supports_energy_export() override  {return true;}
+    //bool supports_currents() override       {return true;}
+
+private:
+    void connect_callback(TFGenericTCPClientConnectResult result, TFGenericTCPClientPoolShareLevel share_level) override;
+    void disconnect_callback(TFGenericTCPClientDisconnectReason reason, TFGenericTCPClientPoolShareLevel share_level) override;
+    void read_next();
+
+    uint32_t slot;
+    Config *state;
+    Config *errors;
+    VirtualMeter virtual_meter    = VirtualMeter::None;
+    const ValueSpec *value_specs  = nullptr;
+    size_t value_specs_length     = 0;
+    const MeterValueID *value_ids = nullptr;
+    size_t value_ids_length       = 0;
+    size_t value_index            = 0;
+    bool read_allowed             = false;
+
+    float pv1_voltage;
+    float pv1_power;
+    float pv1_energy;
+    float pv2_voltage;
+    float pv2_power;
+    float pv2_energy;
+};

@@ -1,0 +1,130 @@
+/* esp32-firmware
+ * Copyright (C) 2022 Matthias Bolte <matthias@tinkerforge.com>
+ * Copyright (C) 2024 Olaf Lüke <olaf@tinkerforge.com>
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, write to the
+ * Free Software Foundation, Inc., 59 Temple Place - Suite 330,
+ * Boston, MA 02111-1307, USA.
+ */
+
+import { h, Fragment, VNode } from "preact";
+import { signal, Signal } from "@preact/signals-core";
+import { toLocaleFixed } from "./util";
+import * as options from "../options";
+import { Language } from "./language";
+{{{additional_imports}}}
+
+{{{translation}}}
+
+type GetDictValue<T extends string, O> =
+    T extends `${infer A}.${infer B}`
+    ? A extends keyof O
+        ? GetDictValue<B, O[A]>
+        : never
+    : T extends keyof O
+        ? O[T]
+        : never
+
+// T is the dictionary, S ist the next string part of the object property path
+// If S does not match dict shape, return its next expected properties
+type DeepKeys<T, S extends string> =
+    T extends object
+    ? S extends `${infer I1}.${infer I2}`
+        ? I1 extends keyof T
+            ? `${I1}.${DeepKeys<T[I1], I2>}`
+            : keyof T & string
+        : S extends keyof T
+            ? `${S}`
+            : keyof T & string
+    : ""
+
+// get_languages can be overwritten by a module that can provide a function that returnes a user-specified preferred language.
+// If no such module exists the languages preferred by the browser are used.
+let get_languages: () => readonly string[] = () => navigator.languages;
+export function set_languages_getter(f: () => readonly string[]) {
+    get_languages = f;
+}
+
+export function select_language(languages: readonly string[]) {
+    for (let language of languages) {
+        language = language.substring(0, 2);
+
+        if (language in translation) {
+            return language;
+        }
+    }
+
+    return "en";
+}
+
+let active_language: Signal<string> = signal("en");
+function update_active_language() {
+    let language = select_language(get_languages());
+
+    if (active_language.value != language) {
+        active_language.value = language;
+    }
+}
+
+window.addEventListener('languagechange', update_active_language);
+// Call update_active_language once initially.
+// If system module is not used this has to be called once so the first
+// language from navigator.languages is used, if there is no languagechange event.
+update_active_language();
+
+export function get_active_language() {
+    return active_language.value;
+}
+
+export function get_active_language_enum() {
+    if (active_language.value == "de") {
+        return Language.German;
+    }
+
+    return Language.English;
+}
+
+function translate<S extends string>(key: string): GetDictValue<S, Translation> {
+    let subtranslation: any = translation[active_language.value];
+
+    let key_parts = key.split(".");
+    while (subtranslation !== undefined && key_parts.length > 0) {
+        subtranslation = subtranslation[key_parts.shift() as any];
+    }
+
+    return subtranslation;
+}
+
+export function removeUnicodeHacks(s: string) {
+    return s.replace(/\u00AD/g, "") // soft-hyphen
+            .replace(/\u202F/g, " ") // narrow no-break space
+            .replace(/\u00A0/g, " "); // no-break space
+}
+
+export function __<S extends string>(key: DeepKeys<Translation, S>): GetDictValue<S, Translation> {
+    // type script has verified that the key is known, so no need to futher check it
+    return translate(key);
+}
+
+export function translate_unchecked(key: string): string {
+    let value = translate(key);
+
+    if (value !== undefined) {
+        return value;
+    }
+
+    console.log('ERROR: Translation is missing:', key);
+
+    return 'TRANSLATION-IS-MISSING';
+}

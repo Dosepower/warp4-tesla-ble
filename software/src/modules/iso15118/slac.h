@@ -1,0 +1,664 @@
+/* esp32-firmware
+ * Copyright (C) 2025 Olaf Lüke <olaf@tinkerforge.com>
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, write to the
+ * Free Software Foundation, Inc., 59 Temple Place - Suite 330,
+ * Boston, MA 02111-1307, USA.
+ */
+
+// SLAC implementation for HomePlug PLC according to ISO 15118-3:2016
+
+// Some parts that were not clear from the spec are loosely based
+// on the libslac and pyPLC open source implementations:
+// * https://github.com/uhi22/pyPLC
+// * https://github.com/EVerest/libslac
+
+#pragma once
+
+#include "module.h"
+#include "config.h"
+#include "generated/slac_state.enum.h"
+
+#define SLAC_ETHERNET_FRAME_LENGTH_MAX 1518
+
+// Data lengths
+#define SLAC_STATION_ID_LENGTH 17
+#define SLAC_RUN_ID_LENGTH 8
+#define SLAC_MAC_ADDRESS_LENGTH 6
+#define SLAC_SOUND_TARGET_LENGTH 6
+#define SLAC_AAG_LIST_LENGTH 58
+#define SLAC_NID_LENGTH 7
+#define SLAC_NMK_LENGTH 16
+
+// CMs
+#define SLAC_MMTYPE_CM_SET_KEY          0x6008
+#define SLAC_MMTYPE_CM_SLAC_PARM        0x6064
+#define SLAC_MMTYPE_CM_START_ATTEN_CHAR 0x6068
+#define SLAC_MMTYPE_CM_ATTEN_CHAR       0x606C
+#define SLAC_MMTYPE_CM_MNBC_SOUND       0x6074
+#define SLAC_MMTYPE_CM_VALIDATE         0x6078
+#define SLAC_MMTYPE_CM_SLAC_MATCH       0x607C
+#define SLAC_MMTYPE_CM_ATTEN_PROFILE    0x6084
+
+// Modes
+#define SLAC_MMTYPE_MODE_REQUEST      0x0000
+#define SLAC_MMTYPE_MODE_CONFIRMATION 0x0001
+#define SLAC_MMTYPE_MODE_INDICATION   0x0002
+#define SLAC_MMTYPE_MODE_RESPONSE     0x0003
+#define SLAC_MMTYPE_MODE_MASK         0x0003
+
+// Qualcomm specific vendor MMEs
+#define SLAC_MMTYPE_QUALCOMM_CM_RESET_DEVICE 0xA01C
+#define SLAC_MMTYPE_QUALCOMM_LINK_STATUS     0xA0B8
+#define SLAC_MMTYPE_QUALCOMM_OP_ATTR         0xA068
+#define SLAC_MMTYPE_QUALCOMM_NW_INFO         0xA038
+#define SLAC_MMTYPE_QUALCOMM_GET_SW          0xA000
+#define SLAC_MMTYPE_QUALCOMM_HOST_ACTION     0xA060
+#define SLAC_MMTYPE_QUALCOMM_MODULE_OP       0xA0B0
+
+// VS_MODULE_OPERATION constants
+#define PIB_MOD_OP_READ_MEMORY    0x0000
+#define PIB_MOD_OP_READ_FLASH     0x0001
+#define PIB_MOD_OP_START_SESSION  0x0010
+#define PIB_MOD_OP_WRITE_MODULE   0x0011
+#define PIB_MOD_OP_CLOSE_SESSION  0x0012
+
+#define PIB_MODULE_ID_PARAMETERS  0x7002
+#define PIB_MODULE_SIZE           1400
+
+// Commit code flags
+#define PIB_COMMIT_FORCE          (1 << 0)
+#define PIB_COMMIT_NORESET        (1 << 1)
+#define PIB_COMMIT_FACTPIB        (1u << 31)
+
+#define SLAC_ETHERNET_TYPE_HOMEPLUG 0x88E1
+#define SLAC_ETHERNET_TYPE_IPV6     0x86DD
+#define SLAC_ETHERNET_TYPE_IPV4     0x0800
+
+#define SLAC_ATTENUATION_PROFILE_SOUNDS 10
+
+// TP = performance time: Time the EV/EVSE has to react to a message
+// TT = timeout time:     Time the EV/EVSE waits for the next message
+// Constants and Timings (in ms) ISO 15118-3 A.8 [V2G3-A08-01] Table A.1
+#define SLAC_C_EV_MATCH_MNBC            10
+#define SLAC_C_EV_MATCH_RETRY            2
+#define SLAC_C_EV_START_ATTEN_CHAR_INDS  3
+#define SLAC_TP_AMP_MAP_EXCHANGE             100_ms
+#define SLAC_TP_EV_BATCH_MSG_INTERVAL_MIN     20_ms
+#define SLAC_TP_EV_BATCH_MSG_INTERVAL_MAX     50_ms
+#define SLAC_TP_EV_MATCH_SESSION             500_ms
+#define SLAC_TP_EV_SLAC_INIT                  10_s
+#define SLAC_TP_EVSE_AVG_ATTEN_CALC          100_ms
+#define SLAC_TP_LINK_READY_NOTIFICATION_MIN  200_ms
+#define SLAC_TP_LINK_READY_NOTIFICATION_MAX 1000_ms
+#define SLAC_TP_MATCH_RESPONSE               100_ms
+#define SLAC_TP_MATCH_SEQUENCE               100_ms
+#define SLAC_TT_AMP_AMP_EXCHANGE             200_ms
+#define SLAC_TT_EV_ATTEN_RESULTS            1200_ms
+#define SLAC_TT_EVSE_MATCH_MNBC              600_ms
+#define SLAC_TT_EVSE_MATCH_SESSION            10_s
+#define SLAC_TT_EVSE_SLAC_INIT_MIN            20_s
+#define SLAC_TT_EVSE_SLAC_INIT_MAX            50_s
+// [HUB20-51-001] requires PWM fallback to be configurable by the CPMS with a default of 7s.
+// This is an explicit deviation to the timeouts defined in ISO 15118-20.
+#define SLAC_TT_EVSE_SLAC_INIT                 7_s
+#define SLAC_TT_MATCH_JOIN                    12_s
+#define SLAC_TT_MATCH_RESPONSE               200_ms
+#define SLAC_TT_MATCH_SEQUENCE               400_ms
+#define SLAC_TT_MATCHING_REPETITION           10_s
+#define SLAC_TT_MATCHING_RATE                400_ms
+
+// Constants and Timings (in ms) ISO 15118-3 8 [V2G3-M08-01] Table 3
+#define SLAC_C_CONN_MAX_MATCH           3
+#define SLAC_C_EV_VALID_NB_TOGGLES_MIN  1
+#define SLAC_C_EV_VALID_NB_TOGGLES_MAX  3
+#define SLAC_C_EVSE_MATCH_PARALLEL      5
+#define SLAC_C_SEQU_RETRY               2
+#define SLAC_T_CONN_INIT_HLC                 200_ms
+#define SLAC_T_CONN_RESUME                     6_s
+#define SLAC_T_CONN_MAX_COMM                   8_s
+#define SLAC_T_CONN_RESETUP                   15_s
+#define SLAC_T_VALID_DETECT_TIME             200_ms
+#define SLAC_TP_EV_VALID_STATE_DURATION_MIN  200_ms
+#define SLAC_TP_EV_VALID_STATE_DURATION_MAX  400_ms
+#define SLAC_TP_EV_VALID_TOGGLE_MIN          600_ms
+#define SLAC_TP_EV_VALID_TOGGLE_MAX         3500_ms
+#define SLAC_TT_EVSE_VALID_TOGGLE           3500_ms
+#define SLAC_TP_MATCH_LEAVE                 1000_ms
+#define SLAC_T_STEP_EF                         4_s
+
+// WARP specific (not defined by ISO 15118-3)
+#define SLAC_TT_CM_SET_KEY_CONFIRMATION        1_s
+#define SLAC_C_CM_SET_KEY_ATTEMPTS             3
+#define SLAC_MODEM_INIT_PROBES_PER_RESET     100
+#define SLAC_TT_TENTATIVE_STATE_A           1500_ms
+
+
+struct [[gnu::packed]] SLAC_HomeplugMessageHeaderV0 {
+    // Ethernet Header
+    uint8_t  destination_mac[6];
+    uint8_t  source_mac[6];
+    uint16_t ethernet_type;
+
+    // Management message version and type
+    uint8_t  mm_version;
+    uint16_t mm_type;
+};
+
+struct [[gnu::packed]] SLAC_HomeplugMessageHeader {
+    // Ethernet Header
+    uint8_t  destination_mac[6];
+    uint8_t  source_mac[6];
+    uint16_t ethernet_type;
+
+    // Management message version and type
+    uint8_t  mm_version;
+    uint16_t mm_type;
+
+    // Fragmentation management info. Not present if mm_version is 0 (as in Qualcomm vendor-specific messages).
+    uint8_t fmni;
+    uint8_t fmsn;
+};
+
+
+struct [[gnu::packed]] CM_SLACParmRequest {
+    SLAC_HomeplugMessageHeader header;
+    uint8_t application_type;           // fixed to 0x00, indicating 'pev-evse matching'
+    uint8_t security_type;              // fixed to 0x00, indicating 'no security'
+    uint8_t run_id[SLAC_RUN_ID_LENGTH]; // identifier for a matching run
+    // cipher fields are missing, because we restrict to security_type = 0x00
+};
+
+struct [[gnu::packed]] CM_SLACParmConfirmation {
+    SLAC_HomeplugMessageHeader header;
+    uint8_t m_sound_target[SLAC_SOUND_TARGET_LENGTH];     // fixed to 0xFFFFFFFFFFFF
+    uint8_t num_sounds = SLAC_ATTENUATION_PROFILE_SOUNDS; // number of expected m-sounds (10 is typical)
+    uint8_t timeout = 6;                                  // corresponds to TT_EVSE_match_MNBC, in units of 100ms (600ms is typical)
+    uint8_t resp_type = 0x01;                             // fixed to 0x01, indicating 'other gp station'
+    uint8_t forwarding_sta[SLAC_MAC_ADDRESS_LENGTH];      // ev host mac address
+    uint8_t application_type = 0x00;                      // fixed to 0x00, indicating 'pev-evse matching'
+    uint8_t security_type = 0x00;                         // fixed to 0x00, indicating 'no security'
+    uint8_t run_id[SLAC_RUN_ID_LENGTH];                   // matching run identifier, corresponding to the request
+    uint8_t padding[16] = {0};                            // padding to 60 bytes
+    // cipher field is missing, because we restrict to security_type = 0x00
+};
+
+struct [[gnu::packed]] CM_StartAttenCharIndication {
+    SLAC_HomeplugMessageHeader header;
+    uint8_t application_type;                        // fixed to 0x00, indicating 'pev-evse matching'
+    uint8_t security_type;                           // fixed to 0x00, indicating 'no security'
+    uint8_t num_sounds;                              // number of expected m-sounds
+    uint8_t timeout;                                 // corresponds to TT_EVSE_match_MNBC
+    uint8_t resp_type;                               // fixed to 0x01, indicating 'other gp station'
+    uint8_t forwarding_sta[SLAC_MAC_ADDRESS_LENGTH]; // ev host mac address
+    uint8_t run_id[SLAC_RUN_ID_LENGTH];              // identifier for a matching run
+};
+
+struct [[gnu::packed]] CM_AttenCharIndication{
+    SLAC_HomeplugMessageHeader header;
+    uint8_t application_type = 0x00;                      // fixed to 0x00, indicating 'pev-evse matching'
+    uint8_t security_type = 0x00;                         // fixed to 0x00, indicating 'no security'
+    uint8_t source_address[SLAC_MAC_ADDRESS_LENGTH];      // mac address of EV host, which initiates matching
+    uint8_t run_id[SLAC_RUN_ID_LENGTH];                   // identifier for a matching run
+    uint8_t source_id[SLAC_STATION_ID_LENGTH] = {0};      // always all 0
+    uint8_t resp_id[SLAC_STATION_ID_LENGTH] = {0};        // always all 0
+    uint8_t num_sounds;                                   // number of sounds used for attenuation profile
+    struct [[gnu::packed]] {
+        uint8_t num_groups = SLAC_AAG_LIST_LENGTH;        // number of OFDM carrier groups
+        uint8_t aag[SLAC_AAG_LIST_LENGTH];                // AAG_1 .. AAG_N
+    } attenuation_profile;
+};
+
+struct [[gnu::packed]] CM_AttenCharResponse {
+    SLAC_HomeplugMessageHeader header;
+    uint8_t application_type;                        // fixed to 0x00, indicating 'pev-evse matching'
+    uint8_t security_type;                           // fixed to 0x00, indicating 'no security'
+    uint8_t source_address[SLAC_MAC_ADDRESS_LENGTH]; // mac address of EV host, which initiates matching
+    uint8_t run_id[SLAC_RUN_ID_LENGTH];              // identifier for a matching run
+    uint8_t source_id[SLAC_STATION_ID_LENGTH];       // unique id of the station, that sent the m-sounds
+    uint8_t resp_id[SLAC_STATION_ID_LENGTH];         // unique id of the station, that is sending this message
+    uint8_t result;                                  // fixed to 0x00, indicates successful SLAC process
+};
+
+struct [[gnu::packed]] CM_MNBCSoundIndication {
+    SLAC_HomeplugMessageHeader header;
+    uint8_t application_type;                  // fixed to 0x00, indicating 'pev-evse matching'
+    uint8_t security_type;                     // fixed to 0x00, indicating 'no security'
+    uint8_t sender_id[SLAC_STATION_ID_LENGTH]; // fixed to 0x00
+    uint8_t remaining_sound_count;             // count of remaining sound messages
+    uint8_t run_id[SLAC_RUN_ID_LENGTH];        // identifier for a matching run
+    uint8_t _reserved[8];                      // note: this is to pad the run_id, which is defined to be 16 bytes for this message
+    uint8_t random[16];                        // random value
+};
+
+// Note: This message doesn't seem to be part of HPGP, it is defined in ISO 15118-3.
+struct [[gnu::packed]] CM_AttenProfileIndication {
+    SLAC_HomeplugMessageHeader header;
+    uint8_t pev_mac[SLAC_MAC_ADDRESS_LENGTH]; // mac address of the EV host
+    uint8_t num_groups;                       // number of OFDM carrier groups
+    uint8_t _reserved;
+    uint8_t aag[SLAC_AAG_LIST_LENGTH];        // list of average attenuation for each group
+};
+
+struct [[gnu::packed]] CM_SLACMatchRequest {
+    SLAC_HomeplugMessageHeader header;
+    uint8_t application_type;                  // fixed to 0x00, indicating 'pev-evse matching'
+    uint8_t security_type;                     // fixed to 0x00, indicating 'no security'
+    uint16_t mvf_length;                       // fixed to 0x3e = 62 bytes following
+    uint8_t pev_id[SLAC_STATION_ID_LENGTH];    // fixed to 0x00
+    uint8_t pev_mac[SLAC_MAC_ADDRESS_LENGTH];  // mac address of the EV host
+    uint8_t evse_id[SLAC_STATION_ID_LENGTH];   // EVSE id
+    uint8_t evse_mac[SLAC_MAC_ADDRESS_LENGTH]; // mac address of the EVSE
+    uint8_t run_id[SLAC_RUN_ID_LENGTH];        // identifier for a matching run
+    uint8_t _reserved[8];                      // note: this is to pad the run_id, which is defined to be 16 bytes for this message
+};
+
+struct [[gnu::packed]] CM_SLACMatchConfirmation {
+    SLAC_HomeplugMessageHeader header;
+    uint8_t application_type = 0x00;            // fixed to 0x00, indicating 'pev-evse matching'
+    uint8_t security_type = 0x00;               // fixed to 0x00, indicating 'no security'
+    uint16_t mvf_length = 0x56;                 // fixed to 0x56 = 86 bytes following
+    uint8_t pev_id[SLAC_STATION_ID_LENGTH];     // fixed to 0x00
+    uint8_t pev_mac[SLAC_MAC_ADDRESS_LENGTH];   // mac address of the EV host
+    uint8_t evse_id[SLAC_STATION_ID_LENGTH];    // EVSE id
+    uint8_t evse_mac[SLAC_MAC_ADDRESS_LENGTH];  // mac address of the EVSE
+    uint8_t run_id[SLAC_RUN_ID_LENGTH];         // identifier for a matching run
+    uint8_t _reserved[8];                       // note: this is to pad the run_id, which is defined to be 16 bytes for this message
+    uint8_t nid[SLAC_NID_LENGTH];               // network id derived from the nmk
+    uint8_t _reserved2;                         // note: this is to pad the nid, which is defined to be 8 bytes for this message
+    uint8_t nmk[SLAC_NMK_LENGTH];               // private nmk of the EVSE
+};
+
+struct [[gnu::packed]] CM_ValidateRequest {
+    SLAC_HomeplugMessageHeader header;
+    uint8_t signal_type; // fixed to 0x00: PEV S2 toggles on control pilot line
+    uint8_t timer;       // in the first request response exchange: should be set to 0x00
+                         // in the second request response exchange: 0x00 = 100ms, 0x01 = 200ms TT_EVSE_vald_toggle
+    uint8_t result;      // in the first request response exchange: should be set to 0x01 = ready
+                         // in the second request response exchange: should be set to 0x01 = ready
+};
+
+struct [[gnu::packed]] CM_ValidateConfirmation {
+    SLAC_HomeplugMessageHeader header;
+    uint8_t signal_type; // fixed to 0x00: PEV S2 toggles on control pilot line
+    uint8_t toggle_num;  // in the first request response exchange: should be set to 0x00
+                         // in the second request response exchange: number of detected BC
+                         // edges during TT_EVSE_vald_toggle
+    uint8_t result;      // 0x00 = not ready, 0x01 = ready, 0x02 = success, 0x03 = failure, 0x04 = not required
+};
+
+struct [[gnu::packed]] CM_SetKeyRequest {
+    SLAC_HomeplugMessageHeader header;
+    uint8_t  key_type = 0x01;         // fixed to 0x01, indicating NMK
+    uint32_t my_nonce = 0x00000000;   // fixed to 0x00000000: encrypted payload not used
+    uint32_t your_nonce = 0x00000000; // fixed to 0x00000000: encrypted payload not used
+    uint8_t  pid = 0x04;              // fixed to 0x04: HLE protocol
+    uint16_t prn = 0x0000;            // fixed to 0x0000: encrypted payload not used
+    uint8_t  pmn = 0x00;              // fixed to 0x00: encrypted payload not used
+    uint8_t  cco_capability = 0x00;   // CCo capability according to the station role
+    uint8_t  nid[SLAC_NID_LENGTH];    // 54 LSBs = NID, 2 MSBs = 0b00
+    uint8_t  new_eks = 0x01;          // fixed to 0x01: NMK
+    uint8_t  nmk[SLAC_NMK_LENGTH];    // new random NMK
+    uint8_t  padding[3] = {0};        // padding to 60 bytes
+};
+
+struct [[gnu::packed]] CM_SetKeyConfirmation {
+    SLAC_HomeplugMessageHeader header;
+    uint8_t result; // 0x00 = success, 0x01 = failure, 0x02 - 0xFF = reserved (Note: 0x01 is expected if used with local modem)
+    uint32_t my_nonce;
+    uint32_t your_nonce;
+    uint8_t pid;
+    uint16_t prn;
+    uint8_t pmn;
+    uint8_t cco_capability;
+};
+
+struct [[gnu::packed]] CM_QualcommGetSwRequest {
+    SLAC_HomeplugMessageHeaderV0 header;
+    uint8_t vendor_mme[3] = {0x00, 0xB0, 0x52}; // Qualcomm vendor MME
+    uint8_t padding[40] = {0};                  // padding to 60 bytes
+};
+
+struct [[gnu::packed]] CM_QualcommGetSwConfirmation {
+    SLAC_HomeplugMessageHeaderV0 header;
+    uint8_t vendor_mme[3];
+    uint8_t status;
+    uint8_t device;
+    uint8_t version_length;
+    uint8_t version[0x80];
+};
+
+struct [[gnu::packed]] CM_QualcommLinkStatusRequest {
+    SLAC_HomeplugMessageHeaderV0 header;
+    uint8_t vendor_mme[3] = {0x00, 0xB0, 0x52}; // Qualcomm vendor MME
+    uint8_t padding[40] = {0};                  // padding to 60 bytes
+};
+
+struct [[gnu::packed]] CM_QualcommLinkStatusConfirmation {
+    SLAC_HomeplugMessageHeaderV0 header;
+    uint8_t vendor_mme[3];
+    uint8_t reserved;
+    uint8_t link_status;
+};
+
+struct [[gnu::packed]] CM_QualcommOpAttrRequest {
+    SLAC_HomeplugMessageHeaderV0 header;
+    uint8_t vendor_mme[3] = {0x00, 0xB0, 0x52}; // Qualcomm vendor MME
+    uint32_t cookie = 0xC00C13;                 // cookie
+    uint8_t report_type = 0;                    // report type binary
+    uint8_t padding[35] = {0};                  // padding to 60 bytes
+};
+
+struct [[gnu::packed]] CM_QualcommOpAttrConfirmation {
+    SLAC_HomeplugMessageHeaderV0 header;
+    uint8_t vendor_mme[3] = {0x00, 0xB0, 0x52}; // Qualcomm vendor MME
+    uint16_t success;    // 0x00 means success
+    uint32_t cookie;
+    uint8_t report_type; // should be 0x00 (binary)
+    uint16_t size;       // should be 118
+    uint8_t hw_platform[16];
+    uint8_t sw_platform[16];
+    uint32_t version_major;
+    uint32_t version_minor;
+    uint32_t version_pib;
+    uint32_t version_build;
+    uint32_t reserved;
+    uint8_t build_date[8];
+    uint8_t release_type[12];
+    uint8_t sdram_type;
+    uint8_t reserved2;
+    uint8_t line_freq_zc;
+    uint32_t sdram_size;
+    uint8_t authorization_mode;
+};
+
+struct [[gnu::packed]] CM_QualcommHostActionIndication {
+    SLAC_HomeplugMessageHeaderV0 header;
+    uint8_t vendor_mme[3];
+    // MACTION codes:
+    //   0x00 = Start Device (bootloader requests firmware + PIB download)
+    //   0x01 = Store Firmware (runtime wants to upload NVM to host)
+    //   0x02 = Store Parameters (runtime wants to upload PIB to host)
+    //   0x03 = Update Host (both firmware and parameters ready for upload)
+    //   0x04 = Config Memory (bootloader waiting for SDRAM configuration)
+    //   0x05 = Restore Defaults (factory defaults restored)
+    uint8_t maction;       // Action code (see above)
+    uint8_t major_version; // Firmware major version
+    uint8_t minor_version; // Firmware minor version
+};
+
+// VS_MODULE_OPERATION 0xA0B0: Read request
+struct [[gnu::packed]] VS_ModuleOperationReadRequest {
+    SLAC_HomeplugMessageHeaderV0 header;
+    uint8_t  vendor_mme[3]   = {0x00, 0xB0, 0x52};
+    uint32_t reserved        = 0;
+    uint8_t  num_op_data     = 1;
+    uint16_t mod_op;               // PIB_MOD_OP_READ_MEMORY or PIB_MOD_OP_READ_FLASH
+    uint16_t mod_op_data_len = 16;
+    uint32_t mod_op_rsvd     = 0;
+    uint16_t module_id;            // PIB_MODULE_ID_PARAMETERS (0x7002)
+    uint16_t module_sub_id   = 0;
+    uint16_t module_length;        // Requested length (up to PIB_MODULE_SIZE=1400)
+    uint32_t module_offset;        // Byte offset into the module
+    uint8_t  padding[17] = {0};    // Padding to 60 bytes
+};
+
+// VS_MODULE_OPERATION 0xA0B1: Read confirmation
+struct [[gnu::packed]] VS_ModuleOperationReadConfirmation {
+    SLAC_HomeplugMessageHeaderV0 header;
+    uint8_t  vendor_mme[3];
+    uint16_t mstatus;                      // 0 = success
+    uint16_t err_rec_code;
+    uint32_t reserved;
+    uint8_t  num_op_data;
+    uint16_t mod_op;
+    uint16_t mod_op_data_len;
+    uint32_t mod_op_rsvd;
+    uint16_t module_id;
+    uint16_t module_sub_id;
+    uint16_t module_length;                // Actual bytes returned
+    uint32_t module_offset;
+    uint8_t  module_data[PIB_MODULE_SIZE]; // Up to 1400 bytes
+};
+
+// VS_MODULE_OPERATION 0xA0B0: Start session request
+struct [[gnu::packed]] VS_ModuleSpec {
+    uint16_t module_id;
+    uint16_t module_sub_id;
+    uint32_t module_length; // Total length of module
+    uint32_t module_chksum; // Checksum of module data
+};
+
+struct [[gnu::packed]] VS_ModuleOperationSessionRequest {
+    SLAC_HomeplugMessageHeaderV0 header;
+    uint8_t  vendor_mme[3]   = {0x00, 0xB0, 0x52};
+    uint32_t reserved        = 0;
+    uint8_t  num_op_data     = 1;
+    uint16_t mod_op          = PIB_MOD_OP_START_SESSION;
+    uint16_t mod_op_data_len = 13 + 12; // 13 bytes fixed + 12 bytes per module spec
+    uint32_t mod_op_rsvd     = 0;
+    uint32_t session_id;                // Random session cookie
+    uint8_t  num_modules     = 1;
+    VS_ModuleSpec module_spec;          // Module descriptor
+    uint8_t  padding[10] = {0};         // Padding to 60 bytes
+};
+
+// VS_MODULE_OPERATION 0xA0B1: Session confirmation
+struct [[gnu::packed]] VS_ModuleStatusEntry {
+    uint16_t mod_status;
+    uint16_t err_rec_code;
+};
+
+struct [[gnu::packed]] VS_ModuleOperationSessionConfirmation {
+    SLAC_HomeplugMessageHeaderV0 header;
+    uint8_t  vendor_mme[3];
+    uint16_t mstatus;
+    uint16_t err_rec_code;
+    uint32_t reserved;
+    uint8_t  num_op_data;
+    uint16_t mod_op;
+    uint16_t mod_op_data_len;
+    uint32_t mod_op_rsvd;
+    uint32_t session_id;
+    uint8_t  num_modules;
+    VS_ModuleStatusEntry module_status; // Status for our single module
+};
+
+// VS_MODULE_OPERATION 0xA0B0: Write module request
+struct [[gnu::packed]] VS_ModuleOperationWriteRequest {
+    SLAC_HomeplugMessageHeaderV0 header;
+    uint8_t  vendor_mme[3]    = {0x00, 0xB0, 0x52};
+    uint32_t reserved         = 0;
+    uint8_t  num_op_data      = 1;
+    uint16_t mod_op           = PIB_MOD_OP_WRITE_MODULE;
+    uint16_t mod_op_data_len;      // 19 + data_length
+    uint32_t mod_op_rsvd      = 0;
+    uint32_t session_id;
+    uint8_t  module_idx       = 0; // First module
+    uint16_t module_id;
+    uint16_t module_sub_id    = 0;
+    uint16_t module_length;        // Bytes in this chunk (up to 1400)
+    uint32_t module_offset;        // Byte offset within the module
+    uint8_t  module_data[PIB_MODULE_SIZE];
+};
+
+// VS_MODULE_OPERATION 0xA0B1: Write confirmation
+struct [[gnu::packed]] VS_ModuleOperationWriteConfirmation {
+    SLAC_HomeplugMessageHeaderV0 header;
+    uint8_t  vendor_mme[3];
+    uint16_t mstatus;
+    uint16_t err_rec_code;
+    uint32_t reserved;
+    uint8_t  num_op_data;
+    uint16_t mod_op;
+    uint16_t mod_op_data_len;
+    uint32_t mod_op_rsvd;
+    uint32_t session_id;
+    uint8_t  module_idx;
+    uint16_t module_id;
+    uint16_t module_sub_id;
+    uint16_t module_length;
+    uint32_t module_offset;
+};
+
+// VS_MODULE_OPERATION 0xA0B0: Commit (close session) request
+struct [[gnu::packed]] VS_ModuleOperationCommitRequest {
+    SLAC_HomeplugMessageHeaderV0 header;
+    uint8_t  vendor_mme[3]   = {0x00, 0xB0, 0x52};
+    uint32_t reserved        = 0;
+    uint8_t  num_op_data     = 1;
+    uint16_t mod_op          = PIB_MOD_OP_CLOSE_SESSION;
+    uint16_t mod_op_data_len = 36;
+    uint32_t mod_op_rsvd     = 0;
+    uint32_t session_id;
+    uint32_t commit_code     = PIB_COMMIT_FORCE | PIB_COMMIT_NORESET | PIB_COMMIT_FACTPIB;
+    uint8_t  rsvd[20]        = {0};
+};
+
+// VS_MODULE_OPERATION 0xA0B1: Commit confirmation
+struct [[gnu::packed]] VS_ModuleOperationCommitConfirmation {
+    SLAC_HomeplugMessageHeaderV0 header;
+    uint8_t  vendor_mme[3];
+    uint16_t mstatus;
+    uint16_t err_rec_code;
+    uint32_t reserved;
+    uint8_t  num_op_data;
+    uint16_t mod_op;
+    uint16_t mod_op_data_len;
+    uint32_t mod_op_rsvd;
+    uint32_t session_id;
+    uint32_t commit_code;
+    uint8_t  num_modules;
+    VS_ModuleStatusEntry module_status; // Status for our single module
+};
+
+// VS_MODULE_OPERATION 0xA0B0: Reset request (Qualcomm RS_DEV)
+struct [[gnu::packed]] CM_QualcommResetDeviceRequest {
+    SLAC_HomeplugMessageHeaderV0 header;
+    uint8_t vendor_mme[3] = {0x00, 0xB0, 0x52}; // Qualcomm OUI
+    uint8_t padding[40]   = {0};                // Padding to 60 bytes
+};
+
+extern const uint8_t slac_mac_plc_peer[SLAC_MAC_ADDRESS_LENGTH];
+extern const uint8_t slac_mac_broadcast[SLAC_MAC_ADDRESS_LENGTH];
+
+class SLAC final
+{
+public:
+    SLAC(){}
+    SLACState state = SLACState::ModemInitialization;
+    void state_machine_loop();
+    void handle_tap();  // Called by central poll when L2TAP has data
+
+    void pre_setup();
+    ConfigRoot api_state;
+
+    uint8_t evse_mac[SLAC_MAC_ADDRESS_LENGTH] = {0};
+
+    void reset_slac_init_retry_count() { slac_init_retry_count = 0; }
+
+    void reset_ev_connected_reported() { ev_connected_reported = false; }
+
+    // cleanup already did link_down().
+    void cancel_link_up_task();
+
+    void fill_header_v0(SLAC_HomeplugMessageHeaderV0 *header, const uint8_t *destination_mac, const uint8_t *source_mac, const uint16_t mm_type);
+
+private:
+    void fill_header(SLAC_HomeplugMessageHeader *header, const uint8_t *destination_mac, const uint8_t *source_mac, const uint16_t mm_type);
+    void generate_nid_from_nmk(void);
+    void generate_new_nmk_and_nid(void);
+
+    void handle_modem_reset(void);
+    void handle_modem_initialization(void);
+    void handle_cm_set_key_request(void);
+    void handle_cm_set_key_confirmation(const CM_SetKeyConfirmation &cm_set_key_confirmation);
+    void handle_cm_slac_parm_request(const CM_SLACParmRequest &cm_slac_parm_request);
+    void handle_cm_start_atten_char_indication(const CM_StartAttenCharIndication &cm_start_atten_char_indication);
+    void handle_cm_mnbc_sound_indication(const CM_MNBCSoundIndication &cm_mnbc_sound_indication);
+    void handle_cm_atten_profile_indication(const CM_AttenProfileIndication &cm_atten_profile_indication);
+    void handle_cm_atten_char_response(const CM_AttenCharResponse &cm_atten_char_response);
+    void handle_cm_validate_request(const CM_ValidateRequest &cm_validate_request);
+    void handle_cm_slac_match_request(const CM_SLACMatchRequest &cm_slac_match_request);
+
+    void handle_cm_qualcomm_get_sw_request();
+    void handle_cm_qualcomm_link_status_request();
+    void handle_cm_qualcomm_op_attr_request();
+    void handle_cm_qualcomm_get_sw_confirmation(const CM_QualcommGetSwConfirmation &cm_qualcomm_get_sw_confirmation);
+    void handle_cm_qualcomm_link_status_confirmation(const CM_QualcommLinkStatusConfirmation &cm_qualcomm_link_status_confirmation);
+    void handle_cm_qualcomm_op_attr_confirmation(const CM_QualcommOpAttrConfirmation &cm_qualcomm_op_attr_confirmation);
+    void handle_cm_qualcomm_host_action_indication(const CM_QualcommHostActionIndication &cm_qualcomm_host_action_indication);
+    void handle_vs_module_operation_confirmation(const uint8_t *data, size_t length);
+
+    bool read_and_dispatch_tap_frame(void);
+    void drain_tap(void);
+
+    void update_iec_state_tracking(void);
+    void handle_tentative_state_a(void);
+    void abort_tentative_session(void);
+    void check_modem_detected_invariant(void);
+
+    Option<micros_t> next_timeout = {};
+
+    uint8_t set_key_tries = 0;
+    uint32_t last_iec_state = 0;
+    micros_t last_iec_state_change = 0_us;
+    Option<micros_t> tentative_state_a_deadline = {};
+    bool session_started_in_state_a = false;
+
+    micros_t next_modem_initialization_probe = 0_us;
+
+    uint64_t link_up_task = 0;
+
+    // Retry counter for the SLAC init E/F sequence per [V2G3-M06-07].
+    uint8_t slac_init_retry_count = 0;
+
+    bool ev_connected_reported = false;
+    uint8_t reported_pev_mac[SLAC_MAC_ADDRESS_LENGTH] = {0};
+
+    // for CM_ATTEN_PROFILE.IND
+    uint16_t aag_list[SLAC_AAG_LIST_LENGTH] = {0};
+    uint8_t indication_num_sounds = 0;
+
+    uint8_t nmk[SLAC_NMK_LENGTH] = {0};
+    uint8_t nid[SLAC_NID_LENGTH] = {0};
+
+    uint8_t pev_mac[SLAC_MAC_ADDRESS_LENGTH]  = {0};
+    uint8_t pev_run_id[SLAC_RUN_ID_LENGTH]    = {0};
+
+    void uint8_to_printable_string(const uint8_t *data, const uint16_t length, char *out_buf, const uint16_t out_buf_length);
+    void log_homeplug_message_header_v0(const SLAC_HomeplugMessageHeaderV0 &header);
+    void log_homeplug_message_header(const SLAC_HomeplugMessageHeader &header);
+    void log_cm_set_key_request(const CM_SetKeyRequest &cm_set_key_request);
+    void log_cm_set_key_confirmation(const CM_SetKeyConfirmation &cm_set_key_confirmation);
+    void log_cm_slac_parm_confirmation(const CM_SLACParmConfirmation &cm_slac_parm_confirmation);
+    void log_cm_slac_parm_request(const CM_SLACParmRequest &cm_slac_parm_request);
+    void log_cm_start_atten_char_indication(const CM_StartAttenCharIndication &cm_start_atten_char_indication);
+    void log_cm_mnbc_sound_indication(const CM_MNBCSoundIndication &cm_mnbc_sound_indication);
+    void log_cm_atten_char_indication(const CM_AttenCharIndication &cm_atten_char_indication);
+    void log_cm_atten_profile_indication(const CM_AttenProfileIndication &cm_atten_profile_indication);
+    void log_cm_atten_char_response(const CM_AttenCharResponse &cm_atten_char_response);
+    void log_cm_validate_request(const CM_ValidateRequest &cm_validate_request);
+    void log_cm_validate_confirmation(const CM_ValidateConfirmation &cm_validate_confirmation);
+    void log_cm_slac_match_confirmation(const CM_SLACMatchConfirmation &cm_slac_match_confirmation);
+    void log_cm_slac_match_request(const CM_SLACMatchRequest &cm_slac_match_request);
+    void log_cm_qualcomm_get_sw_request(const CM_QualcommGetSwRequest &cm_qualcomm_get_sw_request);
+    void log_cm_qualcomm_get_sw_confirmation(const CM_QualcommGetSwConfirmation &cm_qualcomm_get_sw_confirmation);
+    void log_cm_qualcomm_link_status_request(const CM_QualcommLinkStatusRequest &cm_qualcomm_link_status_request);
+    void log_cm_qualcomm_link_status_confirmation(const CM_QualcommLinkStatusConfirmation &cm_qualcomm_link_status_confirmation);
+    void log_cm_qualcomm_op_attr_request(const CM_QualcommOpAttrRequest &cm_qualcomm_op_attr_request);
+    void log_cm_qualcomm_op_attr_confirmation(const CM_QualcommOpAttrConfirmation &cm_qualcomm_op_attr_confirmation);
+
+    uint8_t *buffer = nullptr;
+};

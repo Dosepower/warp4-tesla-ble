@@ -1,0 +1,163 @@
+//#include "generated/module_available.inc"
+
+//#if MODULE_REMOTE_ACCESS_AVAILABLE
+import { FileType } from "./generated/file_type.enum";
+import { CSVFlavor } from "./generated/csv_flavor.enum";
+//#endif
+import { Language } from "../../ts/language";
+import { GenerationState } from "./generated/generation_state.enum";
+import { CMAuthType } from "../cm_networking/generated/cm_auth_type.enum";
+
+interface Charge {
+    timestamp_minutes: number;
+    charge_duration: number;
+    user_id: number;
+    energy_charged: number;
+    charger_name: string;
+}
+
+//#if MODULE_REMOTE_ACCESS_AVAILABLE
+interface remote_upload_config {
+    user_filter: number;
+    device_filter: number;
+    file_type: FileType;
+    language: Language;
+    letterhead: string;
+    user_id: number;
+    csv_delimiter: CSVFlavor;
+    filter_empty_charges: boolean;
+    last_upload_timestamp_min: number;
+}
+
+export interface send_charge_log_pdf {
+    api_not_final_acked: boolean;
+    cookie: number;
+    user_filter: number;
+    device_filter: number;
+    start_timestamp_min: number;
+    end_timestamp_min: number;
+    language: Language;
+    letterhead?: string;
+    persist_letterhead: boolean;
+    remote_access_user_uuid: string;
+    filter_empty_charges?: boolean;
+}
+
+export interface send_charge_log_csv {
+    api_not_final_acked: boolean;
+    cookie: number;
+    user_filter: number;
+    device_filter: number;
+    start_timestamp_min: number;
+    end_timestamp_min: number;
+    language: Language;
+    csv_delimiter: CSVFlavor;
+    remote_access_user_uuid: string;
+    filter_empty_charges?: boolean;
+}
+
+export interface upload_result {
+    cookie: number;
+    error: string;
+}
+//#endif
+
+export interface config {
+    electricity_price: number;
+//#if MODULE_REMOTE_ACCESS_AVAILABLE
+    remote_upload_configs: remote_upload_config[];
+//#endif
+}
+
+export interface csv {
+    api_not_final_acked: boolean;
+    language: Language;
+    start_timestamp_min?: number;
+    end_timestamp_min?: number;
+    user_filter?: number;
+    device_filter?: number;
+    csv_delimiter?: number;
+    filter_empty_charges?: boolean;
+}
+
+export interface pdf_letterhead_config {
+    letterhead: string;
+}
+
+export type last_charges = Charge[];
+
+interface current_charge_base {
+    user_id: number;
+    meter_start: number;
+    evse_uptime_start: number;
+    timestamp_minutes: number;
+    charger_name: string;
+}
+
+interface current_charge_nfc {
+    authorization_type: CMAuthType.NFC;
+    authorization_info?: {
+        tag_type: number;
+        tag_id: string;
+    };
+}
+
+interface current_charge_nfc_inject {
+    authorization_type: CMAuthType.InjectedNFC;
+    authorization_info?: {
+        tag_type: number;
+        tag_id: string;
+    };
+}
+
+interface current_charge_ev {
+    authorization_type: CMAuthType.EV;
+    authorization_info?: {
+        mac: string
+    };
+}
+
+interface current_charge_ev_inject {
+    authorization_type: CMAuthType.InjectedEV;
+    authorization_info?: {
+        mac: string
+    };
+}
+
+interface current_charge_lost {
+    authorization_type: CMAuthType.Lost;
+    authorization_info: null
+}
+
+interface current_charge_none {
+    authorization_type: CMAuthType.None;
+    authorization_info: null
+}
+
+export type current_charge = current_charge_base & (current_charge_nfc
+                                                    | current_charge_nfc_inject
+                                                    | current_charge_ev
+                                                    | current_charge_ev_inject
+                                                    | current_charge_lost
+                                                    | current_charge_none);
+
+export interface state {
+    tracked_charges: number;
+    first_charge_timestamp: number;
+    generator_state: GenerationState;
+}
+
+export interface remove_all_charges {
+    do_i_know_what_i_am_doing: boolean;
+}
+
+export interface pdf {
+    api_not_final_acked: boolean;
+    language: Language;
+    start_timestamp_min?: number;
+    end_timestamp_min?: number;
+    user_filter?: number;
+    device_filter?: number;
+    letterhead?: string;
+    filter_empty_charges?: boolean;
+}

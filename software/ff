@@ -1,0 +1,95 @@
+#!/usr/bin/env -S /bin/sh -c 'uv run --project "$(dirname $(realpath "$0"))" --group ff --script "$0" "$@"'
+
+import argparse
+import os
+import sys
+import signal
+import subprocess
+import serial
+import time
+from tinkerforge_util.colored import red, green
+
+
+parser = argparse.ArgumentParser()
+parser.add_argument("-p", "--port")
+parser.add_argument("firmware", nargs='?', default=None)
+parser.add_argument("-S", "--no-serial", action="store_true")
+parser.add_argument("-s", "--serial-only", action="store_true")
+parser.add_argument("-e", "--erase", action="store_true")
+parser.add_argument("-r", "--reboot", action="store_true")
+args = parser.parse_args()
+
+def get_latest_fw(fw_type=''):
+    if len(fw_type) > 0:
+        latest = f'build/{fw_type}_firmware_latest_merged.bin'
+    else:
+        latest = 'build/firmware_latest_merged.bin'
+
+    if not os.path.exists(latest):
+        print("Failed to find a firmware containing the string {}".format(fw_type))
+        sys.exit(0)
+
+    try:
+        latest = os.path.join('build', os.readlink(latest))
+    except OSError:
+        pass
+
+    return latest
+
+if args.port:
+    if len(args.port) < 6:
+        port = "/dev/ttyUSB" + args.port
+    else:
+        port = args.port
+else:
+    port = "/dev/ttyUSB0"
+
+if args.erase:
+    while (confirm := input(red("Erase flash on port {}? [y/n] ".format(port)))) not in ['y', 'n']:
+        pass
+
+    if confirm == 'n':
+        sys.exit(0)
+
+    subprocess.check_call("uv run esptool --port {} --chip esp32 erase-flash".format(port), shell=True)
+
+if not args.serial_only:
+    if args.firmware is None:
+        firmware = get_latest_fw()
+    else:
+        if os.path.exists(args.firmware):
+            if ".elf" in args.firmware:
+                firmware = args.firmware.replace(".elf", "_merged.bin")
+            if ".bin" in args.firmware:
+                firmware = args.firmware
+        else:
+            firmware = get_latest_fw(args.firmware)
+
+    print(green("Flashing firmware {} to port {}".format(firmware, port)))
+
+    subprocess.check_call("uv run esptool --port {} --chip esp32 --baud 921600 --before default-reset --after hard-reset write-flash 0x1000 {}".format(port, firmware), shell=True)
+
+if args.reboot:
+    subprocess.check_call("uv run esptool --port {} --chip esp32 --baud 921600 run".format(port), shell=True)
+
+if not args.no_serial:
+    while True:
+        try:
+            time.sleep(0.1)
+            with serial.Serial(port, 115200, timeout=1) as ser:
+                while ser.is_open:
+                    data = ser.read()
+                    if not data: # Read timed out
+                        continue
+                    data += ser.read_all()
+
+                    if data.find(b'\x00\xc0\xc0\x01\x08\x04\x00') >= 0:
+                        print("ff: Firmware upload detected. Exiting.", file=sys.stderr, flush=True)
+                        sys.exit(1)
+
+                    sys.stdout.buffer.write(data)
+                    sys.stdout.flush()
+        except KeyboardInterrupt:
+            sys.exit(0)
+        except Exception:
+            pass

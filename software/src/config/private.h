@@ -1,0 +1,121 @@
+/* esp32-firmware
+ * Copyright (C) 2020-2024 Erik Fleckstein <erik@tinkerforge.com>
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, write to the
+ * Free Software Foundation, Inc., 59 Temple Place - Suite 330,
+ * Boston, MA 02111-1307, USA.
+ */
+
+#pragma once
+
+#include <limits>
+#include <math.h>
+
+#include "config.h"
+
+struct ConfStringSlot {
+    CoolString val = "";
+    uint16_t minChars = 0;
+    uint16_t maxChars = 0;
+};
+
+static constexpr const union {
+    float f;
+    uint32_t u;
+} nan_uint = {NAN};
+
+struct ConfFloatSlot {
+    uint32_t val = 0;
+    static constexpr float MARKER = nanf("0x0cafe");
+};
+
+struct ConfIntSlot {
+    int32_t val = 0;
+    int32_t min = 0;
+    int32_t max = -1; // Use -1 because it fits into an int12 immediate when compiled. INT32_MIN and MAX do not.
+};
+
+struct ConfUintSlot {
+    uint32_t val = 0;
+    uint32_t min = std::numeric_limits<decltype(min)>::max();
+    uint32_t max = 0;
+};
+
+// No empty marker here: conf_(u)int32.cpp each contain a static vector that keeps track of filled/empty slots.
+struct ConfInt32Slot {
+    int32_t val = 0;
+};
+
+struct ConfUint32Slot {
+    uint32_t val = 0;
+};
+
+struct ConfArraySlot {
+    std::vector<Config> val;
+    const Config *prototype;
+    // Slot is empty if minElements > maxElements
+    uint16_t minElements = 1;
+    uint16_t maxElements = 0;
+};
+
+struct ConfObjectSchema {
+    struct Key {
+        // check_memory_assumptions checks that this is safe.
+        // The ConfObject constructor enforces that keys are in rodata.
+        [[gnu::always_inline]] const char *get_val() const {
+            asm("" : : "r" (ptr));
+            return reinterpret_cast<const char *>(0x3F000000 | (reinterpret_cast<uintptr_t>(ptr) & 0x00FFFFFF));
+        }
+        [[gnu::always_inline]] size_t get_length() const {
+            asm("" : : "r" (ptr));
+            return reinterpret_cast<uintptr_t>(ptr) >> 24;
+        }
+        [[gnu::always_inline]] void set(size_t len, const char *key) {
+            ptr = reinterpret_cast<const char *>(len << 24 | (reinterpret_cast<uintptr_t>(key) & 0x00FFFFFF));
+        }
+    private:
+        const char *ptr;
+    };
+    size_t length;
+    Key keys[];
+};
+
+struct ConfObjectSlot {
+    const ConfObjectSchema *schema = nullptr;
+    Config *values;
+};
+
+struct ConfUnionSlot {
+    uint8_t prototypes_len = 0;
+    Config tag;
+    Config val;
+    const ConfUnionPrototypeInternal *prototypes = nullptr;
+};
+
+struct ConfInt52Slot {
+    int64_t val = std::numeric_limits<int64_t>::max();
+    static constexpr const int64_t min = -(1ll << 52ll) - 1;
+    static constexpr const int64_t max =  (1ll << 52ll) - 1;
+};
+
+struct ConfUint53Slot {
+    uint64_t val = std::numeric_limits<uint64_t>::max();
+    static constexpr const uint64_t min = 0;
+    static constexpr const uint64_t max = (1ll << 53ll) - 1;
+};
+
+struct ConfTupleSlot {
+    std::unique_ptr<Config[]> values;
+    size_t length = std::numeric_limits<size_t>::max();
+};

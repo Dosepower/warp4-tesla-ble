@@ -1,0 +1,99 @@
+/* esp32-firmware
+ * Copyright (C) 2023 Matthias Bolte <matthias@tinkerforge.com>
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, write to the
+ * Free Software Foundation, Inc., 59 Temple Place - Suite 330,
+ * Boston, MA 02111-1307, USA.
+ */
+
+#pragma once
+
+#include <stdint.h>
+
+#include "modules/meters/imeter.h"
+#include "modules/meters/generated/meter_location.enum.h"
+#include "modules/modbus_tcp_client/generic_modbus_tcp_client.h"
+#include "modules/sun_spec/sun_spec_resolver.h"
+#include "config.h"
+#include "model_parser.h"
+
+#if defined(__GNUC__)
+    #pragma GCC diagnostic push
+    #include "gcc_warnings.h"
+    #pragma GCC diagnostic ignored "-Weffc++"
+#endif
+
+class MeterSunSpec final : protected GenericModbusTCPClient, public IMeter
+{
+public:
+    MeterSunSpec(uint32_t slot_, Config *state_, Config *errors_, TFModbusTCPClientPool *pool_) :
+        GenericModbusTCPClient("meters_sun_spec", format_meter_slot(slot_), pool_), slot(slot_), state(state_), errors(errors_) {}
+
+    [[gnu::const]] MeterClassID get_class() const override;
+    void setup(Config *ephemeral_config) override;
+    void register_events() override;
+    void pre_reboot() override;
+
+    bool supports_power()         override {return true;}
+    bool supports_energy_import() override {return true;}
+    bool supports_energy_imexsum()override {return true;}
+    bool supports_energy_export() override {return true;}
+    bool supports_currents()      override {return true;}
+
+private:
+    void connect_callback(TFGenericTCPClientConnectResult result, TFGenericTCPClientPoolShareLevel share_level) override;
+    void disconnect_callback(TFGenericTCPClientDisconnectReason reason, TFGenericTCPClientPoolShareLevel share_level) override;
+
+    bool alloc_read_buffer(size_t model_regcount);
+    void trace_response();
+    void read_start(size_t start_address, size_t model_regcount);
+    void read_done();
+    void record_timeout();
+
+    void resolve_start_delayed();
+    void resolve_start();
+    void resolve_result(SunSpecResolverCommonModel *common_model, uint16_t start_address, uint16_t block_length);
+
+    uint32_t slot;
+    Config *state;
+    Config *errors;
+
+    char print_prefix[9 + 1]; // strlen("Meter XY: ") == 9
+    char trace_prefix[5 + 1]; // strlen("mXYr ") == 5
+
+    bool read_allowed = false;
+    bool values_declared = false;
+
+    String manufacturer_name;
+    String model_name;
+    String serial_number;
+    uint16_t model_id;
+    uint16_t model_instance;
+    uint64_t resolve_start_delayed_task_id = 0;
+    SunSpecResolver *resolver = nullptr;
+
+    uint32_t quirks = 0;
+    IMetersSunSpecParser *model_parser;
+    MeterLocation location;
+
+    bool check_phase_voltages = false;
+    uint32_t phase_voltage_index_cache[3];
+
+    micros_t last_connect = 0_us;
+    micros_t last_successful_parse = 0_us;
+};
+
+#if defined(__GNUC__)
+    #pragma GCC diagnostic pop
+#endif

@@ -1,0 +1,466 @@
+display_names = [
+    ('Eastron SDM630 TCP', {
+        'en': 'Eastron SDM630 TCP',
+        'de': 'Eastron SDM630 TCP',
+    }),
+]
+
+table_prototypes = [
+    ('Eastron SDM630 TCP', ['device_address']),
+]
+
+table_lookup_extras = [
+    ('Eastron SDM630 TCP', 'max_register_count = 50;'),
+]
+
+default_device_addresses = [
+    ('Eastron SDM630 TCP', 1),
+]
+
+specs = [
+    {
+        'name': 'Eastron SDM630 TCP',
+        'fixed_location': 'Unknown',
+        'register_type': 'InputRegister',
+        'values': [
+            {
+                'name': 'Phase 1 line to neutral volts [V]',
+                'value_id': 'VoltageL1N',
+                'start_number': 1,
+                'value_type': 'F32BE',
+            },
+            {
+                'name': 'Phase 2 line to neutral volts [V]',
+                'value_id': 'VoltageL2N',
+                'start_number': 3,
+                'value_type': 'F32BE',
+            },
+            {
+                'name': 'Phase 3 line to neutral volts [V]',
+                'value_id': 'VoltageL3N',
+                'start_number': 5,
+                'value_type': 'F32BE',
+            },
+            {
+                'name': 'Phase 1 current [A]',
+                'value_id': 'CurrentL1ImExSum',
+                'start_number': 7,
+                'value_type': 'F32BE',
+            },
+            {
+                'name': 'Phase 2 current [A]',
+                'value_id': 'CurrentL2ImExSum',
+                'start_number': 9,
+                'value_type': 'F32BE',
+            },
+            {
+                'name': 'Phase 3 current [A]',
+                'value_id': 'CurrentL3ImExSum',
+                'start_number': 11,
+                'value_type': 'F32BE',
+            },
+            {
+                'name': 'Phase 1 power [W]',
+                'value_id': 'PowerActiveL1ImExDiff',
+                'start_number': 13,
+                'value_type': 'F32BE',
+            },
+            {
+                'name': 'Phase 2 power [W]',
+                'value_id': 'PowerActiveL2ImExDiff',
+                'start_number': 15,
+                'value_type': 'F32BE',
+            },
+            {
+                'name': 'Phase 3 power [W]',
+                'value_id': 'PowerActiveL3ImExDiff',
+                'start_number': 17,
+                'value_type': 'F32BE',
+            },
+            {
+                'name': 'Phase 1 volt amps [VA]',
+                'value_id': 'PowerApparentL1ImExSum',
+                'start_number': 19,
+                'value_type': 'F32BE',
+            },
+            {
+                'name': 'Phase 2 volt amps [VA]',
+                'value_id': 'PowerApparentL2ImExSum',
+                'start_number': 21,
+                'value_type': 'F32BE',
+            },
+            {
+                'name': 'Phase 3 volt amps [VA]',
+                'value_id': 'PowerApparentL3ImExSum',
+                'start_number': 23,
+                'value_type': 'F32BE',
+            },
+            {
+                'name': 'Phase 1 volt amps reactive [var]',
+                'value_id': 'PowerReactiveL1IndCapDiff',
+                'start_number': 25,
+                'value_type': 'F32BE',
+            },
+            {
+                'name': 'Phase 2 volt amps reactive [var]',
+                'value_id': 'PowerReactiveL2IndCapDiff',
+                'start_number': 27,
+                'value_type': 'F32BE',
+            },
+            {
+                'name': 'Phase 3 volt amps reactive [var]',
+                'value_id': 'PowerReactiveL3IndCapDiff',
+                'start_number': 29,
+                'value_type': 'F32BE',
+            },
+            {
+                'name': 'Phase 1 power factor',
+                'value_id': 'PowerFactorL1Directional',
+                'start_number': 31,
+                'value_type': 'F32BE',
+            },
+            {
+                'name': 'Phase 2 power factor',
+                'value_id': 'PowerFactorL2Directional',
+                'start_number': 33,
+                'value_type': 'F32BE',
+            },
+            {
+                'name': 'Phase 3 power factor',
+                'value_id': 'PowerFactorL3Directional',
+                'start_number': 35,
+                'value_type': 'F32BE',
+            },
+            {
+                'name': 'Phase 1 phase angle [°]',
+                'value_id': 'PhaseAngleL1',
+                'start_number': 37,
+                'value_type': 'F32BE',
+            },
+            {
+                'name': 'Phase 2 phase angle [°]',
+                'value_id': 'PhaseAngleL2',
+                'start_number': 39,
+                'value_type': 'F32BE',
+            },
+            {
+                'name': 'Phase 3 phase angle [°]',
+                'value_id': 'PhaseAngleL3',
+                'start_number': 41,
+                'value_type': 'F32BE',
+            },
+            {
+                'name': 'Average line to neutral volts [V]',
+                'value_id': 'VoltageLNAvg',
+                'start_number': 43,
+                'value_type': 'F32BE',
+            },
+            {
+                'name': 'Average line current [A]',
+                'value_id': 'CurrentLAvgImExSum',
+                'start_number': 47,
+                'value_type': 'F32BE',
+            },
+            {
+                'name': 'Sum of line currents [A]',
+                'value_id': 'CurrentLSumImExSum',
+                'start_number': 49,
+                'value_type': 'F32BE',
+            },
+            {
+                'name': 'Total system power [W]',
+                'value_id': 'PowerActiveLSumImExDiff',
+                'start_number': 53,
+                'value_type': 'F32BE',
+            },
+            {
+                'name': 'Total system volt amps [VA]',
+                'value_id': 'PowerApparentLSumImExSum',
+                'start_number': 57,
+                'value_type': 'F32BE',
+            },
+            {
+                'name': 'Total system volt amps reactive [var]',
+                'value_id': 'PowerReactiveLSumIndCapDiff',
+                'start_number': 61,
+                'value_type': 'F32BE',
+            },
+            {
+                'name': 'Total system power factor',
+                'value_id': 'PowerFactorLSumDirectional',
+                'start_number': 63,
+                'value_type': 'F32BE',
+            },
+            {
+                'name': 'Total system phase angle [°]',
+                'value_id': 'PhaseAngleLSum',
+                'start_number': 67,
+                'value_type': 'F32BE',
+            },
+            {
+                'name': 'Frequency of supply voltages [Hz]',
+                'value_id': 'FrequencyLAvg',
+                'start_number': 71,
+                'value_type': 'F32BE',
+            },
+            {
+                'name': 'Import Wh since last reset [kWh]',
+                'value_id': 'EnergyActiveLSumImport', # FIXME: should be mapped resettable, but it's only resettable with an actual SDM630-TCP, not with a normal SDM630 behind an RS485/TCP converter
+                'start_number': 73,
+                'value_type': 'F32BE',
+            },
+            {
+                'name': 'Export Wh since last reset [kWh]',
+                'value_id': 'EnergyActiveLSumExport', # FIXME: should be mapped resettable, but it's only resettable with an actual SDM630-TCP, not with a normal SDM630 behind an RS485/TCP converter
+                'start_number': 75,
+                'value_type': 'F32BE',
+            },
+            {
+                'name': 'Import VArh since last reset [kvarh]',
+                'value_id': 'EnergyReactiveLSumInductive', # FIXME: should be mapped resettable, but it's only resettable with an actual SDM630-TCP, not with a normal SDM630 behind an RS485/TCP converter
+                'start_number': 77,
+                'value_type': 'F32BE',
+            },
+            {
+                'name': 'Export VArh since last reset [kvarh]',
+                'value_id': 'EnergyReactiveLSumCapacitive', # FIXME: should be mapped resettable, but it's only resettable with an actual SDM630-TCP, not with a normal SDM630 behind an RS485/TCP converter
+                'start_number': 79,
+                'value_type': 'F32BE',
+            },
+            {
+                'name': 'VAh since last reset [kVAh]',
+                'value_id': 'EnergyApparentLSumImExSum', # FIXME: should be mapped resettable, but it's only resettable with an actual SDM630-TCP, not with a normal SDM630 behind an RS485/TCP converter
+                'start_number': 81,
+                'value_type': 'F32BE',
+            },
+            {
+                'name': 'Ah since last reset [Ah]',
+                'value_id': 'ElectricCharge', # FIXME: should be mapped resettable, but it's only resettable with an actual SDM630-TCP, not with a normal SDM630 behind an RS485/TCP converter
+                'start_number': 83,
+                'value_type': 'F32BE',
+            },
+            {
+                'name': 'Line 1 to Line 2 volts [V]',
+                'value_id': 'VoltageL1L2',
+                'start_number': 201,
+                'value_type': 'F32BE',
+            },
+            {
+                'name': 'Line 2 to Line 3 volts [V]',
+                'value_id': 'VoltageL2L3',
+                'start_number': 203,
+                'value_type': 'F32BE',
+            },
+            {
+                'name': 'Line 3 to Line 1 volts [V]',
+                'value_id': 'VoltageL3L1',
+                'start_number': 205,
+                'value_type': 'F32BE',
+            },
+            {
+                'name': 'Average line to line volts [V]',
+                'value_id': 'VoltageLLAvg',
+                'start_number': 207,
+                'value_type': 'F32BE',
+            },
+            {
+                'name': 'Neutral current [A]',
+                'value_id': 'CurrentNImExSum',
+                'start_number': 225,
+                'value_type': 'F32BE',
+            },
+            {
+                'name': 'Phase 1 L/N volts THD [%]',
+                'value_id': 'VoltageTHDL1N',
+                'start_number': 235,
+                'value_type': 'F32BE',
+            },
+            {
+                'name': 'Phase 2 L/N volts THD [%]',
+                'value_id': 'VoltageTHDL2N',
+                'start_number': 237,
+                'value_type': 'F32BE',
+            },
+            {
+                'name': 'Phase 3 L/N volts THD [%]',
+                'value_id': 'VoltageTHDL3N',
+                'start_number': 239,
+                'value_type': 'F32BE',
+            },
+            {
+                'name': 'Phase 1 Current THD [%]',
+                'value_id': 'CurrentTHDL1',
+                'start_number': 241,
+                'value_type': 'F32BE',
+            },
+            {
+                'name': 'Phase 2 Current THD [%]',
+                'value_id': 'CurrentTHDL2',
+                'start_number': 243,
+                'value_type': 'F32BE',
+            },
+            {
+                'name': 'Phase 3 Current THD [%]',
+                'value_id': 'CurrentTHDL3',
+                'start_number': 245,
+                'value_type': 'F32BE',
+            },
+            {
+                'name': 'Average line to neutral volts THD [%]',
+                'value_id': 'VoltageTHDLNAvg',
+                'start_number': 249,
+                'value_type': 'F32BE',
+            },
+            {
+                'name': 'Average line current THD [%]',
+                'value_id': 'CurrentTHDLAvg',
+                'start_number': 251,
+                'value_type': 'F32BE',
+            },
+            {
+                'name': 'Line 1 to line 2 volts THD [%]',
+                'value_id': 'VoltageTHDL1L2',
+                'start_number': 335,
+                'value_type': 'F32BE',
+            },
+            {
+                'name': 'Line 2 to line 3 volts THD [%]',
+                'value_id': 'VoltageTHDL2L3',
+                'start_number': 337,
+                'value_type': 'F32BE',
+            },
+            {
+                'name': 'Line 3 to line 1 volts THD [%]',
+                'value_id': 'VoltageTHDL3L1',
+                'start_number': 339,
+                'value_type': 'F32BE',
+            },
+            {
+                'name': 'Average line to line volts THD [%]',
+                'value_id': 'VoltageTHDLLAvg',
+                'start_number': 341,
+                'value_type': 'F32BE',
+            },
+            {
+                'name': 'Total kWh [kWh]',
+                'value_id': 'EnergyActiveLSumImExSum',
+                'start_number': 343,
+                'value_type': 'F32BE',
+            },
+            {
+                'name': 'Total kvarh [kvarh]',
+                'value_id': 'EnergyReactiveLSumIndCapSum',
+                'start_number': 345,
+                'value_type': 'F32BE',
+            },
+            {
+                'name': 'L1 import kWh [kWh]',
+                'value_id': 'EnergyActiveL1Import',
+                'start_number': 347,
+                'value_type': 'F32BE',
+            },
+            {
+                'name': 'L2 import kWh [kWh]',
+                'value_id': 'EnergyActiveL2Import',
+                'start_number': 349,
+                'value_type': 'F32BE',
+            },
+            {
+                'name': 'L3 import kWh [kWh]',
+                'value_id': 'EnergyActiveL3Import',
+                'start_number': 351,
+                'value_type': 'F32BE',
+            },
+            {
+                'name': 'L1 export kWh [kWh]',
+                'value_id': 'EnergyActiveL1Export',
+                'start_number': 353,
+                'value_type': 'F32BE',
+            },
+            {
+                'name': 'L2 export kWh [kWh]',
+                'value_id': 'EnergyActiveL2Export',
+                'start_number': 355,
+                'value_type': 'F32BE',
+            },
+            {
+                'name': 'L3 export kWh [kWh]',
+                'value_id': 'EnergyActiveL3Export',
+                'start_number': 357,
+                'value_type': 'F32BE',
+            },
+            {
+                'name': 'L1 total kWh [kWh]',
+                'value_id': 'EnergyActiveL1ImExSum',
+                'start_number': 359,
+                'value_type': 'F32BE',
+            },
+            {
+                'name': 'L2 total kWh [kWh]',
+                'value_id': 'EnergyActiveL2ImExSum',
+                'start_number': 361,
+                'value_type': 'F32BE',
+            },
+            {
+                'name': 'L3 total kWh [kWh]',
+                'value_id': 'EnergyActiveL3ImExSum',
+                'start_number': 363,
+                'value_type': 'F32BE',
+            },
+            {
+                'name': 'L1 import kvarh [kvarh]',
+                'value_id': 'EnergyReactiveL1Inductive',
+                'start_number': 365,
+                'value_type': 'F32BE',
+            },
+            {
+                'name': 'L2 import kvarh [kvarh]',
+                'value_id': 'EnergyReactiveL2Inductive',
+                'start_number': 367,
+                'value_type': 'F32BE',
+            },
+            {
+                'name': 'L3 import kvarh [kvarh]',
+                'value_id': 'EnergyReactiveL3Inductive',
+                'start_number': 369,
+                'value_type': 'F32BE',
+            },
+            {
+                'name': 'L1 export kvarh [kvarh]',
+                'value_id': 'EnergyReactiveL1Capacitive',
+                'start_number': 371,
+                'value_type': 'F32BE',
+            },
+            {
+                'name': 'L2 export kvarh [kvarh]',
+                'value_id': 'EnergyReactiveL2Capacitive',
+                'start_number': 373,
+                'value_type': 'F32BE',
+            },
+            {
+                'name': 'L3 export kvarh [kvarh]',
+                'value_id': 'EnergyReactiveL3Capacitive',
+                'start_number': 375,
+                'value_type': 'F32BE',
+            },
+            {
+                'name': 'L1 total kvarh [kvarh]',
+                'value_id': 'EnergyReactiveL1IndCapSum',
+                'start_number': 377,
+                'value_type': 'F32BE',
+            },
+            {
+                'name': 'L2 total kvarh [kvarh]',
+                'value_id': 'EnergyReactiveL2IndCapSum',
+                'start_number': 379,
+                'value_type': 'F32BE',
+            },
+            {
+                'name': 'L3 total kvarh [kvarh]',
+                'value_id': 'EnergyReactiveL3IndCapSum',
+                'start_number': 381,
+                'value_type': 'F32BE',
+            },
+        ],
+    },
+]

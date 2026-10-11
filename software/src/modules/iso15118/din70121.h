@@ -1,0 +1,82 @@
+/* esp32-firmware
+ * Copyright (C) 2025-2026 Olaf Lüke <olaf@tinkerforge.com>
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, write to the
+ * Free Software Foundation, Inc., 59 Temple Place - Suite 330,
+ * Boston, MA 02111-1307, USA.
+ */
+
+#pragma once
+
+#include "module.h"
+#include "config.h"
+
+#include "cbv2g/common/exi_bitstream.h"
+#include "cbv2g/din/din_msgDefDecoder.h"
+#include "cbv2g/din/din_msgDefEncoder.h"
+
+#include "common.h"
+#include "generated/din70121_state.enum.h"
+
+inline float physical_value_to_float(const din_PhysicalValueType *value)
+{
+    return physical_value_to_float(value->Value, value->Multiplier);
+}
+
+class DIN70121 final
+{
+public:
+    DIN70121(){}
+    void pre_setup();
+    void handle_bitstream(exi_bitstream *exi);
+
+    bool soc_was_read() const { return soc_read; }
+
+    void reset_session()
+    {
+        state = DIN70121State::Idle;
+        soc_read = false;
+        soc_shutdown_retries = 0;
+    }
+
+    ConfigRoot api_state;
+
+    struct din_exiDocument *dinDocDec = nullptr;
+    struct din_exiDocument *dinDocEnc = nullptr;
+    uint64_t next_timeout = 0;
+
+private:
+    void dispatch_messages();
+    void send_failed_unknown_session();
+
+    void handle_session_setup_req();
+    void handle_service_discovery_req();
+    void handle_service_payment_selection_req();
+    void handle_contract_authentication_req();
+    void handle_charge_parameter_discovery_req();
+    void handle_power_delivery_req();
+    void handle_cable_check_req();
+    void handle_pre_charge_req();
+    void handle_current_demand_req();
+    void handle_session_stop_req();
+
+    void abort_soc_session();
+
+    void trace_header(const struct din_MessageHeaderType *header, const char *name);
+    void trace_request_response();
+
+    DIN70121State state = DIN70121State::Idle;
+    bool soc_read = false;              // Set after first SoC reading in read_soc_only mode
+    uint8_t soc_shutdown_retries = 0;   // Count of ChargeParameterDiscoveryReq received after SoC was already read
+};

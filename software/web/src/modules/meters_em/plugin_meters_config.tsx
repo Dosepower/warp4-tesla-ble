@@ -1,0 +1,99 @@
+/* esp32-firmware
+ * Copyright (C) 2023 Matthias Bolte <matthias@tinkerforge.com>
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, write to the
+ * Free Software Foundation, Inc., 59 Temple Place - Suite 330,
+ * Boston, MA 02111-1307, USA.
+ */
+
+//#include "generated/module_available.inc"
+
+import { h, ComponentChildren } from "preact";
+import { __, translate_unchecked } from "../../ts/translation";
+import * as util from "../../ts/util";
+import * as options from "../../options";
+import { MeterClassID } from "../meters/generated/meter_class_id.enum";
+import { MeterLocation } from "../meters/generated/meter_location.enum";
+import { get_meter_location_items } from "../meters/meter_location";
+import { MeterConfig } from "../meters/types";
+import { InputText } from "../../ts/components/input_text";
+import { InputSelect } from "../../ts/components/input_select";
+import { FormRow } from "../../ts/components/form_row";
+import { Switch } from "../../ts/components/switch";
+import * as API from "../../ts/api";
+
+export type EMMetersConfig = [
+    MeterClassID.EnergyManager,
+    {
+        display_name: string;
+        location: number;
+        excluded: boolean;
+    },
+];
+
+export function pre_init() {
+    return {
+        [MeterClassID.EnergyManager]: {
+            name: () => __("meters_em.content.meter_class"),
+            new_config: () => [MeterClassID.EnergyManager, {display_name: options.METERS_EM_DEFAULT_DISPLAY_NAME, location: MeterLocation.Grid, excluded: false}] as MeterConfig,
+            clone_config: (config: MeterConfig) => [config[0], {...config[1]}] as MeterConfig,
+            get_edit_children: (config: EMMetersConfig, on_config: (config: EMMetersConfig) => void): ComponentChildren => {
+                return [
+                    <FormRow label={__("meters_em.content.config_display_name")}>
+                        <InputText
+                            required
+                            maxLength={32}
+                            value={config[1].display_name}
+                            onValue={(v) => {
+                                on_config(util.get_updated_union(config, {display_name: v}));
+                            }}/>
+                    </FormRow>,
+                    <FormRow label={__("meters_em.content.config_location")}>
+                        <InputSelect
+                            required
+                            items={get_meter_location_items()}
+                            placeholder={__("select")}
+                            value={config[1].location.toString()}
+                            onValue={(v) => {
+                                on_config(util.get_updated_union(config, {location: parseInt(v)}));
+                            }} />
+                    </FormRow>,
+//#if MODULE_EM_ENERGY_ANALYSIS_AVAILABLE
+                    <FormRow label={__("meters.content.config_excluded")} help={__("meters.content.config_excluded_help")}>
+                        <Switch
+                            desc={__("meters.content.config_excluded_desc")}
+                            checked={config[1].excluded}
+                            onClick={() => on_config(util.get_updated_union(config, {excluded: !config[1].excluded}))}/>
+                    </FormRow>,
+//#endif
+                ];
+            },
+            get_extra_rows: (meter_slot: number) => {
+                let meter_type = API.get_unchecked(`meters/${meter_slot}/state`)?.type;
+                let meter_type_string = meter_type == null ? __("meters.script.reboot_required") : translate_unchecked(`meters.script.meter_type_${meter_type}`)
+
+                return <FormRow label={__("meters.content.meter_type")} small>
+                    <div class="row gx-2 gy-1">
+                        <div class="col-sm-4">
+                            <InputText class="form-control-sm" value={meter_type_string}/>
+                        </div>
+                    </div>
+                </FormRow>;
+            },
+        },
+    };
+}
+
+export function init() {
+}

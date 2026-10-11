@@ -1,0 +1,1512 @@
+/* esp32-firmware
+ * Copyright (C) 2024 Matthias Bolte <matthias@tinkerforge.com>
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, write to the
+ * Free Software Foundation, Inc., 59 Temple Place - Suite 330,
+ * Boston, MA 02111-1307, USA.
+ */
+
+//#include "generated/module_available.inc"
+
+import * as util from "../../ts/util";
+import * as API from "../../ts/api";
+import * as options from "../../options";
+import { __ } from "../../ts/translation";
+import { h, Fragment, Component, ComponentChild, createRef } from "preact";
+import { effect } from "@preact/signals-core";
+import { Alert, Collapse } from "react-bootstrap";
+import { FormRow } from "../../ts/components/form_row";
+import { FormSeparator } from "../../ts/components/form_separator";
+import { IndicatorGroup } from "../../ts/components/indicator_group";
+import { InputSelect } from "../../ts/components/input_select";
+import { ConfigComponent } from "../../ts/components/config_component";
+import { SubPage } from "../../ts/components/sub_page";
+import { InputText } from "../../ts/components/input_text";
+import { InputNumber } from "../../ts/components/input_number";
+import { InputFloat } from "../../ts/components/input_float";
+import { Switch } from "../../ts/components/switch";
+import { BatteryClassID } from "./generated/battery_class_id.enum";
+import { BatteryConfig, BatteryConfigPlugin } from "./types";
+//#if MODULE_BATTERY_CONTROL_AVAILABLE
+import { BatteryMode } from "./generated/battery_mode.enum";
+import { RuleConfig } from "../battery_control/types";
+import { RuleAction } from "../battery_control/generated/rule_action.enum";
+import { RuleCondition } from "../battery_control/generated/rule_condition.enum";
+import { ScheduleRuleCondition } from "../battery_control/generated/schedule_rule_condition.enum";
+//#endif
+//#if MODULE_DAY_AHEAD_PRICES_AVAILABLE
+import { get_price_from_index, is_day_ahead_prices_enabled } from "../day_ahead_prices/main";
+//#endif
+import { config_plugins_pre_init, config_plugins_init } from "./plugins";
+import { NavbarItem } from "../../ts/components/navbar_item";
+import { Table } from "../../ts/components/table";
+import { UplotLoader } from "../../ts/components/uplot_loader";
+import { UplotData, UplotWrapperB, UplotPath } from "../../ts/components/uplot_wrapper_2nd";
+import { Battery, AlertTriangle } from "react-feather";
+import { register_status_provider, ModuleStatus } from "../../ts/status_registry";
+
+export function BatteriesNavbar() {
+    return <NavbarItem name="batteries" module="batteries" title={__("batteries.navbar.batteries")} symbol={<Battery />} />;
+}
+
+let config_plugins: {[battery_class: number]: BatteryConfigPlugin} = {};
+
+type BatteryState = Readonly<API.getType['batteries/0/state']>;
+
+function get_battery_name(battery_configs: {[battery_slot: number]: BatteryConfig}, battery_slot: number) {
+    let battery_name = __("batteries.script.battery")(util.hasValue(battery_slot) ? battery_slot : '?');
+
+    if (util.hasValue(battery_slot) && util.hasValue(battery_configs) && util.hasValue(battery_configs[battery_slot]) && util.hasValue(battery_configs[battery_slot][1])) {
+        battery_name = battery_configs[battery_slot][1].display_name;
+    }
+
+    return battery_name;
+}
+
+//#if MODULE_BATTERY_CONTROL_AVAILABLE
+interface RulesEditorState {
+    add_rule_config: RuleConfig;
+    edit_rule_config: RuleConfig;
+    all_conditions_ignored: boolean;
+}
+
+interface RulesEditorProps {
+    category: "charge" | "discharge";
+    rules: RuleConfig[];
+    active_rule: number;
+    on_rules: (rules: RuleConfig[]) => void;
+}
+
+function number_to_two_digits(num: number) {
+    const str = num.toString();
+    return num < 10 ? "0" + str : str;
+}
+
+function create_twodigit_items(max: number) {
+    let items: [string, string][] = [];
+    for (let i = 0; i <= max; i++) {
+        const i_str = i.toString();
+        const i_padded = number_to_two_digits(i);
+        items[i] = [i_str, i_padded];
+    }
+
+    return items;
+}
+
+function get_column_time_cond(rule_config: RuleConfig) {
+    if (rule_config.time_cond == RuleCondition.Ignore) {
+        return '';
+    }
+
+    const prefix = rule_config.time_cond == RuleCondition.BelowOrNo ? __("batteries.content.condition_time_not") + " " : "";
+
+    const start_h   = number_to_two_digits(Math.trunc(rule_config.time_start / 60));
+    const start_min = number_to_two_digits(rule_config.time_start % 60);
+    const end_h     = number_to_two_digits(Math.trunc(rule_config.time_end   / 60));
+    const end_min   = number_to_two_digits(rule_config.time_end   % 60);
+
+    return prefix + start_h + ":" + start_min + "–" + end_h + ":" + end_min;
+}
+
+function get_column_cond(cond: number, th_str: string) {
+    switch (cond) {
+        case RuleCondition.Ignore:     return '';
+        case RuleCondition.BelowOrNo:  return '< ' + th_str;
+        case RuleCondition.AboveOrYes: return '> ' + th_str;
+    }
+
+    return '???';
+}
+
+function get_column_schedule_cond(cond: number) {
+    switch (cond) {
+        case ScheduleRuleCondition.Ignore:       return '';
+        case ScheduleRuleCondition.Cheap:        return __("batteries.content.condition_schedule_cheap_compact");
+        case ScheduleRuleCondition.NotCheap:     return __("batteries.content.condition_schedule_not_cheap_compact");
+        case ScheduleRuleCondition.Expensive:    return __("batteries.content.condition_schedule_expensive_compact");
+        case ScheduleRuleCondition.NotExpensive: return __("batteries.content.condition_schedule_not_expensive_compact");
+        case ScheduleRuleCondition.Moderate:     return __("batteries.content.condition_schedule_moderate_compact");
+    }
+
+    return '???';
+}
+
+function get_column_fast_chg_cond(cond: number) {
+    switch (cond) {
+        case RuleCondition.Ignore:     return '';
+        case RuleCondition.BelowOrNo:  return __("batteries.content.table_rule_fast_chg_not_active");
+        case RuleCondition.AboveOrYes: return __("batteries.content.table_rule_fast_chg_active");
+    }
+
+    return '???';
+}
+
+function get_column_action(action: number) {
+    switch (action) {
+        case RuleAction.Normal: return '';
+        case RuleAction.Block:  return __("batteries.content.rule_action_block");
+        case RuleAction.Force:  return __("batteries.content.rule_action_force");
+    }
+
+    return '???';
+}
+
+class RulesEditor extends Component<RulesEditorProps, RulesEditorState> {
+    constructor(props: RulesEditorProps) {
+        super(props);
+
+        this.state = {
+            add_rule_config: null,
+            edit_rule_config: null,
+            all_conditions_ignored: false,
+        } as RulesEditorState;
+    }
+
+    render() {
+        return <Table
+            tableTill="lg"
+            columnNames={[__("batteries.content.table_rule_enabled"), __("batteries.content.table_rule_desc"), __("batteries.content.table_rule_time"), __("batteries.content.table_rule_soc"), __("batteries.content.table_rule_price"), __("batteries.content.table_rule_forecast"), __("batteries.content.table_rule_schedule"), __("batteries.content.table_rule_fast_chg"), __("batteries.content.table_rule_action")]}
+            rows={this.props.rules.map((rule_config, i) => {
+                return {
+                    columnValues: [
+                        <Switch
+                            checked={rule_config.enabled}
+                            onClick={() => this.props.on_rules(this.props.rules.map((r, k) => k === i ? {...r, enabled: !r.enabled} : r))}
+                        />,
+                        <span style="overflow-wrap: anywhere;">{rule_config.desc}</span>,
+                        get_column_time_cond(rule_config),
+                        get_column_cond(rule_config.soc_cond, `${rule_config.soc_th} %`),
+                        get_column_cond(rule_config.price_cond, `${util.toLocaleFixed(rule_config.price_th / 10, 1)} ct`),
+                        get_column_cond(rule_config.forecast_cond, `${rule_config.forecast_th} kWh`),
+                        get_column_schedule_cond(rule_config.schedule_cond),
+                        get_column_fast_chg_cond(rule_config.fast_chg_cond),
+                        get_column_action(rule_config.action),
+                    ],
+                    editTitle: this.props.category == "charge" ? __("batteries.content.edit_rule_title_charge") : __("batteries.content.edit_rule_title_discharge"),
+                    onEditShow: async () => {
+                        this.setState({edit_rule_config: {...rule_config}, all_conditions_ignored: false});
+                    },
+                    onEditGetChildren: () => {
+                        const cond_items: [string, string][] = [
+                            [RuleCondition.Ignore.toString(),     __("batteries.content.condition_ignore")],
+                            [RuleCondition.BelowOrNo.toString(),  __("batteries.content.condition_below")],
+                            [RuleCondition.AboveOrYes.toString(), __("batteries.content.condition_above")],
+                        ];
+
+                        const hour_items   = create_twodigit_items(24);
+                        const minute_items = create_twodigit_items(59);
+
+                        return [
+                            <FormRow label={__("batteries.content.edit_rule_desc")}>
+                                <InputText
+                                    required
+                                    maxLength={32}
+                                    value={this.state.edit_rule_config.desc}
+                                    onValue={(v) => {
+                                        this.setState({edit_rule_config: {...this.state.edit_rule_config, desc: v}});
+                                    }}
+                                />
+                            </FormRow>,
+                            <FormRow label={__("batteries.content.edit_rule_time")}>
+                                <div class="row g-0">
+                                    <div class="col-md-4 mb-1 mb-md-0">
+                                        <InputSelect
+                                            required
+                                            placeholder={__("select")}
+                                            items={[
+                                                [RuleCondition.Ignore.toString(),     __("batteries.content.condition_ignore")],
+                                                [RuleCondition.BelowOrNo.toString(),  __("batteries.content.condition_time_not")],
+                                                [RuleCondition.AboveOrYes.toString(), __("batteries.content.condition_time_only")],
+                                            ]}
+                                            onValue={(v) => {
+                                                const time_cond = parseInt(v);
+
+                                                if (time_cond != RuleCondition.Ignore) {
+                                                    this.setState({all_conditions_ignored: false});
+                                                }
+
+                                                this.setState({edit_rule_config: {...this.state.edit_rule_config, time_cond: time_cond}});
+                                            }}
+                                            value={this.state.edit_rule_config.time_cond.toString()}
+                                        />
+                                    </div>
+                                    <div class="col-md-8 d-flex flex-wrap ps-md-2">
+                                        <div class="input-group flex-nowrap flex-grow-1 mb-1">
+                                            <span class="input-group-text">{__("batteries.content.edit_rule_time_start")}</span>
+                                            <InputSelect
+                                                required={this.state.edit_rule_config.time_cond != RuleCondition.Ignore}
+                                                disabled={this.state.edit_rule_config.time_cond == RuleCondition.Ignore}
+                                                items={hour_items}
+                                                onValue={(v) => {
+                                                    const hours   = parseInt(v);
+                                                    const minutes = hours >= 24 ? 0 : this.state.edit_rule_config.time_start % 60;
+
+                                                    this.setState({edit_rule_config: {...this.state.edit_rule_config, time_start: hours * 60 + minutes}});
+                                                }}
+                                                value={Math.trunc(this.state.edit_rule_config.time_start / 60).toString()}
+                                            />
+                                            <span class="input-group-text">:</span>
+                                            <InputSelect
+                                                required={this.state.edit_rule_config.time_cond != RuleCondition.Ignore}
+                                                disabled={this.state.edit_rule_config.time_cond == RuleCondition.Ignore}
+                                                items={this.state.edit_rule_config.time_start >= 24 * 60 ? [["0", "00"]] : minute_items}
+                                                onValue={(v) => {
+                                                    const hours   = Math.trunc(this.state.edit_rule_config.time_start / 60);
+                                                    const minutes = parseInt(v);
+
+                                                    this.setState({edit_rule_config: {...this.state.edit_rule_config, time_start: hours * 60 + minutes}});
+                                                }}
+                                                value={(this.state.edit_rule_config.time_start % 60).toString()}
+                                            />
+                                        </div>
+                                        <div class="input-group flex-nowrap flex-grow-1">
+                                            <span class="input-group-text">{__("batteries.content.edit_rule_time_end")}</span>
+                                            <InputSelect
+                                                required={this.state.edit_rule_config.time_cond != RuleCondition.Ignore}
+                                                disabled={this.state.edit_rule_config.time_cond == RuleCondition.Ignore}
+                                                items={hour_items}
+                                                onValue={(v) => {
+                                                    const hours   = parseInt(v);
+                                                    const minutes = hours >= 24 ? 0 : this.state.edit_rule_config.time_end % 60;
+
+                                                    this.setState({edit_rule_config: {...this.state.edit_rule_config, time_end: hours * 60 + minutes}});
+                                                }}
+                                                value={Math.trunc(this.state.edit_rule_config.time_end / 60).toString()}
+                                            />
+                                            <span class="input-group-text">:</span>
+                                            <InputSelect
+                                                required={this.state.edit_rule_config.time_cond != RuleCondition.Ignore}
+                                                disabled={this.state.edit_rule_config.time_cond == RuleCondition.Ignore}
+                                                items={this.state.edit_rule_config.time_end >= 24 * 60 ? [["0", "00"]] : minute_items}
+                                                onValue={(v) => {
+                                                    const hours   = Math.trunc(this.state.edit_rule_config.time_end / 60);
+                                                    const minutes = parseInt(v);
+
+                                                    this.setState({edit_rule_config: {...this.state.edit_rule_config, time_end: hours * 60 + minutes}});
+                                                }}
+                                                value={(this.state.edit_rule_config.time_end % 60).toString()}
+                                            />
+                                        </div>
+                                    </div>
+                                </div>
+                            </FormRow>,
+                            <FormRow label={__("batteries.content.edit_rule_soc")}>
+                                <InputNumber
+                                    required={this.state.edit_rule_config.soc_cond != RuleCondition.Ignore}
+                                    disabled={this.state.edit_rule_config.soc_cond == RuleCondition.Ignore}
+                                    min={0}
+                                    max={100}
+                                    unit="%"
+                                    value={this.state.edit_rule_config.soc_th}
+                                    onValue={(v) => {
+                                        this.setState({edit_rule_config: {...this.state.edit_rule_config, soc_th: v}});
+                                    }}>
+                                    <InputSelect
+                                        required
+                                        style="border-top-right-radius: 0; border-bottom-right-radius: 0;"
+                                        placeholder={__("select")}
+                                        items={cond_items}
+                                        onValue={(v) => {
+                                            let soc_cond = parseInt(v);
+                                            let soc_th = this.state.edit_rule_config.soc_th;
+
+                                            if (soc_cond == RuleCondition.Ignore) {
+                                                soc_th = rule_config.soc_th;
+                                            } else {
+                                                this.setState({all_conditions_ignored: false});
+                                            }
+
+                                            this.setState({edit_rule_config: {...this.state.edit_rule_config, soc_cond: soc_cond, soc_th: soc_th}});
+                                        }}
+                                        value={this.state.edit_rule_config.soc_cond.toString()} />
+                                </InputNumber>
+                            </FormRow>,
+                            <FormRow label={__("batteries.content.edit_rule_price")} label_muted={__("batteries.content.edit_rule_price_muted")}>
+                                <InputFloat
+                                    required={this.state.edit_rule_config.price_cond != RuleCondition.Ignore}
+                                    disabled={this.state.edit_rule_config.price_cond == RuleCondition.Ignore}
+                                    min={-32768}
+                                    max={32767}
+                                    digits={1}
+                                    unit="ct"
+                                    value={this.state.edit_rule_config.price_th}
+                                    onValue={(v) => {
+                                        this.setState({edit_rule_config: {...this.state.edit_rule_config, price_th: v}});
+                                    }}>
+                                    <InputSelect
+                                        required
+                                        style="border-top-right-radius: 0; border-bottom-right-radius: 0;"
+                                        placeholder={__("select")}
+                                        items={cond_items}
+                                        onValue={(v) => {
+                                            let price_cond = parseInt(v);
+                                            let price_th = this.state.edit_rule_config.price_th;
+
+                                            if (price_cond == RuleCondition.Ignore) {
+                                                price_th = rule_config.price_th;
+                                            } else {
+                                                this.setState({all_conditions_ignored: false});
+                                            }
+
+                                            this.setState({edit_rule_config: {...this.state.edit_rule_config, price_cond: price_cond, price_th: price_th}});
+                                        }}
+                                        value={this.state.edit_rule_config.price_cond.toString()} />
+                                </InputFloat>
+                            </FormRow>,
+                            <FormRow label={__("batteries.content.edit_rule_forecast")}>
+                                <InputNumber
+                                    required={this.state.edit_rule_config.forecast_cond != RuleCondition.Ignore}
+                                    disabled={this.state.edit_rule_config.forecast_cond == RuleCondition.Ignore}
+                                    min={0}
+                                    max={65535}
+                                    unit="kWh"
+                                    value={this.state.edit_rule_config.forecast_th}
+                                    onValue={(v) => {
+                                        this.setState({edit_rule_config: {...this.state.edit_rule_config, forecast_th: v}});
+                                    }}>
+                                    <InputSelect
+                                        required
+                                        style="border-top-right-radius: 0; border-bottom-right-radius: 0;"
+                                        placeholder={__("select")}
+                                        items={cond_items}
+                                        onValue={(v) => {
+                                            let forecast_cond = parseInt(v);
+                                            let forecast_th = this.state.edit_rule_config.forecast_th;
+
+                                            if (forecast_cond == RuleCondition.Ignore) {
+                                                forecast_th = rule_config.forecast_th;
+                                            } else {
+                                                this.setState({all_conditions_ignored: false});
+                                            }
+
+                                            this.setState({edit_rule_config: {...this.state.edit_rule_config, forecast_cond: forecast_cond, forecast_th: forecast_th}});
+                                        }}
+                                        value={this.state.edit_rule_config.forecast_cond.toString()} />
+                                </InputNumber>
+                            </FormRow>,
+                            <FormRow label={__("batteries.content.edit_rule_schedule")}>
+                                <InputSelect
+                                    required
+                                    placeholder={__("select")}
+                                    items={[
+                                        [ScheduleRuleCondition.Ignore.toString(),       __("batteries.content.condition_ignore")],
+                                        [ScheduleRuleCondition.Cheap.toString(),        __("batteries.content.condition_schedule_cheap")],
+                                        [ScheduleRuleCondition.NotCheap.toString(),     __("batteries.content.condition_schedule_not_cheap")],
+                                        [ScheduleRuleCondition.Expensive.toString(),    __("batteries.content.condition_schedule_expensive")],
+                                        [ScheduleRuleCondition.NotExpensive.toString(), __("batteries.content.condition_schedule_not_expensive")],
+                                        [ScheduleRuleCondition.Moderate.toString(),     __("batteries.content.condition_schedule_moderate")],
+                                            ]}
+                                    onValue={(v) => {
+                                        const schedule_cond = parseInt(v);
+
+                                        if (schedule_cond != ScheduleRuleCondition.Ignore) {
+                                            this.setState({all_conditions_ignored: false});
+                                        }
+
+                                        this.setState({edit_rule_config: {...this.state.edit_rule_config, schedule_cond: schedule_cond}});
+                                    }}
+                                    value={this.state.edit_rule_config.schedule_cond.toString()} />
+                            </FormRow>,
+                            <FormRow label={__("batteries.content.edit_rule_fast_chg")}>
+                                <InputSelect
+                                    required
+                                    placeholder={__("select")}
+                                    items={[
+                                        [RuleCondition.Ignore.toString(),     __("batteries.content.condition_ignore")],
+                                        [RuleCondition.BelowOrNo.toString(),  __("batteries.content.condition_fast_chg_inactive")],
+                                        [RuleCondition.AboveOrYes.toString(), __("batteries.content.condition_fast_chg_active")],
+                                    ]}
+                                    onValue={(v) => {
+                                        let fast_chg_cond = parseInt(v);
+
+                                        if (fast_chg_cond != RuleCondition.Ignore) {
+                                            this.setState({all_conditions_ignored: false});
+                                        }
+
+                                        this.setState({edit_rule_config: {...this.state.edit_rule_config, fast_chg_cond: fast_chg_cond}});
+                                    }}
+                                    value={this.state.edit_rule_config.fast_chg_cond.toString()} />
+                            </FormRow>,
+                            <FormRow label={__("batteries.content.edit_rule_action")}>
+                                <InputSelect
+                                    required
+                                    placeholder={__("select")}
+                                    items={[
+                                        [RuleAction.Block.toString(), this.props.category == "charge" ? __("batteries.content.rule_action_block_charge") : __("batteries.content.rule_action_block_discharge")],
+                                        [RuleAction.Force.toString(), this.props.category == "charge" ? __("batteries.content.rule_action_force_charge") : __("batteries.content.rule_action_force_discharge")],
+                                    ]}
+                                    onValue={(v) => {
+                                        let action = parseInt(v);
+
+                                        if (action != RuleAction.Normal) {
+                                            this.setState({all_conditions_ignored: false});
+                                        }
+
+                                        this.setState({edit_rule_config: {...this.state.edit_rule_config, action: action}});
+                                    }}
+                                    value={this.state.edit_rule_config.action.toString()} />
+                            </FormRow>,
+                            <Collapse in={this.state.all_conditions_ignored}>
+                                <div>
+                                    <Alert variant="danger">
+                                        {__("batteries.content.invalid_feedback_all_ignored")}
+                                    </Alert>
+                                </div>
+                            </Collapse>,
+                        ];
+                    },
+                    onEditCheck: async () => {
+                        const all_ignored = this.state.edit_rule_config.time_cond     == RuleCondition.Ignore &&
+                                            this.state.edit_rule_config.soc_cond      == RuleCondition.Ignore &&
+                                            this.state.edit_rule_config.price_cond    == RuleCondition.Ignore &&
+                                            this.state.edit_rule_config.forecast_cond == RuleCondition.Ignore &&
+                                            this.state.edit_rule_config.schedule_cond == ScheduleRuleCondition.Ignore &&
+                                            this.state.edit_rule_config.fast_chg_cond == RuleCondition.Ignore &&
+                                            this.state.edit_rule_config.action        == RuleAction.Normal;
+
+                        return new Promise<boolean>((resolve) => {
+                            this.setState({all_conditions_ignored: all_ignored}, () => resolve(!all_ignored));
+                        });
+                    },
+                    onEditSubmit: async () => {
+                        this.props.on_rules(this.props.rules.map((r, k) => k === i ? this.state.edit_rule_config : r));
+                    },
+                    onEditHide: async () => {
+                    },
+                    onRemoveClick: async () => {
+                        this.props.on_rules(this.props.rules.filter((r, k) => k !== i));
+                        return true;
+                    },
+                    indicator: this.props.active_rule == i ? "primary" : undefined,
+                }
+            })}
+            addEnabled={this.props.rules.length < options.BATTERY_CONTROL_MAX_RULES_PER_TYPE}
+            addTitle={this.props.category == "charge" ? __("batteries.content.add_rule_title_charge") : __("batteries.content.add_rule_title_discharge")}
+            addMessage={__("batteries.content.add_rule_message")(this.props.rules.length, options.BATTERY_CONTROL_MAX_RULES_PER_TYPE)}
+            onAddShow={async () => {
+                let rule_config: RuleConfig = {
+                    enabled: true,
+                    desc: "",
+                    soc_cond: RuleCondition.Ignore,
+                    soc_th: null,
+                    price_cond:RuleCondition.Ignore,
+                    price_th: null,
+                    forecast_cond: RuleCondition.Ignore,
+                    forecast_th: null,
+                    schedule_cond: ScheduleRuleCondition.Ignore,
+                    time_cond: RuleCondition.Ignore,
+                    time_start: 0,
+                    time_end: 0,
+                    fast_chg_cond: ScheduleRuleCondition.Ignore,
+                    action: RuleAction.Normal,
+                };
+
+                this.setState({add_rule_config: rule_config, all_conditions_ignored: false});
+            }}
+            onAddGetChildren={() => {
+                let cond_items: [string, string][] = [
+                    [RuleCondition.Ignore.toString(),     __("batteries.content.condition_ignore")],
+                    [RuleCondition.BelowOrNo.toString(),  __("batteries.content.condition_below")],
+                    [RuleCondition.AboveOrYes.toString(), __("batteries.content.condition_above")],
+                ];
+
+                const hour_items   = create_twodigit_items(24);
+                const minute_items = create_twodigit_items(59);
+
+                return [
+                    <FormRow label={__("batteries.content.add_rule_desc")}>
+                        <InputText
+                            required
+                            maxLength={32}
+                            value={this.state.add_rule_config.desc}
+                            onValue={(v) => {
+                                this.setState({add_rule_config: {...this.state.add_rule_config, desc: v}});
+                            }}
+                        />
+                    </FormRow>,
+                    <FormRow label={__("batteries.content.add_rule_time")}>
+                        <div class="row g-0">
+                            <div class="col-md-4 mb-1 mb-md-0">
+                                <InputSelect
+                                    required
+                                    placeholder={__("select")}
+                                    items={[
+                                        [RuleCondition.Ignore.toString(),     __("batteries.content.condition_ignore")],
+                                        [RuleCondition.BelowOrNo.toString(),  __("batteries.content.condition_time_not")],
+                                        [RuleCondition.AboveOrYes.toString(), __("batteries.content.condition_time_only")],
+                                    ]}
+                                    onValue={(v) => {
+                                        const time_cond = parseInt(v);
+
+                                        if (time_cond != RuleCondition.Ignore) {
+                                            this.setState({all_conditions_ignored: false});
+                                        }
+
+                                        this.setState({add_rule_config: {...this.state.add_rule_config, time_cond: time_cond}});
+                                    }}
+                                    value={this.state.add_rule_config.time_cond.toString()}
+                                />
+                            </div>
+                            <div class="col-md-8 d-flex flex-wrap ps-md-2">
+                                <div class="input-group flex-nowrap flex-grow-1 mb-1">
+                                    <span class="input-group-text">{__("batteries.content.add_rule_time_start")}</span>
+                                    <InputSelect
+                                        required={this.state.add_rule_config.time_cond != RuleCondition.Ignore}
+                                        disabled={this.state.add_rule_config.time_cond == RuleCondition.Ignore}
+                                        items={hour_items}
+                                        onValue={(v) => {
+                                            const hours   = parseInt(v);
+                                            const minutes = hours >= 24 ? 0 : this.state.add_rule_config.time_start % 60;
+
+                                            this.setState({add_rule_config: {...this.state.add_rule_config, time_start: hours * 60 + minutes}});
+                                        }}
+                                        value={Math.trunc(this.state.add_rule_config.time_start / 60).toString()}
+                                    />
+                                    <span class="input-group-text">:</span>
+                                    <InputSelect
+                                        required={this.state.add_rule_config.time_cond != RuleCondition.Ignore}
+                                        disabled={this.state.add_rule_config.time_cond == RuleCondition.Ignore}
+                                        items={this.state.add_rule_config.time_start >= 24 * 60 ? [["0", "00"]] : minute_items}
+                                        onValue={(v) => {
+                                            const hours   = Math.trunc(this.state.add_rule_config.time_start / 60);
+                                            const minutes = parseInt(v);
+
+                                            this.setState({add_rule_config: {...this.state.add_rule_config, time_start: hours * 60 + minutes}});
+                                        }}
+                                        value={(this.state.add_rule_config.time_start % 60).toString()}
+                                    />
+                                </div>
+                                <div class="input-group flex-nowrap flex-grow-1">
+                                    <span class="input-group-text">{__("batteries.content.add_rule_time_end")}</span>
+                                    <InputSelect
+                                        required={this.state.add_rule_config.time_cond != RuleCondition.Ignore}
+                                        disabled={this.state.add_rule_config.time_cond == RuleCondition.Ignore}
+                                        items={hour_items}
+                                        onValue={(v) => {
+                                            const hours   = parseInt(v);
+                                            const minutes = hours >= 24 ? 0 : this.state.add_rule_config.time_end % 60;
+
+                                            this.setState({add_rule_config: {...this.state.add_rule_config, time_end: hours * 60 + minutes}});
+                                        }}
+                                        value={Math.trunc(this.state.add_rule_config.time_end / 60).toString()}
+                                    />
+                                    <span class="input-group-text">:</span>
+                                    <InputSelect
+                                        required={this.state.add_rule_config.time_cond != RuleCondition.Ignore}
+                                        disabled={this.state.add_rule_config.time_cond == RuleCondition.Ignore}
+                                        items={this.state.add_rule_config.time_end >= 24 * 60 ? [["0", "00"]] : minute_items}
+                                        onValue={(v) => {
+                                            const hours   = Math.trunc(this.state.add_rule_config.time_end / 60);
+                                            const minutes = parseInt(v);
+
+                                            this.setState({add_rule_config: {...this.state.add_rule_config, time_end: hours * 60 + minutes}});
+                                        }}
+                                        value={(this.state.add_rule_config.time_end % 60).toString()}
+                                    />
+                                </div>
+                            </div>
+                        </div>
+                    </FormRow>,
+                    <FormRow label={__("batteries.content.add_rule_soc")}>
+                       <InputNumber
+                            required={this.state.add_rule_config.soc_cond != RuleCondition.Ignore}
+                            disabled={this.state.add_rule_config.soc_cond == RuleCondition.Ignore}
+                            min={0}
+                            max={100}
+                            unit="%"
+                            value={this.state.add_rule_config.soc_th}
+                            onValue={(v) => {
+                                this.setState({add_rule_config: {...this.state.add_rule_config, soc_th: v}});
+                            }}>
+                            <InputSelect
+                                required
+                                style="border-top-right-radius: 0; border-bottom-right-radius: 0;"
+                                placeholder={__("select")}
+                                items={cond_items}
+                                onValue={(v) => {
+                                    let soc_cond = parseInt(v);
+                                    let soc_th = this.state.add_rule_config.soc_th;
+
+                                    if (soc_cond == RuleCondition.Ignore) {
+                                        soc_th = null;
+                                    } else {
+                                        this.setState({all_conditions_ignored: false});
+                                    }
+
+                                    this.setState({add_rule_config: {...this.state.add_rule_config, soc_cond: soc_cond, soc_th: soc_th}});
+                                }}
+                                value={this.state.add_rule_config.soc_cond.toString()} />
+                        </InputNumber>
+                    </FormRow>,
+                    <FormRow label={__("batteries.content.add_rule_price")} label_muted={__("batteries.content.add_rule_price_muted")}>
+                       <InputFloat
+                            required={this.state.add_rule_config.price_cond != RuleCondition.Ignore}
+                            disabled={this.state.add_rule_config.price_cond == RuleCondition.Ignore}
+                            min={-32768}
+                            max={32767}
+                            digits={1}
+                            unit="ct"
+                            value={this.state.add_rule_config.price_th}
+                            onValue={(v) => {
+                                this.setState({add_rule_config: {...this.state.add_rule_config, price_th: v}});
+                            }}>
+                            <InputSelect
+                                required
+                                style="border-top-right-radius: 0; border-bottom-right-radius: 0;"
+                                placeholder={__("select")}
+                                items={cond_items}
+                                onValue={(v) => {
+                                    let price_cond = parseInt(v);
+                                    let price_th = this.state.add_rule_config.price_th;
+
+                                    if (price_cond == RuleCondition.Ignore) {
+                                        price_th = null;
+                                    } else {
+                                        this.setState({all_conditions_ignored: false});
+                                    }
+
+                                    this.setState({add_rule_config: {...this.state.add_rule_config, price_cond: price_cond, price_th: price_th}});
+                                }}
+                                value={this.state.add_rule_config.price_cond.toString()} />
+                        </InputFloat>
+                    </FormRow>,
+                    <FormRow label={__("batteries.content.add_rule_forecast")}>
+                       <InputNumber
+                            required={this.state.add_rule_config.forecast_cond != RuleCondition.Ignore}
+                            disabled={this.state.add_rule_config.forecast_cond == RuleCondition.Ignore}
+                            min={0}
+                            max={65535}
+                            unit="kWh"
+                            value={this.state.add_rule_config.forecast_th}
+                            onValue={(v) => {
+                                this.setState({add_rule_config: {...this.state.add_rule_config, forecast_th: v}});
+                            }}>
+                            <InputSelect
+                                required
+                                style="border-top-right-radius: 0; border-bottom-right-radius: 0;"
+                                placeholder={__("select")}
+                                items={cond_items}
+                                onValue={(v) => {
+                                    let forecast_cond = parseInt(v);
+                                    let forecast_th = this.state.add_rule_config.forecast_th;
+
+                                    if (forecast_cond == RuleCondition.Ignore) {
+                                        forecast_th = null;
+                                    } else {
+                                        this.setState({all_conditions_ignored: false});
+                                    }
+
+                                    this.setState({add_rule_config: {...this.state.add_rule_config, forecast_cond: forecast_cond, forecast_th: forecast_th}});
+                                }}
+                                value={this.state.add_rule_config.forecast_cond.toString()} />
+                        </InputNumber>
+                    </FormRow>,
+                    <FormRow label={__("batteries.content.add_rule_schedule")}>
+                        <InputSelect
+                            required
+                            placeholder={__("select")}
+                            items={[
+                                [ScheduleRuleCondition.Ignore.toString(),       __("batteries.content.condition_ignore")],
+                                [ScheduleRuleCondition.Cheap.toString(),        __("batteries.content.condition_schedule_cheap")],
+                                [ScheduleRuleCondition.NotCheap.toString(),     __("batteries.content.condition_schedule_not_cheap")],
+                                [ScheduleRuleCondition.Expensive.toString(),    __("batteries.content.condition_schedule_expensive")],
+                                [ScheduleRuleCondition.NotExpensive.toString(), __("batteries.content.condition_schedule_not_expensive")],
+                                [ScheduleRuleCondition.Moderate.toString(),     __("batteries.content.condition_schedule_moderate")],
+                            ]}
+                            onValue={(v) => {
+                                const schedule_cond = parseInt(v);
+
+                                if (schedule_cond != ScheduleRuleCondition.Ignore) {
+                                    this.setState({all_conditions_ignored: false});
+                                }
+
+                                this.setState({add_rule_config: {...this.state.add_rule_config, schedule_cond: schedule_cond}});
+                            }}
+                            value={this.state.add_rule_config.schedule_cond.toString()} />
+                    </FormRow>,
+                    <FormRow label={__("batteries.content.add_rule_fast_chg")}>
+                        <InputSelect
+                            required
+                            placeholder={__("select")}
+                            items={[
+                                [RuleCondition.Ignore.toString(),     __("batteries.content.condition_ignore")],
+                                [RuleCondition.BelowOrNo.toString(),  __("batteries.content.condition_fast_chg_inactive")],
+                                [RuleCondition.AboveOrYes.toString(), __("batteries.content.condition_fast_chg_active")],
+                            ]}
+                            onValue={(v) => {
+                                const fast_chg_cond = parseInt(v);
+
+                                if (fast_chg_cond != RuleCondition.Ignore) {
+                                    this.setState({all_conditions_ignored: false});
+                                }
+
+                                this.setState({add_rule_config: {...this.state.add_rule_config, fast_chg_cond: fast_chg_cond}});
+                            }}
+                            value={this.state.add_rule_config.fast_chg_cond.toString()} />
+                    </FormRow>,
+                    <FormRow label={__("batteries.content.add_rule_action")}>
+                        <InputSelect
+                            required
+                            placeholder={__("select")}
+                            items={[
+                                [RuleAction.Block.toString(), this.props.category == "charge" ? __("batteries.content.rule_action_block_charge") : __("batteries.content.rule_action_block_discharge")],
+                                [RuleAction.Force.toString(), this.props.category == "charge" ? __("batteries.content.rule_action_force_charge") : __("batteries.content.rule_action_force_discharge")],
+                            ]}
+                            onValue={(v) => {
+                                let action = parseInt(v);
+
+                                if (action != RuleAction.Normal) {
+                                    this.setState({all_conditions_ignored: false});
+                                }
+
+                                this.setState({add_rule_config: {...this.state.add_rule_config, action: action}});
+                            }}
+                            value={this.state.add_rule_config.action.toString()} />
+                    </FormRow>,
+                    <Collapse in={this.state.all_conditions_ignored}>
+                        <div>
+                            <Alert variant="danger">
+                                {__("batteries.content.invalid_feedback_all_ignored")}
+                            </Alert>
+                        </div>
+                    </Collapse>,
+                ];
+            }}
+            onAddCheck={async () => {
+                const all_ignored = this.state.add_rule_config.time_cond     == RuleCondition.Ignore &&
+                                    this.state.add_rule_config.soc_cond      == RuleCondition.Ignore &&
+                                    this.state.add_rule_config.price_cond    == RuleCondition.Ignore &&
+                                    this.state.add_rule_config.forecast_cond == RuleCondition.Ignore &&
+                                    this.state.add_rule_config.schedule_cond == ScheduleRuleCondition.Ignore &&
+                                    this.state.add_rule_config.fast_chg_cond == RuleCondition.Ignore;
+
+                return new Promise<boolean>((resolve) => {
+                    this.setState({all_conditions_ignored: all_ignored}, () => resolve(!all_ignored));
+                });
+            }}
+            onAddSubmit={async () => {
+                let rules = [...this.props.rules];
+
+                rules.push(this.state.add_rule_config);
+
+                this.props.on_rules(rules);
+            }}
+            onAddHide={async () => {
+            }}
+            />;
+    }
+}
+//#endif
+
+interface BatteriesState {
+    configs: {[battery_slot: number]: BatteryConfig};
+    states: {[battery_slot: number]: BatteryState};
+    add_battery_slot: number;
+    add_battery_config: BatteryConfig;
+    edit_battery_slot: number;
+    edit_battery_config: BatteryConfig;
+//#if MODULE_BATTERY_CONTROL_AVAILABLE
+    battery_control_config: API.getType['battery_control/config'];
+    rules_charge: RuleConfig[];
+    rules_discharge: RuleConfig[];
+//#endif
+    show_warnings: {[battery_slot: number]: boolean};
+}
+
+export class Batteries extends ConfigComponent<'batteries/config', {}, BatteriesState> {
+    uplot_loader_ref  = createRef();
+    uplot_wrapper_ref = createRef();
+
+    constructor() {
+        super('batteries/config',
+              () => __("batteries.script.save_failed"),
+              () => __("batteries.script.reboot_content_changed"), {
+                  configs: {},
+                  states: {},
+                  add_battery_slot: null,
+                  add_battery_config: [BatteryClassID.None, null],
+                  edit_battery_slot: null,
+                  edit_battery_config: [BatteryClassID.None, null],
+//#if MODULE_BATTERY_CONTROL_AVAILABLE
+                  battery_control_config: null,
+                  rules_charge: null,
+                  rules_discharge: null,
+//#endif
+                  show_warnings: {},
+              });
+
+        for (let battery_slot = 0; battery_slot < options.BATTERIES_MAX_SLOTS; ++battery_slot) {
+            util.addApiEventListener_unchecked(`batteries/${battery_slot}/config`, () => {
+                let config = API.get_unchecked(`batteries/${battery_slot}/config`);
+
+                if (!this.isDirty()) {
+                    this.setState((prevState) => ({
+                        configs: {
+                            ...prevState.configs,
+                            [battery_slot]: config
+                        }
+                    }));
+                }
+            });
+        }
+
+        for (let battery_slot = 0; battery_slot < options.BATTERIES_MAX_SLOTS; ++battery_slot) {
+            util.addApiEventListener_unchecked(`batteries/${battery_slot}/state`, () => {
+                let state = API.get_unchecked(`batteries/${battery_slot}/state`);
+
+                this.setState((prevState) => ({
+                    states: {
+                        ...prevState.states,
+                        [battery_slot]: state
+                    }
+                }));
+            });
+        }
+
+//#if MODULE_BATTERY_CONTROL_AVAILABLE
+        util.addApiEventListener('battery_control/config', (ev) => {
+            if (!this.isDirty()) {
+                this.setState({battery_control_config: ev.data});
+            }
+        });
+
+        util.addApiEventListener('battery_control/rules_charge', (ev) => {
+            if (!this.isDirty()) {
+                this.setState({rules_charge: API.get('battery_control/rules_charge') as RuleConfig[] /* FIXME */});
+            }
+        });
+
+        util.addApiEventListener('battery_control/rules_discharge', (ev) => {
+            if (!this.isDirty()) {
+                this.setState({rules_discharge: API.get('battery_control/rules_discharge') as RuleConfig[] /* FIXME */});
+            }
+        });
+
+//#if MODULE_DAY_AHEAD_PRICES_AVAILABLE
+        util.addApiEventListener("day_ahead_prices/prices", () => {
+            // Update chart every time new price data comes in
+            this.update_uplot();
+        });
+
+        // Update vertical "now" line on time change
+        effect(() => this.update_uplot());
+//#endif
+//#endif
+    }
+
+    override async sendSave(topic: 'batteries/config', new_config: API.getType['batteries/config']) {
+        for (let battery_slot = 0; battery_slot < options.BATTERIES_MAX_SLOTS; ++battery_slot) {
+            await API.save_unchecked(
+                `batteries/${battery_slot}/config`,
+                this.state.configs[battery_slot],
+                () => __("batteries.script.save_failed"));
+        }
+
+//#if MODULE_BATTERY_CONTROL_AVAILABLE
+        await API.save_unchecked('battery_control/config',
+                       this.state.battery_control_config,
+                       () => __("batteries.script.save_failed"));
+
+        // FIXME: API.save() cannot handle top-level array
+        await API.save_unchecked('battery_control/rules_charge',
+                       this.state.rules_charge,
+                       () => __("batteries.script.save_failed"));
+
+        // FIXME: API.save() cannot handle top-level array
+        await API.save_unchecked('battery_control/rules_discharge',
+                       this.state.rules_discharge,
+                       () => __("batteries.script.save_failed"));
+//#endif
+
+        await super.sendSave(topic, new_config);
+    }
+
+//#if MODULE_BATTERY_CONTROL_AVAILABLE
+//#if MODULE_DAY_AHEAD_PRICES_AVAILABLE
+    date_with_day_offset(date: Date, day_offset: number) {
+        let date_copy = new Date(date);
+        date_copy.setDate(date_copy.getDate() + day_offset);
+        return date_copy;
+    }
+
+    clamp(value: number, min: number, max: number) {
+        if (value < min) {
+            return min;
+        }
+        if (value > max) {
+            return max;
+        }
+        return value;
+    }
+
+    draw_selected_bars(uplot_data: UplotData, data_first_date_min: number, date_start: Date, date_end: Date, quarters: number, cheap: boolean, color: [number, number, number, number]) {
+        const start_index = this.clamp((date_start.valueOf() / (60 * 1000) - data_first_date_min) / 15, 0, uplot_data.values[1].length - 1); // Subtract duplicated value at the end.
+        const end_index   = this.clamp((date_end.valueOf()   / (60 * 1000) - data_first_date_min) / 15, 0, uplot_data.values[1].length - 1);
+
+        if (start_index >= end_index) {
+            return;
+        }
+
+        const price_index_pairs = uplot_data.values[1].slice(start_index, end_index).map((price, index) => ({ price, index }));
+        const sorted_pairs      = cheap ? price_index_pairs.sort((a, b) => a.price - b.price) : price_index_pairs.sort((a, b) => b.price - a.price);
+        const selected_indices  = sorted_pairs.slice(0, quarters).map(item => item.index + start_index);
+
+        selected_indices.forEach(index => {
+            uplot_data.lines_vertical.push({'index': index, 'text': '', 'color': color});
+        });
+    }
+
+    draw_cheap_expensive_bars(uplot_data: UplotData, data_first_date_min: number, date_start: Date, date_end: Date, cheap_quarters: number, expensive_quarters: number) {
+        this.draw_selected_bars(uplot_data, data_first_date_min, date_start, date_end, cheap_quarters,     true,  [40, 167, 69, 0.5]);
+        this.draw_selected_bars(uplot_data, data_first_date_min, date_start, date_end, expensive_quarters, false, [220, 53, 69, 0.5]);
+    }
+
+    update_uplot() {
+        // Use signal here to make effect() record its use, even
+        // if this function might exit early on its first call
+        const date_now = util.get_date_now_1m_update_rate();
+
+        if (this.uplot_wrapper_ref.current == null) {
+            return;
+        }
+
+        const dap_prices = API.get("day_ahead_prices/prices");
+        let data: UplotData;
+
+        if (dap_prices.prices.length == 0) {
+            data = {
+                keys: [null],
+                names: [null],
+                values: [null],
+                stacked: [null],
+                paths: [null],
+            }
+        } else {
+            data = {
+                keys: [null, 'price'],
+                names: [null, __("day_ahead_prices.content.electricity_price")],
+                values: [[], [], [], []],
+                stacked: [null, true],
+                paths: [null, UplotPath.Step],
+                default_visibilty: [null, true],
+                lines_vertical: []
+            }
+
+            let today_20h = new Date(date_now);
+            today_20h.setHours(20, 0, 0, 0);
+
+            const yesterday_20h = this.date_with_day_offset(today_20h, -1);
+            const tomorrow_20h  = this.date_with_day_offset(today_20h,  1);
+
+            const yesterday_20h_s = yesterday_20h.valueOf() / 1000;
+            const today_20h_s     = today_20h.valueOf()     / 1000;
+            const tomorrow_20h_s  = tomorrow_20h.valueOf()  / 1000;
+
+            const resolution_multiplier = dap_prices.resolution == 0 ? 15 : 60
+            const quarter_multiplier = resolution_multiplier / 15;
+
+            const data_end_time = (dap_prices.first_date + dap_prices.prices.length * resolution_multiplier) * 60;
+            const graph_end_time = data_end_time > tomorrow_20h_s ? tomorrow_20h_s : today_20h_s;
+            let graph_start_time = undefined;
+            let sample_time;
+            let sample_percent;
+
+            for (let i = 0; i < dap_prices.prices.length; i++) {
+                sample_time = (dap_prices.first_date + i * resolution_multiplier) * 60;
+
+                if (sample_time < yesterday_20h_s) {
+                    continue;
+                }
+
+                if (graph_start_time === undefined) {
+                    graph_start_time = sample_time;
+                }
+
+                if (sample_time >= graph_end_time) {
+                    break;
+                }
+
+                sample_percent = get_price_from_index(i, false) / 1000.0;
+
+                for (let j = 0; j < quarter_multiplier; j++) {
+                    data.values[0].push(sample_time);
+                    data.values[1].push(sample_percent);
+                    sample_time += 15 * 60;
+                }
+            }
+
+            // Duplicate final values to avoid cutting off the last bar.
+            data.values[0].push(sample_time - 1);
+            data.values[1].push(sample_percent);
+
+            this.draw_cheap_expensive_bars(data, graph_start_time / 60, yesterday_20h, today_20h,    this.state.battery_control_config.cheap_tariff_quarters, this.state.battery_control_config.expensive_tariff_quarters);
+            this.draw_cheap_expensive_bars(data, graph_start_time / 60, today_20h,     tomorrow_20h, this.state.battery_control_config.cheap_tariff_quarters, this.state.battery_control_config.expensive_tariff_quarters);
+
+            // Add vertical line at current time
+            const resolution_divisor = 15;
+            const diff = Math.trunc(date_now / 60000) - Math.trunc(graph_start_time / 60);
+            const index = Math.trunc(diff / resolution_divisor);
+            data.lines_vertical.push({'index': index, 'text': __("day_ahead_prices.content.now"), 'color': [64, 64, 64, 0.2]});
+        }
+
+        // Show loader or data depending on the availability of data
+        this.uplot_loader_ref.current.set_data(data && data.keys.length > 1);
+        this.uplot_wrapper_ref.current.set_data(data);
+    }
+//#endif
+//#endif
+
+    import_config(json: string, current_config: BatteryConfig) {
+        let new_config;
+
+        try {
+            new_config = JSON.parse(json);
+        }
+        catch (error) {
+            console.log("Batteries: JSON of imported config is malformed:", error.message);
+            throw new Error(__("batteries.content.battery_import_error_json_malformed"));
+        }
+
+        if (!util.isNonNullObject(new_config)) {
+            console.log("Batteries: JSON of imported config has no toplevel object");
+            throw new Error(__("batteries.content.battery_import_error_config_malformed"));
+        }
+
+        if (config_plugins[new_config[0]] === undefined) {
+            console.log("Batteries: Imported config has unknown class:", new_config[0]);
+            throw new Error(__("batteries.content.battery_import_error_class_unknown"));
+        }
+
+        if (config_plugins[new_config[0]].import_config === undefined) {
+            console.log("Batteries: Imported config class doesn't support import:", new_config[0]);
+            throw new Error(__("batteries.content.battery_import_error_import_unsupported"));
+        }
+
+        new_config = config_plugins[new_config[0]].import_config(new_config, current_config);
+
+        if (!util.hasValue(new_config)) {
+            throw new Error(__("batteries.content.battery_import_error_config_malformed"));
+        }
+
+        return new_config;
+    }
+
+    render() {
+        if (!util.render_allowed())
+            return <SubPage name="batteries" />;
+
+//#if MODULE_BATTERY_CONTROL_AVAILABLE
+        const battery_control_state = API.get("battery_control/state");
+        let battery_control_mode = battery_control_state.mode;
+        let active_charge_rule = battery_control_state.active_charge_rule;
+        let active_discharge_rule = battery_control_state.active_discharge_rule;
+        let status_charge: number;
+        let status_discharge: number;
+
+        switch (battery_control_mode) {
+            case BatteryMode.Block:
+                status_charge = 1;
+                status_discharge = 1;
+                break;
+            case BatteryMode.Normal:
+                status_charge = 0;
+                status_discharge = 0;
+                break;
+            case BatteryMode.BlockDischarge:
+                status_charge = 0;
+                status_discharge = 1;
+                break;
+            case BatteryMode.ForceCharge:
+                status_charge = 2;
+                status_discharge = 1;
+                break;
+            case BatteryMode.BlockCharge:
+                status_charge = 1;
+                status_discharge = 0;
+                break;
+            case BatteryMode.ForceDischarge:
+                status_charge = 1;
+                status_discharge = 2;
+                break;
+            default:
+                status_charge = -1;
+                status_discharge = -1;
+        }
+//#else
+        let battery_control_mode = BatteryMode.None;
+        let active_charge_rule: number = null;
+        let active_discharge_rule: number = null;
+//#endif
+
+        let active_battery_slots = Object.keys(this.state.configs).filter((battery_slot_str) => this.state.configs[parseInt(battery_slot_str)][0] != BatteryClassID.None);
+        let battery_mode_names = [
+            __("batteries.content.battery_mode_block"),
+            __("batteries.content.battery_mode_normal"),
+            __("batteries.content.battery_mode_block_discharge"),
+            __("batteries.content.battery_mode_force_charge"),
+            __("batteries.content.battery_mode_block_charge"),
+            __("batteries.content.battery_mode_force_discharge"),
+        ];
+
+        return (
+            <SubPage name="batteries" title={__("batteries.content.batteries")} colClasses="col-xl-10">
+                <SubPage.Status collapsed={!API.get("batteries/config").enabled}>
+                    <Alert variant="warning"> {__("batteries.content.experimental")}</Alert>
+
+{/*#if MODULE_BATTERY_CONTROL_AVAILABLE*/}
+                    <FormRow label={__("batteries.content.status_charge")} label_muted={API.get("battery_control/rules_charge")[active_charge_rule]?.desc}>
+                        <IndicatorGroup
+                            style="width: 100%"
+                            class="flex-wrap"
+                            value={status_charge}
+                            items={[
+                                ["success", __("batteries.content.status_normal")],
+                                ["warning", __("batteries.content.status_block")],
+                                ["warning", __("batteries.content.status_force")],
+                            ]}/>
+                    </FormRow>
+
+                    <FormRow label={__("batteries.content.status_discharge")} label_muted={API.get("battery_control/rules_discharge")[active_discharge_rule]?.desc}>
+                        <IndicatorGroup
+                            style="width: 100%"
+                            class="flex-wrap"
+                            value={status_discharge}
+                            items={[
+                                ["success", __("batteries.content.status_normal")],
+                                ["warning", __("batteries.content.status_block")],
+                                ["warning", __("batteries.content.status_force")],
+                            ]}/>
+                    </FormRow>
+
+{/*#if MODULE_DAY_AHEAD_PRICES_AVAILABLE*/}
+                    <FormRow label={__("batteries.content.schedule_graph")} label_muted={__("batteries.content.schedule_graph_muted")} hidden={!is_day_ahead_prices_enabled()}>
+                        <div class="card uplot-card">
+                            <div style="position: relative;"> {/* this plain div is necessary to make the size calculation stable in safari. without this div the height continues to grow */}
+                                <UplotLoader
+                                    ref={this.uplot_loader_ref}
+                                    show
+                                    marker_class="h4"
+                                    no_data={__("day_ahead_prices.content.no_data")}
+                                    loading={__("day_ahead_prices.content.loading")}>
+                                    <UplotWrapperB
+                                        ref={this.uplot_wrapper_ref}
+                                        class="batteries-chart"
+                                        sub_page="batteries"
+                                        color_cache_group="batteries.default"
+                                        show
+                                        on_mount={() => this.update_uplot()}
+                                        legend_time_label={__("day_ahead_prices.content.time")}
+                                        legend_time_with_minutes
+                                        aspect_ratio={3}
+                                        x_format={{hour: '2-digit', minute: '2-digit'}}
+                                        x_padding_factor={0}
+                                        x_include_date
+                                        y_unit="ct/kWh"
+                                        y_label={__("batteries.content.net_price_ct_per_kwh")}
+                                        y_digits={3}
+                                        padding={[30, 15, null, 5]}
+                                    />
+                                </UplotLoader>
+                            </div>
+                        </div>
+                    </FormRow>
+{/*#endif*/}
+{/*#endif*/}
+                </SubPage.Status>
+                <SubPage.Config id="batteries_config_form" isDirty={this.isDirty()} onSave={this.save} onDirtyChange={this.setDirty}>
+                    <Alert variant="warning" hidden={API.get("batteries/config").enabled}> {__("batteries.content.experimental")}</Alert>
+                    <div class="form-group">
+                        <FormRow label={__("batteries.content.enable_battery_control")}>
+                            <Switch
+                                desc={__("batteries.content.enable_battery_control_desc")}
+                                checked={this.state.enabled}
+                                onClick={this.toggle("enabled")}
+                            />
+                        </FormRow>
+
+                        <Table
+                            columnNames={[__("batteries.content.table_battery_display_name"), __("batteries.content.table_battery_class"), __("batteries.content.table_battery_state")]}
+                            rows={active_battery_slots.map((battery_slot_str) => {
+                                let battery_slot = parseInt(battery_slot_str);
+                                let config = this.state.configs[battery_slot];
+                                let battery_state_name = undefined;
+                                let battery_state_warning = undefined;
+                                let battery_state_info = config_plugins[config[0]].get_state_info(battery_slot, config, this.state.states[battery_slot]);
+
+                                if (util.hasValue(battery_state_info)) {
+                                    let warning_icon = undefined;
+
+                                    if (util.hasValue(battery_state_info.warning)) {
+                                        battery_state_warning = battery_state_info.warning;
+                                        warning_icon = <div class="col"><span onClick={() => this.setState((prevState) => ({show_warnings: {...prevState.show_warnings, [battery_slot]: !prevState.show_warnings[battery_slot]}}))}><AlertTriangle {...{class: "alter-triangle" + (this.state.show_warnings[battery_slot] ? " alter-triangle-expanded" : ""), style: "cursor: pointer;"} as any} /></span></div>;
+                                    }
+                                    else if (this.state.show_warnings[battery_slot]) {
+                                        this.setState((prevState) => ({show_warnings: {...prevState.show_warnings, [battery_slot]: false}}));
+                                    }
+
+                                    battery_state_name = <div class="row gx-2 align-items-center"><div class="col-auto">{battery_state_info.state_name}</div>{warning_icon}</div>;
+                                }
+                                else if (this.state.show_warnings[battery_slot]) {
+                                    this.setState((prevState) => ({show_warnings: {...prevState.show_warnings, [battery_slot]: false}}));
+                                }
+
+                                return {
+                                    columnValues: [
+                                        get_battery_name(this.state.configs, battery_slot),
+                                        config_plugins[config[0]].name(),
+                                        battery_state_name,
+                                    ],
+                                    extraValue: this.state.show_warnings[battery_slot] && battery_state_warning ? battery_state_warning : undefined,
+                                    extraKey: `extra-${battery_slot}`,
+                                    extraMode: "static",
+                                    extraWrapper: (value) => <Alert variant="warning" className="mb-0 mt-2 p-2">{value}</Alert>,
+                                    extraFieldWrapper: (value) => <Alert variant="warning" className="mb-2 p-2">{value}</Alert>,
+                                    editTitle: __("batteries.content.edit_battery_title"),
+                                    onEditShow: async () => {
+                                        let config_plugin = config_plugins[config[0]];
+                                        if (!config_plugin) {
+                                            console.log("No config plugin available for battery class", config[0]);
+                                            this.setState({edit_battery_slot: battery_slot, edit_battery_config: [BatteryClassID.None, null]});
+                                            return;
+                                        }
+                                        this.setState({edit_battery_slot: battery_slot, edit_battery_config: config_plugin.clone_config(config)});
+                                    },
+                                    onEditGetChildren: () => {
+                                        let slots: [string, string][] = [];
+                                        let classes: [string, string][] = [];
+
+                                        for (let free_battery_slot = 0; free_battery_slot < options.BATTERIES_MAX_SLOTS; ++free_battery_slot) {
+                                            if (this.state.configs[free_battery_slot][0] == BatteryClassID.None || free_battery_slot == battery_slot) {
+                                                slots.push([free_battery_slot.toString(), free_battery_slot.toString()]);
+                                            }
+                                        }
+
+                                        for (let battery_class in config_plugins) {
+                                            classes.push([battery_class.toString(), config_plugins[battery_class].name()])
+                                        }
+
+                                        let rows: ComponentChild[] = [<>
+                                            <FormRow label={__("batteries.content.edit_battery_slot")}>
+                                                <InputSelect
+                                                    items={slots}
+                                                    onValue={(v) => this.setState({edit_battery_slot: parseInt(v)})}
+                                                    value={this.state.edit_battery_slot.toString()} />
+                                            </FormRow>
+                                            <FormRow label={__("batteries.content.edit_battery_class")}>
+                                                <InputSelect
+                                                    placeholder={__("select")}
+                                                    items={classes}
+                                                    onValue={(v) => {
+                                                        let battery_class = parseInt(v);
+
+                                                        if (battery_class != this.state.edit_battery_config[0]) {
+                                                            if (battery_class == BatteryClassID.None) {
+                                                                this.setState({edit_battery_config: [BatteryClassID.None, null]});
+                                                            }
+                                                            else {
+                                                                this.setState({edit_battery_config: config_plugins[battery_class].new_config()});
+                                                            }
+                                                        }
+                                                    }}
+                                                    value={this.state.edit_battery_config[0].toString()} />
+                                            </FormRow>
+                                        </>]
+
+                                        if (this.state.edit_battery_config[0] != BatteryClassID.None) {
+                                            rows = rows.concat(<Fragment key={`edit_battery_children_${this.state.edit_battery_config[0]}`}>{config_plugins[this.state.edit_battery_config[0]].get_edit_children(this.state.edit_battery_slot, this.state.edit_battery_config, (battery_config) => this.setState({edit_battery_config: battery_config}))}</Fragment>);
+                                        }
+
+                                        return rows;
+                                    },
+                                    onEditSubmit: async () => {
+                                        this.setState({configs: {...this.state.configs, [battery_slot]: [BatteryClassID.None, null], [this.state.edit_battery_slot]: this.state.edit_battery_config}});
+                                        this.setDirty(true);
+                                    },
+                                    onEditHide: async () => {
+                                        if (this.state.edit_battery_config[0] != BatteryClassID.None && config_plugins[this.state.edit_battery_config[0]].hide) {
+                                            config_plugins[this.state.edit_battery_config[0]].hide();
+                                        }
+                                    },
+                                    onRemoveClick: async () => {
+                                        this.setState({configs: {...this.state.configs, [battery_slot]: [BatteryClassID.None, null]}});
+                                        this.setDirty(true);
+                                        return true;
+                                    },
+                                    onEditImport: async (json: string) => {
+                                        this.setState({edit_battery_config: this.import_config(json, this.state.edit_battery_config)});
+                                    },
+                                    onEditExport: this.state.edit_battery_config[0] != BatteryClassID.None && config_plugins[this.state.edit_battery_config[0]].export_config ? async () => {
+                                        return JSON.stringify(config_plugins[this.state.edit_battery_config[0]].export_config(this.state.edit_battery_config), null, 4);
+                                    } : undefined,
+                                    editExportBasename: __("batteries.content.battery_export_basename") + (this.state.edit_battery_config[0] != BatteryClassID.None && config_plugins[this.state.edit_battery_config[0]].export_basename_suffix ? config_plugins[this.state.edit_battery_config[0]].export_basename_suffix() : ""),
+                                }
+                            })}
+                            addEnabled={active_battery_slots.length < options.BATTERIES_MAX_SLOTS}
+                            addTitle={__("batteries.content.add_battery_title")}
+                            addMessage={__("batteries.content.add_battery_message")(active_battery_slots.length, options.BATTERIES_MAX_SLOTS)}
+                            onAddShow={async () => {
+                                let add_battery_slot = null;
+
+                                for (let battery_slot = 0; battery_slot < options.BATTERIES_MAX_SLOTS; ++battery_slot) {
+                                    if (this.state.configs[battery_slot][0] == BatteryClassID.None) {
+                                        add_battery_slot = battery_slot;
+                                        break;
+                                    }
+                                }
+
+                                this.setState({add_battery_slot: add_battery_slot, add_battery_config: [BatteryClassID.None, null]});
+                            }}
+                            onAddGetChildren={() => {
+                                let slots: [string, string][] = [];
+                                let classes: [string, string][] = [];
+
+                                for (let free_battery_slot = 0; free_battery_slot < options.BATTERIES_MAX_SLOTS; ++free_battery_slot) {
+                                    if (this.state.configs[free_battery_slot][0] == BatteryClassID.None) {
+                                        slots.push([free_battery_slot.toString(), free_battery_slot.toString()]);
+                                    }
+                                }
+
+                                for (let battery_class in config_plugins) {
+                                    classes.push([battery_class.toString(), config_plugins[battery_class].name()])
+                                }
+
+                                let rows: ComponentChild[] = [
+                                    <FormRow label={__("batteries.content.add_battery_slot")}>
+                                        <InputSelect
+                                            placeholder={__("select")}
+                                            items={slots}
+                                            onValue={(v) => this.setState({add_battery_slot: parseInt(v)})}
+                                            value={this.state.add_battery_slot !== null ? this.state.add_battery_slot.toString() : null}
+                                            required />
+                                    </FormRow>,
+                                    <FormRow label={__("batteries.content.add_battery_class")}>
+                                        <InputSelect
+                                            placeholder={__("select")}
+                                            items={classes}
+                                            onValue={(v) => {
+                                                let battery_class = parseInt(v);
+
+                                                if (battery_class != this.state.add_battery_config[0]) {
+                                                    if (battery_class == BatteryClassID.None) {
+                                                        this.setState({add_battery_config: [BatteryClassID.None, null]});
+                                                    }
+                                                    else {
+                                                        this.setState({add_battery_config: config_plugins[battery_class].new_config()});
+                                                    }
+                                                }
+                                            }}
+                                            value={this.state.add_battery_config[0].toString()}
+                                            required />
+                                    </FormRow>
+                                ];
+
+                                if (this.state.add_battery_config[0] != BatteryClassID.None) {
+                                    rows = rows.concat(<Fragment key={`add_battery_children_${this.state.edit_battery_config[0]}`}>{config_plugins[this.state.add_battery_config[0]].get_edit_children(this.state.add_battery_slot, this.state.add_battery_config, (battery_config) => this.setState({add_battery_config: battery_config}))}</Fragment>);
+                                }
+
+                                return rows;
+                            }}
+                            onAddSubmit={async () => {
+                                this.setState({configs: {...this.state.configs, [this.state.add_battery_slot]: this.state.add_battery_config}});
+                                this.setDirty(true);
+                            }}
+                            onAddHide={async () => {
+                                if (this.state.add_battery_config[0] != BatteryClassID.None && config_plugins[this.state.add_battery_config[0]].hide) {
+                                    await config_plugins[this.state.add_battery_config[0]].hide();
+                                }
+                            }}
+                            onAddImport={async (json: string) => {
+                                this.setState({add_battery_config: this.import_config(json, this.state.add_battery_config)});
+                            }}
+                            onAddExport={this.state.add_battery_config[0] != BatteryClassID.None && config_plugins[this.state.add_battery_config[0]].export_config ? async () => {
+                                return JSON.stringify(config_plugins[this.state.add_battery_config[0]].export_config(this.state.add_battery_config), null, 4);
+                            } : undefined}
+                            addExportBasename={__("batteries.content.battery_export_basename") + (this.state.add_battery_config[0] != BatteryClassID.None && config_plugins[this.state.add_battery_config[0]].export_basename_suffix ? config_plugins[this.state.add_battery_config[0]].export_basename_suffix() : "")}
+                            />
+                    </div>
+
+{/*#if MODULE_BATTERY_CONTROL_AVAILABLE*/}
+{/*#if MODULE_DAY_AHEAD_PRICES_AVAILABLE*/}
+                    <FormSeparator heading={__("batteries.content.dynamic_tariff_schedule")} />
+                    <FormRow label={__("batteries.content.schedule_cheap_hours")} label_muted={__("batteries.content.schedule_hours_muted")} help={__("batteries.content.schedule_cheap_hours_help")}>
+                        <InputFloat
+                            unit="h"
+                            value={this.state.battery_control_config.cheap_tariff_quarters * 100 / 4}
+                            onValue={(v) => this.setState({battery_control_config: {...this.state.battery_control_config, cheap_tariff_quarters: Math.round(v * 4 / 100)}}, this.update_uplot)}
+                            digits={2}
+                            min={0}
+                            max={2000 - this.state.battery_control_config.expensive_tariff_quarters * 100 / 4}
+                        />
+                    </FormRow>
+
+                    <FormRow label={__("batteries.content.schedule_expensive_hours")} label_muted={__("batteries.content.schedule_hours_muted")} help={__("batteries.content.schedule_expensive_hours_help")}>
+                        <InputFloat
+                            unit="h"
+                            value={this.state.battery_control_config.expensive_tariff_quarters * 100 / 4}
+                            onValue={(v) => this.setState({battery_control_config: {...this.state.battery_control_config, expensive_tariff_quarters: Math.round(v * 4 / 100)}}, this.update_uplot)}
+                            digits={2}
+                            min={0}
+                            max={2000 - this.state.battery_control_config.cheap_tariff_quarters * 100 / 4}
+                        />
+                    </FormRow>
+{/*#endif*/}
+
+                    <FormSeparator heading={__("batteries.content.rules_charge")} />
+                    <div class="form-group">
+                        <RulesEditor category="charge" rules={this.state.rules_charge} active_rule={active_charge_rule} on_rules={(rules: RuleConfig[]) => {
+                            this.setState({rules_charge: rules});
+                            this.setDirty(true);
+                        }} />
+                    </div>
+
+                    <FormSeparator heading={__("batteries.content.rules_discharge")} />
+                    <div class="form-group">
+                        <RulesEditor category="discharge" rules={this.state.rules_discharge} active_rule={active_discharge_rule} on_rules={(rules: RuleConfig[]) => {
+                            this.setState({rules_discharge: rules});
+                            this.setDirty(true);
+                        }} />
+                    </div>
+
+{/*#endif*/}
+                </SubPage.Config>
+            </SubPage>
+        );
+    }
+}
+
+export function pre_init() {
+    config_plugins = config_plugins_pre_init();
+}
+
+export function init() {
+    config_plugins_init();
+
+    register_status_provider("batteries", {
+        name: () => __("batteries.status.batteries"),
+        href: "#batteries",
+        get_status: () => {
+            const config = API.get("batteries/config");
+            const state = API.get("battery_control/state");
+
+            if (!config.enabled) {
+                return {status: ModuleStatus.Disabled};
+            }
+
+            return {
+                status: ModuleStatus.Ok,
+                text: () => __("batteries.content.battery_state_by_mode")(state.mode)
+            };
+        }
+    });
+}

@@ -1,0 +1,7 @@
+{
+  "name": "TeslaBLEClean",
+  "version": "0.1.0-checkpoint",
+  "description": "Apache-2.0 Tesla core bound to WARP4; regression-coverage acceptance remains a checkpoint",
+  "license": "Apache-2.0",
+  "build": {"includeDir": "include", "srcDir": "src"}
+}

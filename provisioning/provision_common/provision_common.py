@@ -1,0 +1,583 @@
+from collections import namedtuple
+from contextlib import contextmanager
+import datetime
+import os
+import re
+import secrets
+import ssl
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import urllib.request
+import fcntl
+from tinkerforge_util.colored import red, green
+from provisioning.tinkerforge.bricklet_rgb_led_v2 import BrickletRGBLEDV2
+from provisioning.tinkerforge.ip_connection import IPConnection, base58encode, base58decode, BASE58
+from provisioning.provision_common.wifi_pass import calculate_passphrase
+from provisioning.provision_common.zbase32 import zbase32encode, zbase32decode, ZBASE32
+
+TEST_REPORTS_DIRECTORY = os.path.abspath(os.path.join(os.path.dirname(os.path.realpath(__file__)), '..', '..', '..', 'test-reports'))
+
+rnd = secrets.SystemRandom()
+
+PORT = None
+
+def common_init(port):
+    global PORT
+    PORT = port
+
+# use "with ChangedDirectory('/path/to/abc')" instead of "os.chdir('/path/to/abc')"
+class ChangedDirectory:
+    def __init__(self, path):
+        self.path = path
+        self.previous_path = None
+
+    def __enter__(self):
+        self.previous_path = os.getcwd()
+        os.chdir(self.path)
+
+    def __exit__(self, type_, value, traceback):
+        os.chdir(self.previous_path)
+
+@contextmanager
+def temp_file():
+    fd, name = tempfile.mkstemp()
+    try:
+        yield fd, name
+    finally:
+        try:
+            os.remove(name)
+        except IOError:
+            print('Failed to clean up temp file {}'.format(name))
+
+def run(args, capture_stderr=False):
+    p = subprocess.run(args,
+                       check=True,
+                       stdout=subprocess.PIPE,
+                       stderr=subprocess.PIPE if capture_stderr else None,
+                       env=dict(os.environ, LC_ALL="en_US.UTF-8", LANG="C", LANGUAGE="en"))
+
+    if capture_stderr:
+        return (p.stdout.decode('utf-8').split("\n"), p.stderr.decode('utf-8').split("\n"))
+    return p.stdout.decode('utf-8').split("\n")
+
+
+def esptool(args, override_port=None, capture_stderr=False):
+    return run(["uv", "run", "esptool", "--port", PORT if override_port is None else override_port, *args], capture_stderr)
+
+def espefuse(args, override_port=None):
+    return run(["uv", "run", "espefuse", "--port", PORT if override_port is None else override_port, *args])
+
+# inherit from BaseException instead of Exception to avoid being handled by
+# try/except blocks that handle Exception instances. sys.exit() raises a
+# SystemExit exception that inherits from BaseException for the same reason
+class FatalError(BaseException):
+    pass
+
+def fatal_error(*message, other_exception=None):
+    exception = FatalError(' '.join([str(part) for part in message]))
+
+    if other_exception != None:
+        raise exception from other_exception
+
+    raise exception
+
+@contextmanager
+def wifi(ssid, passphrase):
+    # Remove old connection config if it exists.
+    try:
+        run(["sudo", "nmcli", "con", "del", ssid])
+    except subprocess.CalledProcessError as e:
+        pass
+
+    try:
+        output = "\n".join(run(["sudo", "nmcli", "dev", "wifi", "connect", ssid, "password", passphrase]))
+    except subprocess.CalledProcessError as e:
+        e.cmd[7] = "<hidden>"
+        raise
+
+    if "successfully activated with" not in output:
+        run(["sudo", "nmcli", "con", "del", ssid])
+        fatal_error("Failed to connect to wifi.", "nmcli output was:", output)
+
+    try:
+        yield
+    finally:
+        output = "\n".join(run(["sudo", "nmcli", "con", "del", ssid]))
+        if "successfully deleted." not in output:
+            print("Failed to clean up wifi connection {}".format(ssid))
+
+
+def get_new_uid():
+    return int(urllib.request.urlopen('https://stagingwww.tinkerforge.com/uid', timeout=15).read())
+
+def check_if_esp_is_sane_and_get_mac(ignore_flash_errors=False, allowed_revision=[3, 3.1], override_port=None):
+    output = esptool(['flash-id'], override_port=override_port)  # flash-id to get the flash size
+    chip_type = None
+    chip_revision = None
+    flash_size = None
+    crystal = None
+    mac = None
+
+    chip_type_re = re.compile(r'Chip type:\s+(ESP32-[^\s]*) \(revision v?([^\)]*)\)')
+    flash_size_re = re.compile(r'Detected flash size:\s+(\d*[KM]B)')
+    crystal_re = re.compile(r'Crystal frequency:\s+(\d*MHz)')
+    mac_re = re.compile(r'MAC:\s+((?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2})')
+
+    for line in output:
+        chip_type_match = chip_type_re.match(line)
+        if chip_type_match:
+            chip_type, chip_revision = chip_type_match.group(1, 2)
+            chip_revision = float(chip_revision)
+
+        flash_size_match = flash_size_re.match(line)
+        if flash_size_match:
+            flash_size = flash_size_match.group(1)
+
+        crystal_match = crystal_re.match(line)
+        if crystal_match:
+            crystal = crystal_match.group(1)
+
+        mac_match = mac_re.match(line)
+        if mac_match:
+            mac = mac_match.group(1)
+
+    for name, val, expected in [("chip type", chip_type, "ESP32-D0WD-V3"),
+                                ("chip revision", chip_revision, allowed_revision),
+                                ("crystal", crystal, "40MHz"),
+                                ("flash_size", flash_size, "16MB" if not ignore_flash_errors else None)]:
+        if expected is not None and ((isinstance(expected, list) and val not in expected) or (not isinstance(expected, list) and val != expected)):
+            fatal_error("{} was {}, not the expected {}".format(name, val, expected), "esptool output was:", '\n'.join(output))
+
+    return mac
+
+def get_esp_mac():
+    esptool(['read-mac'])
+
+def get_espefuse_tasks(*, override_port=None, secure_mode=False, mac_address=None, use_two_int_format=False):
+    assert mac_address != None
+
+    have_to_set_voltage_fuses = False
+    have_to_set_block_3 = False
+
+    output = espefuse(['dump'], override_port=override_port)
+
+    def parse_regs(line, regs):
+        match = re.search(r'([0-9a-f]{8}\s?)' * regs, line)
+        if not match:
+            return False, []
+
+        return True, [int(match.group(x + 1), base=16) for x in range(regs)]
+
+    blocks = [None] * 4
+    for line in output:
+        if line.startswith('BLOCK0'):
+            success, blocks[0] = parse_regs(line, 7)
+        elif line.startswith('BLOCK1'):
+            success, blocks[1] = parse_regs(line, 8)
+        elif line.startswith('BLOCK2'):
+            success, blocks[2] = parse_regs(line, 8)
+        elif line.startswith('BLOCK3'):
+            success, blocks[3] = parse_regs(line, 8)
+        else:
+            continue
+        if not success:
+            fatal_error("Failed to read eFuses", "could not parse line '{}'".format(line), "espefuse output was", '\n'.join(output))
+
+    if any(b is None for b in blocks):
+        fatal_error("Failed to read eFuses", "Not all blocks where found", "espefuse output was", '\n'.join(output))
+
+    if not secure_mode and any(i != 0 for i in blocks[1]):
+        fatal_error("eFuse block 1 is not empty.", "espefuse output was", '\n'.join(output))
+
+    if not secure_mode and any(i != 0 for i in blocks[2]):
+        fatal_error("eFuse block 2 is not empty.", "espefuse output was", '\n'.join(output))
+
+    voltage_fuses = blocks[0][4] & 0x0001c000
+    if voltage_fuses == 0x0001c000:
+        have_to_set_voltage_fuses = False
+    elif voltage_fuses == 0x00000000:
+        have_to_set_voltage_fuses = True
+    else:
+        fatal_error("Flash voltage efuses have unexpected value {}".format(voltage_fuses), "espefuse output was", '\n'.join(output))
+
+    block3_bytes = b''.join([r.to_bytes(4, "little") for r in blocks[3]])
+
+    passphrase, uid, passphrase_empty, uid_empty = block3_to_payload(block3_bytes, mac_address, use_two_int_format=use_two_int_format)
+
+    if passphrase_empty and uid_empty:
+        have_to_set_block_3 = True
+    elif passphrase_empty or uid_empty:
+        fatal_error("Block 3 efuses have unexpected value {}".format(block3_bytes.hex()),
+                    "parsed values are passphrase={} and uid={}".format(passphrase, uid),
+                    "espefuse output was",
+                    '\n'.join(output))
+
+    return have_to_set_voltage_fuses, have_to_set_block_3, passphrase, uid
+
+def last_base58_uid_num(use_two_int_format):
+    return 257899 if not use_two_int_format else 0xFFFFFFFF
+
+def block3_to_payload(block3, mac_address, *, use_two_int_format=False):
+    mac_address_bytes = bytes([int(x, base=16) for x in mac_address.split(':')])
+    uid_bytes = bytes(block3[28:32])
+    uid_num = int.from_bytes(uid_bytes, "little")
+
+    if uid_num <= last_base58_uid_num(use_two_int_format):
+        passphrase_bytes_list = [[0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0]]
+        passphrase_bytes_list[0] = block3[7:10]
+        passphrase_bytes_list[1][0:2] = block3[10:12]
+        passphrase_bytes_list[1][2] = block3[20]
+        passphrase_bytes_list[2][0:2] = block3[21:23]
+        passphrase_bytes_list[2][2] = block3[24]
+        passphrase_bytes_list[3] = block3[25:28]
+
+        passphrase_bytes_list = [bytes(chunk) for chunk in passphrase_bytes_list]
+        passphrase = [base58encode(int.from_bytes(chunk, "little")) for chunk in passphrase_bytes_list]
+        uid = base58encode(uid_num)
+        passphrase = '-'.join(passphrase)
+
+        empty_passphrase = '1-1-1-1'
+        empty_uid = '1'
+    else:
+        uid = zbase32encode(uid_num)
+        passphrase = calculate_passphrase(block3, mac_address_bytes)
+
+        empty_passphrase = calculate_passphrase(bytearray(32), mac_address_bytes)
+        empty_uid = 'y'
+
+
+    if use_two_int_format:
+        uid1 = str(uid_num & 0xFF).zfill(3)
+        uid2 = str((uid_num >> 8) & 0xFFFFFF).zfill(4)
+        uid = uid1 + '-' + uid2
+        empty_uid = '000-0000'
+
+    return passphrase, uid, passphrase == empty_passphrase, uid == empty_uid
+
+def handle_voltage_fuses(set_voltage_fuses):
+    if not set_voltage_fuses:
+        print("Voltage fuses already burned.")
+        return
+
+    print("Burning flash voltage eFuse to 3.3V")
+    espefuse(["--do-not-confirm", "set-flash-voltage", "3.3V"])
+
+# Copied over from https://stagingwww.tinkerforge.com/uid implementation
+def sn_helper(next_uid_path):
+    sn_path = str(next_uid_path)
+
+    f = open(sn_path, 'r+')
+    f.seek(0)
+    timeout = time.time() + 10
+
+    while timeout > time.time():
+        try:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            break
+        except OSError as e:
+            if e.errno in [errno.EACCES, errno.EAGAIN]:
+                time.sleep(0.1)
+                continue
+
+            raise
+    else:
+        raise Exception('Error: timeout while locking ' + sn_path)
+
+    sn = int(f.read().strip()) + 1
+
+    f.seek(0)
+    f.write(str(sn))
+    f.close()
+
+    return sn
+
+def handle_block3_fuses(set_block_3, uid, passphrase, *, offline=False, mac_address=None):
+    assert mac_address != None
+
+    if not set_block_3:
+        print("Block 3 eFuses already set. UID: {}, Passphrase valid".format(uid))
+        return uid, passphrase
+
+    if offline:
+        uid_num = sn_helper("/home/tester/next_uid.txt")
+    else:
+        print("Reading staging password")
+        try:
+            with open('staging_password.txt', 'rb') as f:
+                staging_password = f.read().decode('utf-8').split('\n')[0].strip()
+        except:
+            fatal_error('staging_password.txt missing or malformed')
+            sys.exit(0)
+
+        print("Installing auth_handler")
+        context = ssl.create_default_context()
+
+        https_handler = urllib.request.HTTPSHandler(context=context)
+
+        auth_handler = urllib.request.HTTPBasicAuthHandler()
+        auth_handler.add_password(realm='Staging',
+                                    uri='https://stagingwww.tinkerforge.com',
+                                    user='staging',
+                                    passwd=staging_password)
+
+        opener = urllib.request.build_opener(https_handler, auth_handler)
+        urllib.request.install_opener(opener)
+
+        print("Generating UID")
+        uid_num = get_new_uid()
+
+    if uid_num > last_base58_uid_num(False):
+        encode_uid = zbase32encode
+        decode_uid = zbase32decode
+    else:
+        encode_uid = base58encode
+        decode_uid = base58decode
+
+    uid = encode_uid(uid_num)
+
+    if uid_num <= last_base58_uid_num(False):
+        print("Generating passphrase")
+        # smallest 4-char-base58 string is "2111" = 195112 ("ZZZ"(= 195111) + 1)
+        # largest 4-char-base58 string is "ZZZZ" = 11316495
+        # Directly selecting chars out of the BASE58 alphabet can result in numbers with leading 1s
+        # (those map to 0, so de- and reencoding will produce the same number without the leading 1)
+        wifi_passphrase = [base58encode(rnd.randint(base58decode("2111"), base58decode("ZZZZ"))) for i in range(4)]
+
+    print("UID: " + uid)
+
+    #if uid_num <= last_base58_uid_num(False):
+    #    print("Passphrase: {}-{}-{}-{}".format(*wifi_passphrase))
+
+    print("Generating efuse binary")
+    uid_bytes = decode_uid(uid).to_bytes(4, byteorder='little')
+    binary = bytearray(32)
+    binary[28:32] = uid_bytes
+
+    if uid_num <= last_base58_uid_num(False):
+        passphrase_bytes_list = [base58decode(chunk).to_bytes(3, byteorder='little') for chunk in wifi_passphrase]
+
+        #56-95: 5 byte
+        #160-183: 3 byte
+        #192-255: 8 byte
+        # = 16 byte
+
+        # 4 byte (uid) + 3 byte * 4 (wifi_passphrase) = 16 byte
+        binary[7:10] = passphrase_bytes_list[0]
+        binary[10:12] = passphrase_bytes_list[1][0:2]
+        binary[20] = passphrase_bytes_list[1][2]
+        binary[21:23] = passphrase_bytes_list[2][0:2]
+        binary[24] = passphrase_bytes_list[2][2]
+        binary[25:28] = passphrase_bytes_list[3]
+
+        wifi_passphrase_str = '-'.join(wifi_passphrase)
+    else:
+        binary[2:23] = secrets.token_bytes(21)
+        binary[24:28] = secrets.token_bytes(4)
+
+        mac_address_bytes = bytes([int(x, base=16) for x in mac_address.split(':')])
+        wifi_passphrase_str = calculate_passphrase(binary, mac_address_bytes)
+
+    with temp_file() as (fd, name):
+        with os.fdopen(fd, 'wb') as f:
+            f.write(binary)
+
+        print("Burning UID and Wifi passphrase eFuses")
+        espefuse(["--do-not-confirm", "burn-block-data", "BLOCK3", name])
+
+    return uid, wifi_passphrase_str
+
+def handle_block3_fuses_with_two_int_format(set_block_3, uid):
+    if not set_block_3:
+        print("Block 3 eFuses already set. UID: {}".format(uid))
+        return uid
+
+    print("UID: " + uid)
+
+    uid_parts = uid.split('-')
+    uid1 = int(uid_parts[1]) # max 8 bit
+    uid2 = int(uid_parts[2]) # max 24 bit
+    if (uid1 > 0xFF) or (uid2 > 0xFFFFFF):
+        print('UID malformed')
+        return None
+
+    print("Generating efuse binary")
+    uid_bytes = (uid1 | (uid2 << 8)).to_bytes(4, byteorder='little')
+
+    #56-95: 5 byte
+    #160-183: 3 byte
+    #192-255: 8 byte
+    # = 16 byte
+
+    # wifi_passphrase unused
+    # 4 byte (uid) + 3 byte * 4 (wifi_passphrase) = 16 byte
+    binary = bytearray(32)
+    binary[28:32] = uid_bytes
+
+    with temp_file() as (fd, name):
+        with os.fdopen(fd, 'wb') as f:
+            f.write(binary)
+
+        print("Burning UID eFuses")
+        espefuse(["--do-not-confirm", "burn-block-data", "BLOCK3", name])
+
+    return uid
+
+def erase_flash():
+    output = '\n'.join(esptool(["erase-flash"]))
+
+    if "Flash memory erased successfully" not in output:
+        fatal_error("Failed to erase flash.",
+                    "esptool output was",
+                    output)
+
+def flash_firmware(path, reset=True):
+    output = "\n".join(esptool(["--baud", "921600",
+                                "--before", "default_reset",
+                                "--after", "hard_reset" if reset else "no_reset",
+                                "write-flash",
+                                "--flash_mode", "dio",
+                                "--flash_freq", "40m",
+                                "--flash_size", "16MB",
+                                "0x1000", path]))
+
+    if "Hash of data verified." not in output:
+        fatal_error("Failed to flash firmware.",
+                    "esptool output was",
+                    output)
+
+def wait_for_wifi(ssid, timeout_s):
+    start = time.time()
+    last_scan = 0
+    while time.time() - start < timeout_s:
+        if time.time() - last_scan > 15:
+            try:
+                run(["sudo", "nmcli", "dev", "wifi", "rescan"])
+            except:
+                pass
+            last_scan = time.time()
+        output = '\n'.join(run(["sudo", "nmcli", "dev", "wifi", "list"]))
+
+        if ssid in output:
+            return True
+        time.sleep(1)
+    return False
+
+def blink_thread_fn(rgbs, stop_event):
+    while not stop_event.is_set():
+        for rgb in rgbs:
+            rgb.set_rgb_value(0,63,0)
+            time.sleep(0.5)
+        for rgb in rgbs:
+            rgb.set_rgb_value(0,0,0)
+            time.sleep(0.5)
+
+def now():
+    return datetime.datetime.utcnow().replace(tzinfo=datetime.timezone.utc).isoformat()
+
+def my_input(s, color_fn=green):
+    print(color_fn(s) + " ", end="")
+    return input("")
+
+Enum = namedtuple('Enum', 'uid hardware_version firmware_version device_identifier position')
+
+def cb_enumerate(uids, uid, connected_uid, position, hardware_version, firmware_version,
+                 device_identifier, enumeration_type):
+    if enumeration_type == IPConnection.ENUMERATION_TYPE_DISCONNECTED:
+        print("")
+        return
+
+    uids.add(Enum(uid, hardware_version, firmware_version, device_identifier, position))
+
+def enumerate_devices(ipcon):
+    uids = set()
+    # Register Enumerate Callback
+    ipcon.register_callback(IPConnection.CALLBACK_ENUMERATE, lambda *args: cb_enumerate(uids, *args))
+
+    start = time.time()
+    while time.time() - start < 10:
+        ipcon.enumerate()
+        if len(uids) == 6:
+            break
+        time.sleep(1)
+
+    return uids
+
+def test_bricklet_ports(ipcon, esp_device_id, is_warp):
+    enums = enumerate_devices(ipcon)
+
+    if is_warp:
+        if len(enums) != 6 or any(x.device_identifier not in [BrickletRGBLEDV2.DEVICE_IDENTIFIER, esp_device_id] for x in enums):
+            fatal_error("Expected 6 RGB LED 2.0 bricklets but found {}".format("\n\t".join("Port {}: {}".format(x.position, x.device_identifier) for x in enums)))
+    if not is_warp:
+        if len(enums) != 7 or any(x.device_identifier not in [BrickletRGBLEDV2.DEVICE_IDENTIFIER, esp_device_id] for x in enums):
+            fatal_error("Expected 6 RGB LED 2.0 bricklets and the Brick itself but found {}".format("\n\t".join("Port {}: {}".format(x.position, x.device_identifier) for x in enums)))
+
+    enums = sorted(enums, key=lambda x: x.position)
+
+    bricklets = [(enum.position, BrickletRGBLEDV2(enum.uid, ipcon)) for enum in enums if enum.device_identifier == BrickletRGBLEDV2.DEVICE_IDENTIFIER]
+    error_count = 0
+    for bricklet_port, rgb in bricklets:
+        rgb.set_rgb_value(127, 127, 0)
+        time.sleep(0.5)
+        if rgb.get_rgb_value() == (127, 127, 0):
+            rgb.set_rgb_value(0, 127, 0)
+        else:
+            print(red("Setting color failed on port {}.".format(bricklet_port)))
+            error_count += 1
+
+    if error_count != 0:
+        fatal_error("")
+
+    stop_event = threading.Event()
+    blink_thread = threading.Thread(target=blink_thread_fn, args=([x[1] for x in bricklets], stop_event))
+    blink_thread.start()
+    input("Bricklet ports seem to work. Press any key to continue")
+    stop_event.set()
+    blink_thread.join()
+    ipcon.disconnect()
+
+def mkdir_open(path, *args, **kwargs):
+    os.makedirs(os.path.split(path)[0], exist_ok=True)
+    return open(path, *args, **kwargs)
+
+def test_report_pull():
+    print('Checking test-reports repo')
+
+    try:
+        subprocess.check_output(['git', 'pull'], stderr=subprocess.STDOUT, encoding='utf-8', cwd=TEST_REPORTS_DIRECTORY)
+    except subprocess.CalledProcessError as e:
+        fatal_error(f'Cound not pull test-reports git:\n{e.output.strip()}')
+    except Exception as e:
+        fatal_error(f'Cound not pull test-reports git:\n{e}')
+
+def test_report_commit_and_push(commit_message, files_to_commit):
+    if commit_message == None or len(files_to_commit) == 0:
+        return
+
+    test_report_pull()
+
+    print('Pushing test-report to repo')
+
+    try:
+        subprocess.check_output(['git', 'add', '--'] + files_to_commit, stderr=subprocess.STDOUT, encoding='utf-8', cwd=TEST_REPORTS_DIRECTORY)
+    except subprocess.CalledProcessError as e:
+        fatal_error(f'Cound not add to test-reports git:\n{e.output.strip()}')
+    except Exception as e:
+        fatal_error(f'Cound not add to test-reports git:\n{e}')
+
+    try:
+        subprocess.check_output(['git', 'commit', '-m', commit_message, '--'] + files_to_commit, stderr=subprocess.STDOUT, encoding='utf-8', cwd=TEST_REPORTS_DIRECTORY)
+    except subprocess.CalledProcessError as e:
+        fatal_error(f'Cound not commit to test-reports git:\n{e.output.strip()}')
+    except Exception as e:
+        fatal_error(f'Cound not commit to test-reports git:\n{e}')
+
+    try:
+        subprocess.check_output(['git', 'push'], stderr=subprocess.STDOUT, encoding='utf-8', cwd=TEST_REPORTS_DIRECTORY)
+    except subprocess.CalledProcessError as e:
+        fatal_error(f'Cound not push test-reports git:\n{e.output.strip()}')
+    except Exception as e:
+        fatal_error(f'Cound not push test-reports git:\n{e}')

@@ -1,0 +1,1449 @@
+/* esp32-firmware
+ * Copyright (C) 2025 Olaf Lüke <olaf@tinkerforge.com>
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, write to the
+ * Free Software Foundation, Inc., 59 Temple Place - Suite 330,
+ * Boston, MA 02111-1307, USA.
+ */
+
+// SLAC implementation for HomePlug PLC according to ISO 15118-3:2016
+
+#include "slac.h"
+
+#include "event_log_prefix.h"
+#include "generated/module_dependencies.h"
+#include "build.h"
+
+#include <unistd.h>
+#include <errno.h>
+#include <mbedtls/sha256.h>
+
+#include "qca700x.h"
+
+#include "gcc_warnings.h"
+
+extern const uint8_t slac_mac_plc_peer[SLAC_MAC_ADDRESS_LENGTH]  = {0x00, 0xB0, 0x52, 0x00, 0x00, 0x01};
+extern const uint8_t slac_mac_broadcast[SLAC_MAC_ADDRESS_LENGTH] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+
+static uint32_t ms_since(const micros_t t)
+{
+    return (now_us() - t).to<millis_t>().as<uint32_t>();
+}
+
+void SLAC::pre_setup()
+{
+    api_state = Config::Object({
+        {"state", Config::Enum(SLACState::ModemReset)},
+        {"modem_found", Config::Bool(false)},
+        {"modem_initialization_tries", Config::Uint8(0)},
+        {"atten_char_indication_tries", Config::Uint8(0)},
+        // DIN/TS 70121:2024-11 Annex C (informative)
+        // typical value ranges:
+        // < 20: not valid
+        // 20-35: reasonable range for robust link
+        // > 40: poor signal quality
+        {"attenuation_profile", Config::Tuple(SLAC_AAG_LIST_LENGTH, Config::Uint8(0))},
+        {"received_aag_lists", Config::Uint8(0)},
+        {"received_sounds", Config::Uint8(0)},
+        {"nmk", Config::Tuple(SLAC_NMK_LENGTH, Config::Uint8(0))},
+        {"nid", Config::Tuple(SLAC_NID_LENGTH, Config::Uint8(0))},
+        {"evse_mac", Config::Tuple(SLAC_MAC_ADDRESS_LENGTH, Config::Uint8(0))},
+        {"evse_mac_modem", Config::Tuple(SLAC_MAC_ADDRESS_LENGTH, Config::Uint8(0))},
+        {"pev_mac", Config::Tuple(SLAC_MAC_ADDRESS_LENGTH, Config::Uint8(0))},
+        {"pev_mac_modem", Config::Tuple(SLAC_MAC_ADDRESS_LENGTH, Config::Uint8(0))},
+        {"pev_run_id", Config::Tuple(SLAC_RUN_ID_LENGTH, Config::Uint8(0))}
+    });
+}
+
+
+// NID generation by pbkdf1 (5x sha256 hashing of NMK)
+// See HPGP 4.4.3.1
+// We use security level value 0b00 as defined in ISO 15118-3 A.9.4.1 [V2G3-A09-93]
+void SLAC::generate_nid_from_nmk(void)
+{
+    uint8_t hash_new[32];
+	mbedtls_sha256(nmk, 16, hash_new, 0);
+    uint8_t hash_old[32];
+    for (uint8_t i = 0; i < 5 - 1; ++i) {
+		memcpy(hash_old, hash_new, 32);
+		mbedtls_sha256(hash_old, 32, hash_new, 0);
+    }
+
+    memcpy(nid, hash_new, 6);
+    nid[6] = 0b00 | (hash_new[6] >> 4);
+
+    for (size_t i = 0; i < SLAC_NID_LENGTH; i++) {
+        api_state.get("nid")->get(i)->updateUint(nid[i]);
+    }
+}
+
+void SLAC::generate_new_nmk_and_nid(void)
+{
+    for (uint8_t i = 0; i < SLAC_NMK_LENGTH; i++) {
+        nmk[i] = static_cast<uint8_t>(random(256));
+        api_state.get("nmk")->get(i)->updateUint(nmk[i]);
+    }
+
+    generate_nid_from_nmk();
+}
+
+void SLAC::fill_header_v0(SLAC_HomeplugMessageHeaderV0 *header, const uint8_t *destination_mac, const uint8_t *source_mac, const uint16_t mm_type)
+{
+    memcpy(header->destination_mac, destination_mac, SLAC_MAC_ADDRESS_LENGTH);
+    memcpy(header->source_mac,      source_mac,      SLAC_MAC_ADDRESS_LENGTH);
+
+    header->ethernet_type = htons(SLAC_ETHERNET_TYPE_HOMEPLUG);
+    header->mm_version    = 0x00 ;
+    header->mm_type       = mm_type;
+}
+
+void SLAC::fill_header(SLAC_HomeplugMessageHeader *header, const uint8_t *destination_mac, const uint8_t *source_mac, const uint16_t mm_type)
+{
+    memcpy(header->destination_mac, destination_mac, SLAC_MAC_ADDRESS_LENGTH);
+    memcpy(header->source_mac,      source_mac,      SLAC_MAC_ADDRESS_LENGTH);
+
+    header->ethernet_type = htons(SLAC_ETHERNET_TYPE_HOMEPLUG);
+    header->mm_version    = 0x01;
+    header->mm_type       = mm_type;
+    header->fmni          = 0;
+    header->fmsn          = 0;
+}
+
+// Modem reset is specific to the QCA700x modem, not part of the ISO 15118-3 standard
+void SLAC::handle_modem_reset(void)
+{
+    // Clear modem detected flag so frame processing is paused until re-verified
+    iso15118.qca700x.set_modem_detected(false);
+
+    const uint16_t spi_config = iso15118.qca700x.read_register(QCA700X_SPI_REG_SPI_CONFIG) | QCA700X_SPI_INT_CPU_ON;
+    iso15118.qca700x.write_register(QCA700X_SPI_REG_SPI_CONFIG, spi_config);
+
+    // "Tentatively" accepted SLAC session is void after a modem reset.
+    tentative_state_a_deadline = {};
+    session_started_in_state_a = false;
+
+    next_timeout = {};
+    state = SLACState::ModemInitialization;
+}
+
+void SLAC::handle_modem_initialization(void)
+{
+    if (api_state.get("modem_initialization_tries")->asUint() > 200) {
+        return;
+    }
+
+    // Probe the modem at a fixed 20 ms pace, independent of the state machine period.
+    if (!deadline_elapsed(next_modem_initialization_probe)) {
+        return;
+    }
+    next_modem_initialization_probe = now_us() + 20_ms;
+
+    next_timeout = {};
+    api_state.get("atten_char_indication_tries")->updateUint(0);
+    api_state.get("received_aag_lists")->updateUint(0);
+    api_state.get("received_sounds")->updateUint(0);
+    // TODO: Clear rest of api_state?
+
+    std::fill_n(aag_list, SLAC_AAG_LIST_LENGTH, 0);
+
+    // To check if QCA700x is ready we read the signature and check the write space
+    const uint16_t signature = iso15118.qca700x.read_register(QCA700X_SPI_REG_SIGNATURE);
+    if (signature != QCA700X_SPI_GOOD_SIGNATURE) {
+        const uint8_t modem_initialization_tries = static_cast<uint8_t>(api_state.get("modem_initialization_tries")->asUint8() + 1);
+        api_state.get("modem_initialization_tries")->updateUint(modem_initialization_tries);
+
+        // Trigger reset every SLAC_MODEM_INIT_PROBES_PER_RESET tries.
+        if ((modem_initialization_tries % SLAC_MODEM_INIT_PROBES_PER_RESET) == 0) {
+            state = SLACState::ModemReset;
+        }
+
+        // Log once at 200 tries and give up
+        if (modem_initialization_tries == 200) {
+            iso15118.trace("No PLC modem detected");
+        }
+        return;
+    }
+    api_state.get("modem_found")->updateBool(true);
+
+    const uint16_t write_space = iso15118.qca700x.read_register(QCA700X_SPI_REG_WRBUF_SPC_AVA);
+    if (write_space != QCA700X_BUFFER_SIZE) {
+        iso15118.trace("QCA700X modem not ready: Write space is %d (expected %d)", write_space, QCA700X_BUFFER_SIZE);
+        state = SLACState::ModemReset;
+        return;
+    }
+
+    // Modem verified. Enable frame processing in QCA700x state machine
+    iso15118.qca700x.set_modem_detected(true);
+
+    // At this point we know that the modem works.
+    // We can set up the netif for l2tap communication.
+    // setup_netif() derives and sets qca700x.mac.
+    iso15118.qca700x.setup_netif();
+
+    // Use QCA700x MAC address for EVSE (it is derived from ethernet MAC)
+    memcpy(evse_mac, iso15118.qca700x.mac, SLAC_MAC_ADDRESS_LENGTH);
+    for (size_t i = 0; i < SLAC_MAC_ADDRESS_LENGTH; i++) {
+        api_state.get("evse_mac")->get(i)->updateUint(evse_mac[i]);
+    }
+
+    // Flush stale data from the modem's buffer after initialization.
+    iso15118.qca700x.flush_all_buffers();
+
+    // Allocate l2tap buffer lazily (max Ethernet frame size). Only allocated if modem is available.
+    if (buffer == nullptr) {
+        buffer = static_cast<uint8_t *>(calloc_psram_or_dram(SLAC_ETHERNET_FRAME_LENGTH_MAX + 1, sizeof(uint8_t)));
+    }
+
+    iso15118.trace("QCA700X modem found and initialized");
+
+    set_key_tries = 0;
+    state = SLACState::CMSetKeyRequest;
+}
+
+// ISO 15118-3 A.9.5.2 Table A.8
+void SLAC::handle_cm_set_key_request(void)
+{
+
+    // Generate a new NMK for each new session
+    // The NID is derived from NMK
+    generate_new_nmk_and_nid();
+
+    CM_SetKeyRequest cm_set_key_request;
+    fill_header(&cm_set_key_request.header, slac_mac_plc_peer, evse_mac, SLAC_MMTYPE_CM_SET_KEY | SLAC_MMTYPE_MODE_REQUEST);
+    memcpy(cm_set_key_request.nmk, nmk, SLAC_NMK_LENGTH);
+    memcpy(cm_set_key_request.nid, nid, SLAC_NID_LENGTH);
+
+    const uint8_t *data = reinterpret_cast<const uint8_t*>(&cm_set_key_request);
+    iso15118.qca700x.write_burst(data, sizeof(cm_set_key_request));
+
+    log_cm_set_key_request(cm_set_key_request);
+    // Internal communication with the modem, no spec-defined timing.
+    // After a cold boot the modem can sometimes take ~180ms to respond,
+    // and the main loop can be blocked for several hundred ms during boot.
+    // On timeout the request is repeated (see state_machine_loop()).
+    set_key_tries++;
+    next_timeout = now_us() + SLAC_TT_CM_SET_KEY_CONFIRMATION;
+    state = SLACState::WaitForCMSetKeyConfirmation;
+}
+
+void SLAC::handle_cm_set_key_confirmation(const CM_SetKeyConfirmation &cm_set_key_confirmation)
+{
+    // A late CNF (e.g. after the timeout already triggered a modem reset) must
+    // not move the state machine forward: This would skip the modem
+    // initialization, which leaves the QCA700x frame processing disabled.
+    if (state != SLACState::WaitForCMSetKeyConfirmation) {
+        iso15118.trace("CM_SET_KEY.CNF ignored in state %s", get_slac_state_name(state));
+        return;
+    }
+
+    if (cm_set_key_confirmation.result != 0x01) {
+        iso15118.trace("CM_SET_KEY.CNF result unexpected: %02x", cm_set_key_confirmation.result);
+        state = SLACState::ModemReset;
+        return;
+    }
+
+    // This is the first time we see the MAC address of our modem, we save it
+    for (size_t i = 0; i < SLAC_MAC_ADDRESS_LENGTH; i++) {
+        api_state.get("evse_mac_modem")->get(i)->updateUint(cm_set_key_confirmation.header.source_mac[i]);
+    }
+
+    // No timeout set here: the modem may initialize before any EV is connected.
+    // The TT_EVSE_SLAC_init timeout is started in state_machine_loop() once
+    // an EV is detected (IEC state != A). See [V2G3-M06-07].
+    next_timeout = {};
+    slac_init_retry_count = 0;
+
+    state = SLACState::WaitForSlacParamRequest;
+    log_cm_set_key_confirmation(cm_set_key_confirmation);
+}
+
+// ISO 15118-3 A.9.1.2 Table A.2
+void SLAC::handle_cm_slac_parm_request(const CM_SLACParmRequest &cm_slac_parm_request)
+{
+    const uint8_t *src = cm_slac_parm_request.header.source_mac;
+
+    // CP state guard: Per [V2G3-M06-11], SLAC matching requires a prior
+    // transition from State A to Bx/Cx/Dx.
+
+    // The IEC 61851 state we see is a cached copy of the EVSE bricklet state
+    // that can lag behind by several hundred ms (bricklet polling + main loop
+    // latency). EVs can start SLAC right after they see State B, so a request
+    // from the EV we are connected to can arrive while we still think we are
+    // in State A. Rejecting it can make the EV give up on ISO 15118 entirely.
+
+    // Instead, accept the request tentatively and abort the session in
+    // handle_tentative_state_a() if no EV shows up within SLAC_TT_TENTATIVE_STATE_A.
+    if (last_iec_state == IEC_STATE_A) {
+        const bool idle      = (state == SLACState::WaitForSlacParamRequest);
+        const bool tentative = tentative_state_a_deadline.is_some();
+
+        if (!idle && !tentative) {
+            iso15118.trace("CM_SLAC_PARM.REQ ignored: no EV connected (IEC 61851 State A for %lu ms) in state %s",
+                           ms_since(last_iec_state_change), get_slac_state_name(state));
+            return;
+        }
+
+        if (idle) {
+            iso15118.trace("CM_SLAC_PARM.REQ from %02x:%02x:%02x:%02x:%02x:%02x in IEC 61851 State A (for %lu ms), accepting tentatively",
+                           src[0], src[1], src[2], src[3], src[4], src[5], ms_since(last_iec_state_change));
+            tentative_state_a_deadline = now_us() + SLAC_TT_TENTATIVE_STATE_A;
+            session_started_in_state_a = true;
+        } else {
+            // Tentative session in progress. Allow any EV (also a different one) to restart it, we don't know yet which one is ours.
+            // The original deadline is kept.
+            iso15118.trace("CM_SLAC_PARM.REQ from %02x:%02x:%02x:%02x:%02x:%02x during tentative session in state %s, restarting",
+                           src[0], src[1], src[2], src[3], src[4], src[5], get_slac_state_name(state));
+        }
+    } else {
+        // State guard: Only accept CM_SLAC_PARM.REQ in appropriate states.
+        // Without this guard, a crosstalk CM_SLAC_PARM.REQ from a neighboring EV
+        // can overwrite our tracked PEV mid-matching or tear down an established link.
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wswitch-enum"
+        switch (state) {
+            case SLACState::WaitForSlacParamRequest:
+                // Normal case: idle and waiting for a new SLAC session. Accept any EV.
+                break;
+
+            case SLACState::SlacInitEF:
+                // EV sent CM_SLAC_PARM.REQ during the E/F retry cycle.
+                // This is an ISO EV that was slow to start SLAC. Restore 5% duty
+                // and accept the request.
+                iso15118.trace("CM_SLAC_PARM.REQ received during E/F retry, restoring 5%% duty");
+                iso15118.set_charging_protocol(TF_EVSE_V2_CHARGING_PROTOCOL_ISO15118, 50);
+                slac_init_retry_count = 0;
+                break;
+
+            case SLACState::WaitForStartAttenCharIndication:
+            case SLACState::WaitForMNBCSound:
+            case SLACState::WaitForAttenChar:
+            case SLACState::WaitForSlacMatch:
+                // Active matching in progress. Per [V2G3-A09-16], the same EV may
+                // retry CM_SLAC_PARM.REQ (e.g. if it didn't receive our CNF).
+                // Accept retries from the same PEV, ignore crosstalk from others.
+                if (memcmp(cm_slac_parm_request.header.source_mac, pev_mac, SLAC_MAC_ADDRESS_LENGTH) != 0) {
+                    // Exception: The session was started by a request received inState A, which may have been crosstalk.
+                    //            A request that arrives while an EV is connected is more likely from our EV.
+                    if (session_started_in_state_a) {
+                        iso15118.trace("CM_SLAC_PARM.REQ from different EV (%02x:%02x:%02x:%02x:%02x:%02x) in state %s, session was started in State A: restarting SLAC",
+                                        src[0], src[1], src[2], src[3], src[4], src[5], get_slac_state_name(state));
+                        break;
+                    }
+                    iso15118.trace("CM_SLAC_PARM.REQ ignored: different EV (%02x:%02x:%02x:%02x:%02x:%02x) during active matching in state %s",
+                                    cm_slac_parm_request.header.source_mac[0], cm_slac_parm_request.header.source_mac[1],
+                                    cm_slac_parm_request.header.source_mac[2], cm_slac_parm_request.header.source_mac[3],
+                                    cm_slac_parm_request.header.source_mac[4], cm_slac_parm_request.header.source_mac[5],
+                                    get_slac_state_name(state));
+                    return;
+                }
+                // Same EV retrying: fall through and restart the SLAC process for this EV.
+                break;
+
+            case SLACState::WaitForSDP:
+            case SLACState::LinkDetected:
+                // Link is established or being established.
+                // Reject crosstalk from different EVs.
+                if (memcmp(cm_slac_parm_request.header.source_mac, pev_mac, SLAC_MAC_ADDRESS_LENGTH) != 0) {
+                    iso15118.trace("CM_SLAC_PARM.REQ ignored: different EV (%02x:%02x:%02x:%02x:%02x:%02x) while link established in state %s",
+                        cm_slac_parm_request.header.source_mac[0], cm_slac_parm_request.header.source_mac[1],
+                        cm_slac_parm_request.header.source_mac[2], cm_slac_parm_request.header.source_mac[3],
+                        cm_slac_parm_request.header.source_mac[4], cm_slac_parm_request.header.source_mac[5],
+                        get_slac_state_name(state));
+                    return;
+                }
+                // In autocharge mode, the EV retries SLAC because we didn't send
+                // CM_SLAC_MATCH.CNF. Ignore these retries.
+                if (iso15118.iec_temporary_active) {
+                    iso15118.trace("CM_SLAC_PARM.REQ ignored: IEC transition already active in state %s", get_slac_state_name(state));
+                    return;
+                }
+                // Same EV restarting SLAC without IEC transition active means it
+                // considers the link dead. Accept and restart the SLAC process.
+                iso15118.trace("CM_SLAC_PARM.REQ from same EV in state %s: restarting SLAC", get_slac_state_name(state));
+                break;
+
+            default:
+                iso15118.trace("CM_SLAC_PARM.REQ ignored: modem not ready in state %s", get_slac_state_name(state));
+                return;
+        }
+#pragma GCC diagnostic pop
+
+        // Not in State A (anymore). Any "tentative" session is confirmed.
+        tentative_state_a_deadline = {};
+        session_started_in_state_a = false;
+    }
+
+    // If we had a previous link (e.g. same EV retrying), tear it down now.
+    iso15118.qca700x.link_down();
+
+    // This is the first time we see the MAC and run_id of the PEV, we save it
+    memcpy(pev_mac, cm_slac_parm_request.header.source_mac, SLAC_MAC_ADDRESS_LENGTH);
+    for (size_t i = 0; i < SLAC_MAC_ADDRESS_LENGTH; i++) {
+        api_state.get("pev_mac")->get(i)->updateUint(pev_mac[i]);
+    }
+
+    iso15118.common.detect_evcc_vendor_from_mac(pev_mac);
+
+#if OPTIONS_ISO15118_ENABLE_TESTING_OPTIONS()
+    iso15118.trace("ISO15118: SLAC attempt: autocharge=%d read_soc=%d charge_via_iso15118=%d; experimental: ef_teardown=%d nonegotiation_autocharge=%d nonegotiation_after_soc=%d ignore_soc_compatibility=%d",
+                   iso15118.is_autocharge(), iso15118.config.get("read_soc")->asBool(),
+                   iso15118.config.get("charge_via_iso15118")->asBool(),
+                   iso15118.use_ef_teardown(), iso15118.use_nonegotiation_autocharge(),
+                   iso15118.use_nonegotiation_after_soc(), iso15118.config_experimental.get("ignore_soc_compatibility")->asBool());
+#endif
+
+    memcpy(pev_run_id, cm_slac_parm_request.run_id, SLAC_RUN_ID_LENGTH);
+    for (size_t i = 0; i < SLAC_RUN_ID_LENGTH; i++) {
+        api_state.get("pev_run_id")->get(i)->updateUint(pev_run_id[i]);
+    }
+
+    CM_SLACParmConfirmation cm_slac_parm_confirmation;
+    fill_header(&cm_slac_parm_confirmation.header, pev_mac, evse_mac, SLAC_MMTYPE_CM_SLAC_PARM | SLAC_MMTYPE_MODE_CONFIRMATION);
+    memcpy(cm_slac_parm_confirmation.m_sound_target, slac_mac_broadcast, SLAC_MAC_ADDRESS_LENGTH);
+    memcpy(cm_slac_parm_confirmation.forwarding_sta, pev_mac, SLAC_MAC_ADDRESS_LENGTH);
+    memcpy(cm_slac_parm_confirmation.run_id, pev_run_id, SLAC_RUN_ID_LENGTH);
+
+    iso15118.qca700x.write_burst(reinterpret_cast<const uint8_t*>(&cm_slac_parm_confirmation), sizeof(cm_slac_parm_confirmation));
+
+    // Wait for CM_START_ATTEN_CHAR.IND from the EV
+    next_timeout = now_us() + SLAC_TT_MATCH_SEQUENCE;
+    state = SLACState::WaitForStartAttenCharIndication;
+
+    log_cm_slac_parm_request(cm_slac_parm_request);
+    log_cm_slac_parm_confirmation(cm_slac_parm_confirmation);
+}
+
+// ISO 15118-3 A.9.2.2 Table A.4
+void SLAC::handle_cm_start_atten_char_indication(const CM_StartAttenCharIndication &cm_start_atten_char_indication)
+{
+    if (state != SLACState::WaitForStartAttenCharIndication && state != SLACState::WaitForMNBCSound) {
+        iso15118.trace("CM_START_ATTEN_CHAR.IND ignored in state %s", get_slac_state_name(state));
+        return;
+    }
+
+    if (cm_start_atten_char_indication.application_type != 0x00) {
+        iso15118.trace("CM_START_ATTEN_CHAR.IND application_type mismatch");
+        // ISO 15118-3 A.9.2.3.3 [V2G3-A09-41]
+        return;
+    }
+
+    if (cm_start_atten_char_indication.security_type != 0x00) {
+        iso15118.trace("CM_START_ATTEN_CHAR.IND security_type mismatch");
+        // ISO 15118-3 A.9.2.3.3 [V2G3-A09-41]
+        return;
+    }
+
+    if (cm_start_atten_char_indication.resp_type != 0x01) {
+        iso15118.trace("CM_START_ATTEN_CHAR.IND resp_type mismatch");
+        // ISO 15118-3 A.9.2.3.3 [V2G3-A09-41]
+        return;
+    }
+
+    indication_num_sounds = cm_start_atten_char_indication.num_sounds;
+    if (indication_num_sounds == 0) {
+        indication_num_sounds = SLAC_C_EV_MATCH_MNBC; // Default to the value defined by the standard
+    }
+
+    api_state.get("received_sounds")->updateUint(0);
+    api_state.get("received_aag_lists")->updateUint(0);
+    api_state.get("atten_char_indication_tries")->updateUint(0);
+    std::fill_n(aag_list, SLAC_AAG_LIST_LENGTH, 0);
+
+    // Wait for CM_MNBC_SOUND.IND from the EV
+    // The CM_START_ATTEN_CHAR.IND will be sent three times and we set the MATCH_MNBC timeout the first time
+    if (state == SLACState::WaitForStartAttenCharIndication) {
+        next_timeout = now_us() + SLAC_TT_EVSE_MATCH_MNBC;
+    }
+    state = SLACState::WaitForMNBCSound;
+
+    log_cm_start_atten_char_indication(cm_start_atten_char_indication);
+}
+
+// ISO 15118-3 A.9.2.2 Table A.4
+void SLAC::handle_cm_mnbc_sound_indication(const CM_MNBCSoundIndication &cm_mnbc_sound_indication)
+{
+    if (state != SLACState::WaitForMNBCSound) {
+        // Ignore sounds outside the sounding phase (e.g. crosstalk from neighboring EV).
+        return;
+    }
+
+    // The sound indication is sent three times by the EV.
+    // There does not seem to be any requirement to check the sound indications for anything (ISO 15118-3 A.9.2.3.3).
+    api_state.get("received_sounds")->updateUint(api_state.get("received_sounds")->asUint() + 1);
+
+    log_cm_mnbc_sound_indication(cm_mnbc_sound_indication);
+}
+
+// ISO 15118-3 A.9.2.2 Table A.4
+void SLAC::handle_cm_atten_profile_indication(const CM_AttenProfileIndication &cm_atten_profile_indication)
+{
+    if (state != SLACState::WaitForMNBCSound) {
+        // Ignore attenuation profiles outside the sounding phase.
+        return;
+    }
+
+    if (memcmp(cm_atten_profile_indication.pev_mac, pev_mac, SLAC_MAC_ADDRESS_LENGTH) != 0) {
+        iso15118.trace("CM_ATTEN_PROFILE.IND pev_mac mismatch");
+        // Ignore profile indication from other EVs
+        return;
+    }
+
+    if (cm_atten_profile_indication.num_groups != SLAC_AAG_LIST_LENGTH) {
+        iso15118.trace("CM_ATTEN_PROFILE.IND num_groups mismatch: %d vs %d", cm_atten_profile_indication.num_groups, SLAC_AAG_LIST_LENGTH);
+        // This should be a fixed value of SLAC_AAG_LIST_LENGTH
+        return;
+    }
+
+    for (uint8_t i = 0; i < SLAC_AAG_LIST_LENGTH; i++) {
+        aag_list[i] += cm_atten_profile_indication.aag[i];
+    }
+
+    log_cm_atten_profile_indication(cm_atten_profile_indication);
+
+    const uint8_t received_aag_lists = static_cast<uint8_t>(api_state.get("received_aag_lists")->asUint8() + 1);
+    api_state.get("received_aag_lists")->updateUint(received_aag_lists);
+    if (received_aag_lists == indication_num_sounds) {
+        // All 10 attenuation profiles received. Calculate average and send CM_ATTEN_CHAR.IND to EV.
+
+        CM_AttenCharIndication cm_atten_char_indication;
+        fill_header(&cm_atten_char_indication.header, pev_mac, evse_mac, SLAC_MMTYPE_CM_ATTEN_CHAR | SLAC_MMTYPE_MODE_INDICATION);
+        cm_atten_char_indication.num_sounds = received_aag_lists;
+        memcpy(cm_atten_char_indication.source_address, pev_mac, SLAC_MAC_ADDRESS_LENGTH);
+        memcpy(cm_atten_char_indication.run_id, pev_run_id, SLAC_RUN_ID_LENGTH);
+
+        // ISO 15118-3 A.9.2.1 [V2G3-A09-20]
+        for (uint8_t i = 0; i < SLAC_AAG_LIST_LENGTH; i++) {
+            cm_atten_char_indication.attenuation_profile.aag[i] = static_cast<uint8_t>(aag_list[i] / received_aag_lists);
+            api_state.get("attenuation_profile")->get(i)->updateUint(cm_atten_char_indication.attenuation_profile.aag[i]);
+        }
+
+        iso15118.qca700x.write_burst(reinterpret_cast<const uint8_t*>(&cm_atten_char_indication), sizeof(cm_atten_char_indication));
+
+        next_timeout = now_us() + SLAC_TT_MATCH_RESPONSE;
+        state = SLACState::WaitForAttenChar;
+        api_state.get("atten_char_indication_tries")->updateUint(api_state.get("atten_char_indication_tries")->asUint() + 1);
+        log_cm_atten_char_indication(cm_atten_char_indication);
+    }
+}
+
+// ISO 15118-3 A.9.2.2 Table A.4
+void SLAC::handle_cm_atten_char_response(const CM_AttenCharResponse &cm_atten_char_response)
+{
+    if (state != SLACState::WaitForAttenChar) {
+        iso15118.trace("CM_ATTEN_CHAR.RSP ignored in state %s", get_slac_state_name(state));
+        return;
+    }
+
+    if (cm_atten_char_response.application_type != 0x00) {
+        iso15118.trace("CM_ATTEN_CHAR.RSP application_type mismatch");
+        // ISO 15118-3 A.9.2.3.3 [V2G3-A09-47]
+        return;
+    }
+
+    if (cm_atten_char_response.security_type != 0x00) {
+        iso15118.trace("CM_ATTEN_CHAR.RSP security_type mismatch");
+        // ISO 15118-3 A.9.2.3.3 [V2G3-A09-47]
+        return;
+    }
+
+    if (cm_atten_char_response.result != 0x00) {
+        iso15118.trace("CM_ATTEN_CHAR.RSP result mismatch");
+        // ISO 15118-3 A.9.2.3.3 [V2G3-A09-47]
+        return;
+    }
+
+    if (memcmp(pev_mac, cm_atten_char_response.source_address, SLAC_MAC_ADDRESS_LENGTH) != 0) {
+        iso15118.trace("CM_ATTEN_CHAR.RSP source_address mismatch");
+        // ISO 15118-3 A.9.2.3.3 [V2G3-A09-47]
+        return;
+    }
+
+    if (memcmp(pev_run_id, cm_atten_char_response.run_id, SLAC_RUN_ID_LENGTH) != 0) {
+        iso15118.trace("CM_ATTEN_CHAR.RSP run_id mismatch");
+        // ISO 15118-3 A.9.2.3.3 [V2G3-A09-47]
+        return;
+    }
+
+    iso15118.trace("SLAC process successful");
+    next_timeout = now_us() + SLAC_TT_EVSE_MATCH_SESSION;
+    state = SLACState::WaitForSlacMatch;
+
+    log_cm_atten_char_response(cm_atten_char_response);
+}
+
+// ISO 15118-3 A.9.3 - Validation of matching decision
+// Minimal implementation: Respond with "Not Required" (0x04) to indicate that
+// the EVSE does not require BCB-Toggle validation.
+// Per [V2G3-A09-72], the EVSE can set the result field to "not required".
+// The EV will then either skip validation and proceed with CM_SLAC_MATCH.REQ,
+// or insist on validation by sending a step 2 CM_VALIDATE.REQ.
+void SLAC::handle_cm_validate_request(const CM_ValidateRequest &cm_validate_request)
+{
+    if (state != SLACState::WaitForSlacMatch) {
+        iso15118.trace("CM_VALIDATE.REQ received in unexpected state %s", get_slac_state_name(state));
+        return;
+    }
+
+    // ISO 15118-3 A.9.3.2 Table A.5 [V2G3-A09-56]: signal_type must be 0x00
+    if (cm_validate_request.signal_type != 0x00) {
+        iso15118.trace("CM_VALIDATE.REQ signal_type invalid: %02x", cm_validate_request.signal_type);
+        // [V2G3-A09-77]: invalid content shall be ignored
+        return;
+    }
+
+    // ISO 15118-3 A.9.3.2 [V2G3-A09-85]: result field other than "ready" -> FAILED
+    if (cm_validate_request.result != 0x01) {
+        iso15118.trace("CM_VALIDATE.REQ result invalid: %02x (expected 0x01 = ready)", cm_validate_request.result);
+        return;
+    }
+
+    log_cm_validate_request(cm_validate_request);
+
+    CM_ValidateConfirmation cm_validate_confirmation;
+    fill_header(&cm_validate_confirmation.header, pev_mac, evse_mac, SLAC_MMTYPE_CM_VALIDATE | SLAC_MMTYPE_MODE_CONFIRMATION);
+    cm_validate_confirmation.signal_type = 0x00;
+    cm_validate_confirmation.toggle_num  = 0x00;
+    // [V2G3-A09-72]: "Not Required" indicates validation is not needed.
+    // The EV may skip validation and continue with CM_SLAC_MATCH.REQ.
+    cm_validate_confirmation.result      = 0x04; // Not Required
+
+    iso15118.qca700x.write_burst(reinterpret_cast<const uint8_t*>(&cm_validate_confirmation), sizeof(cm_validate_confirmation));
+
+    log_cm_validate_confirmation(cm_validate_confirmation);
+
+    // Stay in WaitForSlacMatch: the EV should follow up with CM_SLAC_MATCH.REQ
+    // (or potentially retry with another CM_VALIDATE.REQ, which we handle the same way)
+}
+
+// ISO 15118-3 A.9.4.2 Table A.7
+void SLAC::handle_cm_slac_match_request(const CM_SLACMatchRequest &cm_slac_match_request)
+{
+    if ((state != SLACState::WaitForSlacMatch) && (state != SLACState::WaitForSDP)) {
+        iso15118.trace("CM_SLAC_MATCH.REQ ignored in state %s", get_slac_state_name(state));
+        return;
+    }
+
+    if (memcmp(pev_mac, cm_slac_match_request.header.source_mac, SLAC_MAC_ADDRESS_LENGTH) != 0) {
+        iso15118.trace("CM_SLAC_MATCH.REQ source_mac mismatch");
+        // ISO 15118-3 A.9.3.3 [V2G3-A09-98]
+        return;
+    }
+
+    if (memcmp(pev_run_id, cm_slac_match_request.run_id, SLAC_RUN_ID_LENGTH) != 0) {
+        iso15118.trace("CM_SLAC_MATCH.REQ run_id mismatch");
+        // ISO 15118-3 A.9.3.3 [V2G3-A09-98]
+        return;
+    }
+
+    // Defense in depth: verify the EV chose *this* EVSE.
+    // The CM_SLAC_MATCH.REQ contains the EVSE MAC the EV selected.
+    // Per [V2G3-A09-98], if it doesn't match our MAC, reject.
+    if (memcmp(evse_mac, cm_slac_match_request.evse_mac, SLAC_MAC_ADDRESS_LENGTH) != 0) {
+        iso15118.trace("CM_SLAC_MATCH.REQ evse_mac mismatch: EV chose different EVSE (%02x:%02x:%02x:%02x:%02x:%02x, ours %02x:%02x:%02x:%02x:%02x:%02x)",
+            cm_slac_match_request.evse_mac[0], cm_slac_match_request.evse_mac[1],
+            cm_slac_match_request.evse_mac[2], cm_slac_match_request.evse_mac[3],
+            cm_slac_match_request.evse_mac[4], cm_slac_match_request.evse_mac[5],
+            evse_mac[0], evse_mac[1], evse_mac[2], evse_mac[3], evse_mac[4], evse_mac[5]);
+        return;
+    }
+
+    // Never hand out the NMK while the session is only tentative (CM_SLAC_PARM.REQ received in IEC 61851 State A and no EV seen since).
+    // If this is our EV, the State A -> B transition will show up shortly and the EV retries the request.
+    if (tentative_state_a_deadline.is_some() && (last_iec_state == 0)) {
+        iso15118.trace("CM_SLAC_MATCH.REQ ignored: tentative session, still no EV connected (IEC 61851 State A)");
+        return;
+    }
+
+    log_cm_slac_match_request(cm_slac_match_request);
+
+#if MODULE_EV_AVAILABLE()
+    // Report the connected EV only once per plug-in session.
+    // Reset on unplug (State A) via reset_ev_connected_reported().
+    if (!ev_connected_reported || memcmp(reported_pev_mac, pev_mac, SLAC_MAC_ADDRESS_LENGTH) != 0) {
+        ev.on_ev_connected(pev_mac);
+        ev_connected_reported = true;
+        memcpy(reported_pev_mac, pev_mac, SLAC_MAC_ADDRESS_LENGTH);
+    }
+#endif
+
+    // In autocharge-only mode, or the second round after reading SoC, we already
+    // have all the data we need once SLAC reaches matching.
+    // Do NOT send CM_SLAC_MATCH.CNF: if we confirm the match, the EV joins the PLC
+    // network and tries SDP/V2G, which times out after ~90-100s before falling back to IEC.
+    // By not confirming, the EV's TT_MATCH_RESPONSE expires immediately after 200ms.
+    // With nonegotiation_autocharge the match is confirmed instead and the EV is
+    // answered with Failed_NoNegotiation at the supportedAppProtocol stage.
+    if ((iso15118.is_autocharge_only() || iso15118.nonegotiation_pending) && !iso15118.use_nonegotiation_autocharge()) {
+        iso15118.trace("%s: SLAC complete, NOT sending CM_SLAC_MATCH.CNF", iso15118.nonegotiation_pending ? "After SoC" : "Autocharge-only mode");
+        iso15118.nonegotiation_pending = false;
+        iso15118.reslac_guard_deadline = 0_us;
+        next_timeout = {};
+        state = SLACState::LinkDetected;  // Mark SLAC as done
+
+        // Use begin_iec_transition() for a clean PWM restart.
+        // The PLC modem is disabled immediately since we're skipping SDP/V2G entirely.
+        iso15118.begin_iec_transition(ISO15118::ModemOff::Immediate);
+
+        return;
+    }
+
+    CM_SLACMatchConfirmation cm_slac_match_confirmation = {};
+    fill_header(&cm_slac_match_confirmation.header, pev_mac, evse_mac, SLAC_MMTYPE_CM_SLAC_MATCH | SLAC_MMTYPE_MODE_CONFIRMATION);
+    memcpy(cm_slac_match_confirmation.pev_id, cm_slac_match_request.pev_id, SLAC_STATION_ID_LENGTH);
+    memcpy(cm_slac_match_confirmation.pev_mac, cm_slac_match_request.pev_mac, SLAC_MAC_ADDRESS_LENGTH);
+    memcpy(cm_slac_match_confirmation.evse_id, cm_slac_match_request.evse_id, SLAC_STATION_ID_LENGTH);
+    memcpy(cm_slac_match_confirmation.evse_mac, evse_mac, SLAC_MAC_ADDRESS_LENGTH);
+    memcpy(cm_slac_match_confirmation.run_id, cm_slac_match_request.run_id, SLAC_RUN_ID_LENGTH);
+    memcpy(cm_slac_match_confirmation.nid, nid, SLAC_NID_LENGTH);
+    memcpy(cm_slac_match_confirmation.nmk, nmk, SLAC_NMK_LENGTH);
+
+    iso15118.qca700x.write_burst(reinterpret_cast<const uint8_t*>(&cm_slac_match_confirmation), sizeof(cm_slac_match_confirmation));
+
+    log_cm_slac_match_confirmation(cm_slac_match_confirmation);
+
+    // Start communication setup timer [V2G2-716]
+    iso15118.communication_setup_deadline = now_us() + 30_s;
+
+    // If we're already in WaitForSDP, this is a retry from the EV that didn't receive
+    // (or couldn't process) our original CNF. We re-sent the CNF above and reset the
+    // timeout to give the EV a fresh window to join the PLC network.
+    if (state == SLACState::WaitForSDP) {
+        iso15118.trace("CM_SLAC_MATCH.REQ retry in WaitForSDP, re-sent CNF");
+        next_timeout = now_us() + SLAC_TT_MATCH_JOIN + SLAC_TP_LINK_READY_NOTIFICATION_MAX;
+        return;
+    }
+
+    // Discard a possibly stale IPv6-received flag from a previous session.
+    // The flag is set on every received IPv6 frame (also during LinkDetected,
+    // where it is never cleared), so without this reset a leftover flag can
+    // immediately trigger the WaitForSDP -> LinkDetected transition before the
+    // EV actually joined the new logical network.
+    iso15118.qca700x.check_and_clear_ipv6_received();
+
+    // SLAC complete. Wait for "Link detected" (first IPv6/SDP packet from EV).
+    next_timeout = now_us() + SLAC_TT_MATCH_JOIN + SLAC_TP_LINK_READY_NOTIFICATION_MAX;
+    state = SLACState::WaitForSDP;
+
+    // Trigger link_up minimum wait time (A.9.6.3.1 Figure A.8)
+    cancel_link_up_task();
+    link_up_task = task_scheduler.scheduleOnce([this] {
+        link_up_task = 0;
+
+        // Only report link_up if we are still waiting for the EV to join the PLC network.
+        if (state != SLACState::WaitForSDP && state != SLACState::LinkDetected) {
+            iso15118.trace("SLAC: Skipping stale link_up, state changed");
+            return;
+        }
+
+        iso15118.qca700x.link_up();
+    }, SLAC_TP_LINK_READY_NOTIFICATION_MIN);
+}
+
+void SLAC::cancel_link_up_task()
+{
+    if (link_up_task != 0) {
+        task_scheduler.cancel(link_up_task);
+        link_up_task = 0;
+    }
+}
+
+void SLAC::handle_cm_qualcomm_get_sw_request()
+{
+    CM_QualcommGetSwRequest cm_qualcomm_get_sw_request;
+    fill_header_v0(&cm_qualcomm_get_sw_request.header, slac_mac_broadcast, evse_mac, SLAC_MMTYPE_QUALCOMM_GET_SW | SLAC_MMTYPE_MODE_REQUEST);
+    iso15118.qca700x.write_burst(reinterpret_cast<const uint8_t*>(&cm_qualcomm_get_sw_request), sizeof(cm_qualcomm_get_sw_request));
+
+    log_cm_qualcomm_get_sw_request(cm_qualcomm_get_sw_request);
+    next_timeout = now_us() + 2500_ms;
+    state = SLACState::WaitForCMQualcommGetSwResponse;
+}
+
+void SLAC::handle_cm_qualcomm_link_status_request()
+{
+    CM_QualcommLinkStatusRequest cm_qualcomm_link_status_request;
+    fill_header_v0(&cm_qualcomm_link_status_request.header, slac_mac_broadcast, evse_mac, SLAC_MMTYPE_QUALCOMM_LINK_STATUS | SLAC_MMTYPE_MODE_REQUEST);
+    iso15118.qca700x.write_burst(reinterpret_cast<const uint8_t*>(&cm_qualcomm_link_status_request), sizeof(cm_qualcomm_link_status_request));
+
+    log_cm_qualcomm_link_status_request(cm_qualcomm_link_status_request);
+    next_timeout = now_us() + 2500_ms;
+    state = SLACState::WaitForCMQualcommLinkStatusResponse;
+}
+
+void SLAC::handle_cm_qualcomm_op_attr_request()
+{
+    CM_QualcommOpAttrRequest cm_qualcomm_op_attr_request;
+    fill_header_v0(&cm_qualcomm_op_attr_request.header, slac_mac_broadcast, evse_mac, SLAC_MMTYPE_QUALCOMM_OP_ATTR | SLAC_MMTYPE_MODE_REQUEST);
+    iso15118.qca700x.write_burst(reinterpret_cast<const uint8_t*>(&cm_qualcomm_op_attr_request), sizeof(cm_qualcomm_op_attr_request));
+
+    log_cm_qualcomm_op_attr_request(cm_qualcomm_op_attr_request);
+    next_timeout = now_us() + 2500_ms;
+    state = SLACState::WaitForCMQualcommOpAttrResponse;
+}
+
+void SLAC::handle_cm_qualcomm_get_sw_confirmation(const CM_QualcommGetSwConfirmation &cm_qualcomm_get_sw_confirmation)
+{
+    log_cm_qualcomm_get_sw_confirmation(cm_qualcomm_get_sw_confirmation);
+    if (state != SLACState::WaitForCMQualcommGetSwResponse) {
+        iso15118.trace("VS_SW_VER.CNF ignored in state %s", get_slac_state_name(state));
+        return;
+    }
+    next_timeout = now_us() + 100_ms;
+    state = SLACState::CMQualcommLinkStatusRequest;
+}
+
+void SLAC::handle_cm_qualcomm_link_status_confirmation(const CM_QualcommLinkStatusConfirmation &cm_qualcomm_link_status_confirmation)
+{
+    log_cm_qualcomm_link_status_confirmation(cm_qualcomm_link_status_confirmation);
+    if (state != SLACState::WaitForCMQualcommLinkStatusResponse) {
+        iso15118.trace("VS_LINK_STATUS.CNF ignored in state %s", get_slac_state_name(state));
+        return;
+    }
+    next_timeout = now_us() + 100_ms;
+    state = SLACState::CMQualcommOpAttrRequest;
+}
+
+void SLAC::handle_cm_qualcomm_op_attr_confirmation(const CM_QualcommOpAttrConfirmation &cm_qualcomm_op_attr_confirmation)
+{
+    log_cm_qualcomm_op_attr_confirmation(cm_qualcomm_op_attr_confirmation);
+    if (state != SLACState::WaitForCMQualcommOpAttrResponse) {
+        iso15118.trace("VS_OP_ATTRIBUTES.CNF ignored in state %s", get_slac_state_name(state));
+        return;
+    }
+    next_timeout = {};
+    state = SLACState::WaitForSlacParamRequest;
+}
+
+void SLAC::handle_cm_qualcomm_host_action_indication(const CM_QualcommHostActionIndication &ind)
+{
+    iso15118.trace("SLAC: VS_HOST_ACTION.IND: PLC stack restarted (action=%u, version=%u.%u)",
+                   ind.maction, ind.major_version, ind.minor_version);
+}
+
+void SLAC::handle_vs_module_operation_confirmation(const uint8_t *data, size_t length)
+{
+    iso15118.pib_manager.handle_confirmation(data, length);
+}
+
+
+void SLAC::handle_tap(void)
+{
+    read_and_dispatch_tap_frame();
+}
+
+void SLAC::drain_tap(void)
+{
+    // Bounded to not block the main loop if frames keep coming in.
+    for (int i = 0; i < 16; i++) {
+        if (!read_and_dispatch_tap_frame()) {
+            return;
+        }
+    }
+}
+
+bool SLAC::read_and_dispatch_tap_frame(void)
+{
+    // Check if l2tap is ready
+    if (!iso15118.qca700x.is_l2tap_ready() || (buffer == nullptr)) {
+        return false;
+    }
+
+    // Non-blocking read from l2tap - returns complete Ethernet frames (HomePlug only due to filter)
+    ssize_t length = read(iso15118.qca700x.tap, buffer, SLAC_ETHERNET_FRAME_LENGTH_MAX);
+    if (length < 0) {
+        if (errno != EWOULDBLOCK && errno != EAGAIN) {
+            iso15118.trace("SLAC: L2TAP read error: errno %d [%s]", errno, strerror(errno));
+        }
+        return false;
+    }
+    if (length == 0) {
+        return false;
+    }
+
+    // Buffer contains raw Ethernet frame, already filtered to HomePlug (0x88E1)
+    SLAC_HomeplugMessageHeader *header = reinterpret_cast<SLAC_HomeplugMessageHeader*>(buffer);
+
+    const uint16_t mm_type = header->mm_type;
+    switch(mm_type) {
+        case SLAC_MMTYPE_CM_SET_KEY           | SLAC_MMTYPE_MODE_CONFIRMATION: handle_cm_set_key_confirmation(*reinterpret_cast<const CM_SetKeyConfirmation*>(buffer));                          break;
+        case SLAC_MMTYPE_CM_SLAC_PARM         | SLAC_MMTYPE_MODE_REQUEST:      handle_cm_slac_parm_request(*reinterpret_cast<const CM_SLACParmRequest*>(buffer));                                break;
+        case SLAC_MMTYPE_CM_START_ATTEN_CHAR  | SLAC_MMTYPE_MODE_INDICATION:   handle_cm_start_atten_char_indication(*reinterpret_cast<const CM_StartAttenCharIndication*>(buffer));             break;
+        case SLAC_MMTYPE_CM_MNBC_SOUND        | SLAC_MMTYPE_MODE_INDICATION:   handle_cm_mnbc_sound_indication(*reinterpret_cast<const CM_MNBCSoundIndication*>(buffer));                        break;
+        case SLAC_MMTYPE_CM_ATTEN_PROFILE     | SLAC_MMTYPE_MODE_INDICATION:   handle_cm_atten_profile_indication(*reinterpret_cast<const CM_AttenProfileIndication*>(buffer));                  break;
+        case SLAC_MMTYPE_CM_ATTEN_CHAR        | SLAC_MMTYPE_MODE_RESPONSE:     handle_cm_atten_char_response(*reinterpret_cast<const CM_AttenCharResponse*>(buffer));                            break;
+        case SLAC_MMTYPE_CM_VALIDATE          | SLAC_MMTYPE_MODE_REQUEST:      handle_cm_validate_request(*reinterpret_cast<const CM_ValidateRequest*>(buffer));                                break;
+        case SLAC_MMTYPE_CM_SLAC_MATCH        | SLAC_MMTYPE_MODE_REQUEST:      handle_cm_slac_match_request(*reinterpret_cast<const CM_SLACMatchRequest*>(buffer));                              break;
+        case SLAC_MMTYPE_QUALCOMM_GET_SW      | SLAC_MMTYPE_MODE_CONFIRMATION: handle_cm_qualcomm_get_sw_confirmation(*reinterpret_cast<const CM_QualcommGetSwConfirmation*>(buffer));           break;
+        case SLAC_MMTYPE_QUALCOMM_LINK_STATUS | SLAC_MMTYPE_MODE_CONFIRMATION: handle_cm_qualcomm_link_status_confirmation(*reinterpret_cast<const CM_QualcommLinkStatusConfirmation*>(buffer)); break;
+        case SLAC_MMTYPE_QUALCOMM_OP_ATTR     | SLAC_MMTYPE_MODE_CONFIRMATION: handle_cm_qualcomm_op_attr_confirmation(*reinterpret_cast<const CM_QualcommOpAttrConfirmation*>(buffer));         break;
+        case SLAC_MMTYPE_QUALCOMM_HOST_ACTION | SLAC_MMTYPE_MODE_INDICATION:   handle_cm_qualcomm_host_action_indication(*reinterpret_cast<const CM_QualcommHostActionIndication*>(buffer));     break;
+        case SLAC_MMTYPE_QUALCOMM_MODULE_OP   | SLAC_MMTYPE_MODE_CONFIRMATION: handle_vs_module_operation_confirmation(buffer, static_cast<size_t>(length)); break;
+
+        default: iso15118.trace("Unhandled mm_type: %04x", mm_type); break;
+    }
+
+    return true;
+}
+
+void SLAC::update_iec_state_tracking(void)
+{
+    const uint32_t iec_state = evse_common.get_state().get("iec61851_state")->asUint();
+    if (iec_state != last_iec_state) {
+        last_iec_state        = iec_state;
+        last_iec_state_change = now_us();
+    }
+}
+
+// Frames are only processed by the QCA700x driver if the modem was verified by handle_modem_initialization().
+// If SLAC ever ends up in an operational state without that (e.g. through a state transition that skipped the
+// modem initialization), all received frames would be silently discarded and SLAC would never see a CM_SLAC_PARM.REQ.
+// Detect this and recover.
+void SLAC::check_modem_detected_invariant(void)
+{
+    if (iso15118.qca700x.is_modem_detected()) {
+        return;
+    }
+
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wswitch-enum"
+    switch (state) {
+        case SLACState::ModemReset:
+        case SLACState::ModemInitialization:
+        case SLACState::ModemDisabled:
+            return;
+        default:
+            break;
+    }
+#pragma GCC diagnostic pop
+
+    iso15118.trace("SLAC: Modem not verified in state %s, resetting modem", get_slac_state_name(state));
+    handle_modem_reset();
+}
+
+void SLAC::abort_tentative_session(void)
+{
+    iso15118.trace("SLAC: Still no EV connected (IEC 61851 State A) %lu ms after CM_SLAC_PARM.REQ from %02x:%02x:%02x:%02x:%02x:%02x, assuming crosstalk, aborting SLAC in state %s",
+                   ms_since(tentative_state_a_deadline.unwrap() - SLAC_TT_TENTATIVE_STATE_A),
+                   pev_mac[0], pev_mac[1], pev_mac[2], pev_mac[3], pev_mac[4], pev_mac[5],
+                   get_slac_state_name(state));
+
+    tentative_state_a_deadline = {};
+    session_started_in_state_a = false;
+
+    cancel_link_up_task();
+    iso15118.qca700x.link_down();
+    iso15118.common.reset_evcc_vendor();
+
+    memset(pev_mac, 0, SLAC_MAC_ADDRESS_LENGTH);
+    for (size_t i = 0; i < SLAC_MAC_ADDRESS_LENGTH; i++) {
+        api_state.get("pev_mac")->get(i)->updateUint(0);
+    }
+    memset(pev_run_id, 0, SLAC_RUN_ID_LENGTH);
+    for (size_t i = 0; i < SLAC_RUN_ID_LENGTH; i++) {
+        api_state.get("pev_run_id")->get(i)->updateUint(0);
+    }
+    api_state.get("received_sounds")->updateUint(0);
+    api_state.get("received_aag_lists")->updateUint(0);
+    api_state.get("atten_char_indication_tries")->updateUint(0);
+    std::fill_n(aag_list, SLAC_AAG_LIST_LENGTH, 0);
+
+    // Back to idle. TT_EVSE_SLAC_init is started once an EV is detected.
+    next_timeout = {};
+    state = SLACState::WaitForSlacParamRequest;
+}
+
+// See handle_cm_slac_parm_request(): A CM_SLAC_PARM.REQ that arrives while the cached IEC 61851 state is still A is accepted tentatively.
+// Confirm the session once an EV is seen, abort it if none shows up in time.
+void SLAC::handle_tentative_state_a(void)
+{
+    if (tentative_state_a_deadline.is_none()) {
+        return;
+    }
+
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wswitch-enum"
+    switch (state) {
+        case SLACState::WaitForStartAttenCharIndication:
+        case SLACState::WaitForMNBCSound:
+        case SLACState::WaitForAttenChar:
+        case SLACState::WaitForSlacMatch:
+            break;
+        default:
+            // Session ended otherwise (timeout, reset, ...)
+            tentative_state_a_deadline = {};
+            return;
+    }
+#pragma GCC diagnostic pop
+
+    if (last_iec_state != 0) {
+        iso15118.trace("SLAC: EV connected (IEC state %lu) %lu ms after tentatively accepted CM_SLAC_PARM.REQ, continuing SLAC in state %s",
+                       last_iec_state, ms_since(tentative_state_a_deadline.unwrap() - SLAC_TT_TENTATIVE_STATE_A),
+                       get_slac_state_name(state));
+        tentative_state_a_deadline = {};
+        return;
+    }
+
+    if (deadline_elapsed(tentative_state_a_deadline.unwrap())) {
+        abort_tentative_session();
+    }
+}
+
+void SLAC::state_machine_loop()
+{
+    update_iec_state_tracking();
+    check_modem_detected_invariant();
+    handle_tentative_state_a();
+
+    if (state == SLACState::LinkDetected) {
+        api_state.get("state")->updateEnum(state);
+        return;
+    }
+
+    // In ModemDisabled state the PLC modem is held in hardware reset.
+    if (state == SLACState::ModemDisabled) {
+        api_state.get("state")->updateEnum(state);
+        return;
+    }
+
+    // Per [V2G3-M06-07]: When waiting for CM_SLAC_PARM.REQ with no active
+    // timeout, start the TT_EVSE_SLAC_init timer once an EV is physically
+    // connected (IEC 61851 state != A). This ensures we don't timeout while
+    // no EV is present, but do fall back to IEC for non-ISO EVs.
+    if (state == SLACState::WaitForSlacParamRequest && next_timeout.is_none()) {
+        uint32_t iec_state = evse_common.get_state().get("iec61851_state")->asUint();
+        if (iec_state != 0) { // Not State A: EV is connected
+            iso15118.trace("SLAC: EV connected (IEC state %lu), starting TT_EVSE_SLAC_init timeout (%llus)",
+                            iec_state, SLAC_TT_EVSE_SLAC_INIT.as<uint64_t>());
+            next_timeout = now_us() + SLAC_TT_EVSE_SLAC_INIT;
+        }
+    }
+
+    // If the EV disconnects during the SLAC init E/F retry cycle, abort the
+    // cycle and return to idle (WaitForSlacParamRequest with no timeout).
+    if ((state == SLACState::SlacInitEF ||
+        (state == SLACState::WaitForSlacParamRequest && next_timeout.is_some()))) {
+        uint32_t iec_state = evse_common.get_state().get("iec61851_state")->asUint();
+        if (iec_state == 0) { // State A: EV disconnected
+            iso15118.trace("SLAC: EV disconnected during SLAC init retry cycle, resetting");
+            iso15118.set_charging_protocol(TF_EVSE_V2_CHARGING_PROTOCOL_ISO15118, 50);
+            next_timeout = {};
+            slac_init_retry_count = 0;
+            state = SLACState::WaitForSlacParamRequest;
+        }
+    }
+
+    // Check for WaitForSDP to LinkDetected transition.
+    // When we receive an IPv6 packet (SDP), the link is established.
+    if (state == SLACState::WaitForSDP) {
+        if (iso15118.qca700x.check_and_clear_ipv6_received()) {
+            iso15118.trace("IPv6/SDP packet received, link established");
+            next_timeout = {};
+            state = SLACState::LinkDetected;
+        }
+    }
+
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wswitch-enum"
+    switch(state) {
+        // Handle states where we initiate a message
+        case SLACState::ModemReset:          handle_modem_reset();          break;
+        case SLACState::ModemInitialization: handle_modem_initialization(); break;
+        case SLACState::CMSetKeyRequest:     handle_cm_set_key_request();   break;
+
+        // Handle Qualcomm QCA700x specific requests (debug/testing, may be removed in release).
+        case SLACState::CMQualcommGetSwRequest:      handle_cm_qualcomm_get_sw_request();      break;
+        case SLACState::CMQualcommLinkStatusRequest: handle_cm_qualcomm_link_status_request(); break;
+        case SLACState::CMQualcommOpAttrRequest:     handle_cm_qualcomm_op_attr_request();     break;
+
+        // All other states are handled by central poll
+        default: break;
+    }
+#pragma GCC diagnostic pop
+
+    // Handle timeouts of expected responses.
+    // If the main loop was blocked for a while, the expected frame may have arrived in time and already be queued in l2tap
+    // (the central poll only runs after this function).
+    // Dispatch those frames before acting on the timeout, otherwise a late-processed but valid response races with the timeout handling.
+    if (next_timeout.is_some() && deadline_elapsed(next_timeout.unwrap())) {
+        drain_tap();
+    }
+
+    if (next_timeout.is_some() && deadline_elapsed(next_timeout.unwrap())) {
+        iso15118.trace("SLAC: Timeout in state %s", get_slac_state_name(state));
+        // As long as we have received some sounds we will do the average attenuation profile calculation
+        // and move on to the next state, even after timeout. ISO 15118-3 A.9.2.3.3 [V2G3-A09-43].
+        const uint8_t received_aag_lists          = api_state.get("received_aag_lists")->asUint8();
+        const uint8_t atten_char_indication_tries = api_state.get("atten_char_indication_tries")->asUint8();
+        if (((state == SLACState::WaitForMNBCSound) && (received_aag_lists > 0)) ||
+             // This is also re-send up to SLAC_C_EV_MATCH_RETRY tries. ISO 15118-3 A.9.2.3.3 [V2G3-A09-46].
+            ((state == SLACState::WaitForAttenChar) && (atten_char_indication_tries < SLAC_C_EV_MATCH_RETRY))) {
+            CM_AttenCharIndication cm_atten_char_indication;
+            fill_header(&cm_atten_char_indication.header, pev_mac, evse_mac, SLAC_MMTYPE_CM_ATTEN_CHAR | SLAC_MMTYPE_MODE_INDICATION);
+            cm_atten_char_indication.num_sounds = received_aag_lists;
+            memcpy(cm_atten_char_indication.source_address, pev_mac, SLAC_MAC_ADDRESS_LENGTH);
+            memcpy(cm_atten_char_indication.run_id, pev_run_id, SLAC_RUN_ID_LENGTH);
+
+            // ISO 15118-3 A.9.2.1 [V2G3-A09-20]
+            for (uint8_t i = 0; i < SLAC_AAG_LIST_LENGTH; i++) {
+                cm_atten_char_indication.attenuation_profile.aag[i] = static_cast<uint8_t>(aag_list[i] / received_aag_lists);
+                api_state.get("attenuation_profile")->get(i)->updateUint(cm_atten_char_indication.attenuation_profile.aag[i]);
+            }
+
+            iso15118.qca700x.write_burst(reinterpret_cast<const uint8_t*>(&cm_atten_char_indication), sizeof(cm_atten_char_indication));
+
+            next_timeout = now_us() + SLAC_TT_MATCH_RESPONSE;
+            state = SLACState::WaitForAttenChar;
+            api_state.get("atten_char_indication_tries")->updateUint(atten_char_indication_tries + 1);
+            log_cm_atten_char_indication(cm_atten_char_indication);
+        } else if (state == SLACState::WaitForCMSetKeyConfirmation) {
+            // Internal modem communication: Repeat the request a few times before resetting the modem.
+            if (set_key_tries < SLAC_C_CM_SET_KEY_ATTEMPTS) {
+                iso15118.trace("SLAC: Repeating CM_SET_KEY.REQ (attempt %u/%u)",
+                               static_cast<unsigned>(set_key_tries + 1), static_cast<unsigned>(SLAC_C_CM_SET_KEY_ATTEMPTS));
+                next_timeout = {};
+                state = SLACState::CMSetKeyRequest;
+            } else {
+                iso15118.trace("SLAC: No CM_SET_KEY.CNF after %u attempts, resetting modem", static_cast<unsigned>(set_key_tries));
+                handle_modem_reset();
+            }
+        // For the vendor specific requests we just go to the next state if there is no response.
+        // We should not fail if they don't work.
+        } else if (state == SLACState::WaitForCMQualcommGetSwResponse) {
+            next_timeout = {};
+            state = SLACState::CMQualcommLinkStatusRequest;
+        } else if (state == SLACState::WaitForCMQualcommLinkStatusResponse) {
+            next_timeout = {};
+            state = SLACState::CMQualcommOpAttrRequest;
+        } else if (state == SLACState::WaitForCMQualcommOpAttrResponse) {
+            next_timeout = {};
+            state = SLACState::WaitForSlacParamRequest;
+        } else if (state == SLACState::WaitForSlacParamRequest) {
+            // TT_EVSE_SLAC_init expired: no CM_SLAC_PARM.REQ received from EV.
+            // Per [V2G3-M06-07]: cycle through State E/F for T_step_EF, then
+            // retry up to C_SEQU_RETRY times before falling back to IEC.
+            // With fast_timeout enabled we skip the E/F retry cycle entirely
+            // and fall back to IEC after the first attempt.
+            const uint8_t max_retries = iso15118.is_fast_timeout() ? 0 : SLAC_C_SEQU_RETRY;
+            slac_init_retry_count++;
+            if (slac_init_retry_count > max_retries) {
+                iso15118.trace("SLAC: TT_EVSE_SLAC_init retries exhausted (%u/%u), falling back to IEC",
+                                static_cast<unsigned>(slac_init_retry_count), static_cast<unsigned>(max_retries));
+                next_timeout = {};
+                state = SLACState::SlacInitFailed;
+
+                // Trigger IEC 61851 fallback for non-ISO EVs.
+                iso15118.begin_iec_transition(ISO15118::ModemOff::Immediate);
+            } else {
+                iso15118.trace("SLAC: TT_EVSE_SLAC_init expired, entering State E/F (attempt %u/%u)",
+                                static_cast<unsigned>(slac_init_retry_count), static_cast<unsigned>(max_retries));
+                // Set CP to 0% duty cycle (-12V = State E/F)
+                iso15118.set_charging_protocol(TF_EVSE_V2_CHARGING_PROTOCOL_ISO15118, 0);
+                next_timeout = now_us() + SLAC_T_STEP_EF;
+                state = SLACState::SlacInitEF;
+            }
+        } else if (state == SLACState::SlacInitEF) {
+            // T_step_EF expired: return to 5% duty and restart TT_EVSE_SLAC_init.
+            iso15118.trace("SLAC: T_step_EF expired, returning to 5%% duty cycle");
+            iso15118.set_charging_protocol(TF_EVSE_V2_CHARGING_PROTOCOL_ISO15118, 50);
+            next_timeout = now_us() + SLAC_TT_EVSE_SLAC_INIT;
+            state = SLACState::WaitForSlacParamRequest;
+        } else {
+            handle_modem_reset();
+        }
+    }
+
+    api_state.get("state")->updateEnum(state);
+}
+
+
+// -- Logging functions --
+void SLAC::uint8_to_printable_string(const uint8_t *data, const uint16_t length, char *out_buf, const uint16_t out_buf_length)
+{
+    uint16_t i = 0;
+    for (i = 0; (i < length) && (i < (out_buf_length - 1)); i++) {
+        if (data[i] >= 32 && data[i] <= 126) {
+            out_buf[i] = static_cast<char>(data[i]);
+        } else {
+            out_buf[i] = '.';
+        }
+    }
+    out_buf[i] = '\0';
+}
+
+void SLAC::log_homeplug_message_header_v0(const SLAC_HomeplugMessageHeaderV0 &header)
+{
+    trace_iso("  Ethernet Header:");
+    trace_iso("    destination_mac: %02x %02x %02x %02x %02x %02x", header.destination_mac[0], header.destination_mac[1], header.destination_mac[2], header.destination_mac[3], header.destination_mac[4], header.destination_mac[5]);
+    trace_iso("    source_mac:      %02x %02x %02x %02x %02x %02x", header.source_mac[0], header.source_mac[1], header.source_mac[2], header.source_mac[3], header.source_mac[4], header.source_mac[5]);
+    trace_iso("    ethernet_type:   %04x", header.ethernet_type);
+    trace_iso("  Homeplug Message Header:");
+    trace_iso("    mm_version: %02x", header.mm_version);
+    trace_iso("    mm_type:    %04x", header.mm_type);
+}
+
+void SLAC::log_homeplug_message_header(const SLAC_HomeplugMessageHeader &header)
+{
+    trace_iso("  Ethernet Header:");
+    trace_iso("    destination_mac: %02x %02x %02x %02x %02x %02x", header.destination_mac[0], header.destination_mac[1], header.destination_mac[2], header.destination_mac[3], header.destination_mac[4], header.destination_mac[5]);
+    trace_iso("    source_mac:      %02x %02x %02x %02x %02x %02x", header.source_mac[0], header.source_mac[1], header.source_mac[2], header.source_mac[3], header.source_mac[4], header.source_mac[5]);
+    trace_iso("    ethernet_type:   %04x", header.ethernet_type);
+    trace_iso("  Homeplug Message Header:");
+    trace_iso("    mm_version: %02x", header.mm_version);
+    trace_iso("    mm_type:    %04x", header.mm_type);
+    trace_iso("    fmni:       %02x", header.fmni);
+    trace_iso("    fmsn:       %02x", header.fmsn);
+}
+
+void SLAC::log_cm_set_key_request(const CM_SetKeyRequest &cm_set_key_request)
+{
+    trace_iso("CM_SET_KEY.REQ:");
+    log_homeplug_message_header(cm_set_key_request.header);
+    trace_iso("  key_type:       %02x", cm_set_key_request.key_type);
+    trace_iso("  my_nonce:       %08lx", cm_set_key_request.my_nonce);
+    trace_iso("  your_nonce:     %08lx", cm_set_key_request.your_nonce);
+    trace_iso("  pid:            %02x", cm_set_key_request.pid);
+    trace_iso("  prn:            %04x", cm_set_key_request.prn);
+    trace_iso("  pmn:            %02x", cm_set_key_request.pmn);
+    trace_iso("  cco_capability: %02x", cm_set_key_request.cco_capability);
+    trace_iso("  nid:            %02x %02x %02x %02x %02x %02x %02x", cm_set_key_request.nid[0], cm_set_key_request.nid[1], cm_set_key_request.nid[2], cm_set_key_request.nid[3], cm_set_key_request.nid[4], cm_set_key_request.nid[5], cm_set_key_request.nid[6]);
+    trace_iso("  new_eks:        %02x", cm_set_key_request.new_eks);
+    trace_iso("  nmk:            %02x %02x %02x %02x %02x %02x %02x %02x...", cm_set_key_request.nmk[0], cm_set_key_request.nmk[1], cm_set_key_request.nmk[2], cm_set_key_request.nmk[3], cm_set_key_request.nmk[4], cm_set_key_request.nmk[5], cm_set_key_request.nmk[6], cm_set_key_request.nmk[7]);
+}
+
+void SLAC::log_cm_set_key_confirmation(const CM_SetKeyConfirmation &cm_set_key_confirmation)
+{
+    trace_iso("CM_SET_KEY.CNF:");
+    log_homeplug_message_header(cm_set_key_confirmation.header);
+    trace_iso("  result:      %02x", cm_set_key_confirmation.result);
+    trace_iso("  my_nonce:    %08lx", cm_set_key_confirmation.my_nonce);
+    trace_iso("  your_nonce:  %08lx", cm_set_key_confirmation.your_nonce);
+    trace_iso("  pid:         %02x", cm_set_key_confirmation.pid);
+    trace_iso("  prn:         %04x", cm_set_key_confirmation.prn);
+    trace_iso("  pmn:         %02x", cm_set_key_confirmation.pmn);
+    trace_iso("  cco_capability: %02x", cm_set_key_confirmation.cco_capability);
+}
+
+void SLAC::log_cm_slac_parm_confirmation(const CM_SLACParmConfirmation &cm_slac_parm_confirmation)
+{
+    trace_iso("CM_SLAC_PARM.CNF:");
+    log_homeplug_message_header(cm_slac_parm_confirmation.header);
+    trace_iso("  m_sound_target:   %02x %02x %02x %02x %02x %02x", cm_slac_parm_confirmation.m_sound_target[0], cm_slac_parm_confirmation.m_sound_target[1], cm_slac_parm_confirmation.m_sound_target[2], cm_slac_parm_confirmation.m_sound_target[3], cm_slac_parm_confirmation.m_sound_target[4], cm_slac_parm_confirmation.m_sound_target[5]);
+    trace_iso("  num_sounds:       %02x", cm_slac_parm_confirmation.num_sounds);
+    trace_iso("  timeout:          %02x", cm_slac_parm_confirmation.timeout);
+    trace_iso("  resp_type:        %02x", cm_slac_parm_confirmation.resp_type);
+    trace_iso("  forwarding_sta:   %02x %02x %02x %02x %02x %02x", cm_slac_parm_confirmation.forwarding_sta[0], cm_slac_parm_confirmation.forwarding_sta[1], cm_slac_parm_confirmation.forwarding_sta[2], cm_slac_parm_confirmation.forwarding_sta[3], cm_slac_parm_confirmation.forwarding_sta[4], cm_slac_parm_confirmation.forwarding_sta[5]);
+    trace_iso("  application_type: %02x", cm_slac_parm_confirmation.application_type);
+    trace_iso("  security_type:    %02x", cm_slac_parm_confirmation.security_type);
+    trace_iso("  run_id:           %02x %02x %02x %02x %02x %02x %02x %02x", cm_slac_parm_confirmation.run_id[0], cm_slac_parm_confirmation.run_id[1], cm_slac_parm_confirmation.run_id[2], cm_slac_parm_confirmation.run_id[3], cm_slac_parm_confirmation.run_id[4], cm_slac_parm_confirmation.run_id[5], cm_slac_parm_confirmation.run_id[6], cm_slac_parm_confirmation.run_id[7]);
+}
+void SLAC::log_cm_slac_parm_request(const CM_SLACParmRequest &cm_slac_parm_request)
+{
+    trace_iso("CM_SLAC_PARM.REQ:");
+    log_homeplug_message_header(cm_slac_parm_request.header);
+    trace_iso("  application_type: %02x", cm_slac_parm_request.application_type);
+    trace_iso("  security_type:    %02x", cm_slac_parm_request.security_type);
+    trace_iso("  run_id:           %02x %02x %02x %02x %02x %02x %02x %02x", cm_slac_parm_request.run_id[0], cm_slac_parm_request.run_id[1], cm_slac_parm_request.run_id[2], cm_slac_parm_request.run_id[3], cm_slac_parm_request.run_id[4], cm_slac_parm_request.run_id[5], cm_slac_parm_request.run_id[6], cm_slac_parm_request.run_id[7]);
+}
+
+void SLAC::log_cm_start_atten_char_indication(const CM_StartAttenCharIndication &cm_start_atten_char_indication)
+{
+    trace_iso("CM_START_ATTEN_CHAR.IND:");
+    log_homeplug_message_header(cm_start_atten_char_indication.header);
+    trace_iso("  application_type: %02x", cm_start_atten_char_indication.application_type);
+    trace_iso("  security_type:    %02x", cm_start_atten_char_indication.security_type);
+    trace_iso("  num_sounds:       %02x", cm_start_atten_char_indication.num_sounds);
+    trace_iso("  timeout:          %02x", cm_start_atten_char_indication.timeout);
+    trace_iso("  resp_type:        %02x", cm_start_atten_char_indication.resp_type);
+    trace_iso("  forwarding_sta:   %02x %02x %02x %02x %02x %02x", cm_start_atten_char_indication.forwarding_sta[0], cm_start_atten_char_indication.forwarding_sta[1], cm_start_atten_char_indication.forwarding_sta[2], cm_start_atten_char_indication.forwarding_sta[3], cm_start_atten_char_indication.forwarding_sta[4], cm_start_atten_char_indication.forwarding_sta[5]);
+    trace_iso("  run_id:           %02x %02x %02x %02x %02x %02x %02x %02x", cm_start_atten_char_indication.run_id[0], cm_start_atten_char_indication.run_id[1], cm_start_atten_char_indication.run_id[2], cm_start_atten_char_indication.run_id[3], cm_start_atten_char_indication.run_id[4], cm_start_atten_char_indication.run_id[5], cm_start_atten_char_indication.run_id[6], cm_start_atten_char_indication.run_id[7]);
+}
+
+void SLAC::log_cm_mnbc_sound_indication(const CM_MNBCSoundIndication &cm_mnbc_sound_indication)
+{
+    trace_iso("CM_MNBC_SOUND.IND:");
+    log_homeplug_message_header(cm_mnbc_sound_indication.header);
+    trace_iso("  application_type:      %02x", cm_mnbc_sound_indication.application_type);
+    trace_iso("  security_type:         %02x", cm_mnbc_sound_indication.security_type);
+    trace_iso("  sender_id:             %02x %02x %02x %02x %02x %02x %02x %02x", cm_mnbc_sound_indication.sender_id[0], cm_mnbc_sound_indication.sender_id[1], cm_mnbc_sound_indication.sender_id[2], cm_mnbc_sound_indication.sender_id[3], cm_mnbc_sound_indication.sender_id[4], cm_mnbc_sound_indication.sender_id[5], cm_mnbc_sound_indication.sender_id[6], cm_mnbc_sound_indication.sender_id[7]);
+    trace_iso("  remaining_sound_count: %02x", cm_mnbc_sound_indication.remaining_sound_count);
+    trace_iso("  run_id:                %02x %02x %02x %02x %02x %02x %02x %02x", cm_mnbc_sound_indication.run_id[0], cm_mnbc_sound_indication.run_id[1], cm_mnbc_sound_indication.run_id[2], cm_mnbc_sound_indication.run_id[3], cm_mnbc_sound_indication.run_id[4], cm_mnbc_sound_indication.run_id[5], cm_mnbc_sound_indication.run_id[6], cm_mnbc_sound_indication.run_id[7]);
+    trace_iso("  random:                %02x %02x %02x %02x %02x %02x %02x %02x...", cm_mnbc_sound_indication.random[0], cm_mnbc_sound_indication.random[1], cm_mnbc_sound_indication.random[2], cm_mnbc_sound_indication.random[3], cm_mnbc_sound_indication.random[4], cm_mnbc_sound_indication.random[5], cm_mnbc_sound_indication.random[6], cm_mnbc_sound_indication.random[7]);
+
+}
+
+void SLAC::log_cm_atten_char_indication(const CM_AttenCharIndication &cm_atten_char_indication)
+{
+    trace_iso("CM_ATTEN_CHAR.IND:");
+    log_homeplug_message_header(cm_atten_char_indication.header);
+    trace_iso("  application_type: %02x", cm_atten_char_indication.application_type);
+    trace_iso("  security_type:    %02x", cm_atten_char_indication.security_type);
+    trace_iso("  source_address:   %02x %02x %02x %02x %02x %02x", cm_atten_char_indication.source_address[0], cm_atten_char_indication.source_address[1], cm_atten_char_indication.source_address[2], cm_atten_char_indication.source_address[3], cm_atten_char_indication.source_address[4], cm_atten_char_indication.source_address[5]);
+    trace_iso("  run_id:           %02x %02x %02x %02x %02x %02x %02x %02x", cm_atten_char_indication.run_id[0], cm_atten_char_indication.run_id[1], cm_atten_char_indication.run_id[2], cm_atten_char_indication.run_id[3], cm_atten_char_indication.run_id[4], cm_atten_char_indication.run_id[5], cm_atten_char_indication.run_id[6], cm_atten_char_indication.run_id[7]);
+    trace_iso("  source_id:        %02x %02x %02x %02x %02x %02x %02x %02x...", cm_atten_char_indication.source_id[0], cm_atten_char_indication.source_id[1], cm_atten_char_indication.source_id[2], cm_atten_char_indication.source_id[3], cm_atten_char_indication.source_id[4], cm_atten_char_indication.source_id[5], cm_atten_char_indication.source_id[6], cm_atten_char_indication.source_id[7]);
+    trace_iso("  resp_id:          %02x %02x %02x %02x %02x %02x %02x %02x...", cm_atten_char_indication.resp_id[0], cm_atten_char_indication.resp_id[1], cm_atten_char_indication.resp_id[2], cm_atten_char_indication.resp_id[3], cm_atten_char_indication.resp_id[4], cm_atten_char_indication.resp_id[5], cm_atten_char_indication.resp_id[6], cm_atten_char_indication.resp_id[7]);
+    trace_iso("  num_sounds:       %02x", cm_atten_char_indication.num_sounds);
+    trace_iso("  attenuation_profile:");
+    trace_iso("    num_groups: %02x", cm_atten_char_indication.attenuation_profile.num_groups);
+    for (uint8_t i = 0; i < SLAC_AAG_LIST_LENGTH-2; i+=8) {
+        trace_iso("    %02x %02x %02x %02x %02x %02x %02x %02x", cm_atten_char_indication.attenuation_profile.aag[i+0], cm_atten_char_indication.attenuation_profile.aag[i+1], cm_atten_char_indication.attenuation_profile.aag[i+2], cm_atten_char_indication.attenuation_profile.aag[i+3], cm_atten_char_indication.attenuation_profile.aag[i+4], cm_atten_char_indication.attenuation_profile.aag[i+5], cm_atten_char_indication.attenuation_profile.aag[i+6], cm_atten_char_indication.attenuation_profile.aag[i+7]);
+    }
+    trace_iso("    %02x %02x", cm_atten_char_indication.attenuation_profile.aag[SLAC_AAG_LIST_LENGTH-2], cm_atten_char_indication.attenuation_profile.aag[SLAC_AAG_LIST_LENGTH-1]);
+}
+
+void SLAC::log_cm_atten_profile_indication(const CM_AttenProfileIndication &cm_atten_profile_indication)
+{
+    trace_iso("CM_ATTEN_PROFILE.IND:");
+    log_homeplug_message_header(cm_atten_profile_indication.header);
+    trace_iso("  pev_mac:    %02x %02x %02x %02x %02x %02x", cm_atten_profile_indication.pev_mac[0], cm_atten_profile_indication.pev_mac[1], cm_atten_profile_indication.pev_mac[2], cm_atten_profile_indication.pev_mac[3], cm_atten_profile_indication.pev_mac[4], cm_atten_profile_indication.pev_mac[5]);
+    trace_iso("  num_groups: %02x", cm_atten_profile_indication.num_groups);
+    for (uint8_t i = 0; i < SLAC_AAG_LIST_LENGTH-2; i+=8) {
+        trace_iso("  %02x %02x %02x %02x %02x %02x %02x %02x", cm_atten_profile_indication.aag[i+0], cm_atten_profile_indication.aag[i+1], cm_atten_profile_indication.aag[i+2], cm_atten_profile_indication.aag[i+3], cm_atten_profile_indication.aag[i+4], cm_atten_profile_indication.aag[i+5], cm_atten_profile_indication.aag[i+6], cm_atten_profile_indication.aag[i+7]);
+    }
+    trace_iso("  %02x %02x", cm_atten_profile_indication.aag[SLAC_AAG_LIST_LENGTH-2], cm_atten_profile_indication.aag[SLAC_AAG_LIST_LENGTH-1]);
+}
+
+void SLAC::log_cm_atten_char_response(const CM_AttenCharResponse &cm_atten_char_response)
+{
+    trace_iso("CM_ATTEN_CHAR.RSP:");
+    log_homeplug_message_header(cm_atten_char_response.header);
+    trace_iso("  application_type: %02x", cm_atten_char_response.application_type);
+    trace_iso("  security_type:    %02x", cm_atten_char_response.security_type);
+    trace_iso("  source_address:   %02x %02x %02x %02x %02x %02x", cm_atten_char_response.source_address[0], cm_atten_char_response.source_address[1], cm_atten_char_response.source_address[2], cm_atten_char_response.source_address[3], cm_atten_char_response.source_address[4], cm_atten_char_response.source_address[5]);
+    trace_iso("  run_id:           %02x %02x %02x %02x %02x %02x %02x %02x", cm_atten_char_response.run_id[0], cm_atten_char_response.run_id[1], cm_atten_char_response.run_id[2], cm_atten_char_response.run_id[3], cm_atten_char_response.run_id[4], cm_atten_char_response.run_id[5], cm_atten_char_response.run_id[6], cm_atten_char_response.run_id[7]);
+    trace_iso("  source_id:        %02x %02x %02x %02x %02x %02x %02x %02x...", cm_atten_char_response.source_id[0], cm_atten_char_response.source_id[1], cm_atten_char_response.source_id[2], cm_atten_char_response.source_id[3], cm_atten_char_response.source_id[4], cm_atten_char_response.source_id[5], cm_atten_char_response.source_id[6], cm_atten_char_response.source_id[7]);
+    trace_iso("  resp_id:          %02x %02x %02x %02x %02x %02x %02x %02x...", cm_atten_char_response.resp_id[0], cm_atten_char_response.resp_id[1], cm_atten_char_response.resp_id[2], cm_atten_char_response.resp_id[3], cm_atten_char_response.resp_id[4], cm_atten_char_response.resp_id[5], cm_atten_char_response.resp_id[6], cm_atten_char_response.resp_id[7]);
+}
+
+void SLAC::log_cm_validate_request(const CM_ValidateRequest &cm_validate_request)
+{
+    trace_iso("CM_VALIDATE.REQ:");
+    log_homeplug_message_header(cm_validate_request.header);
+    trace_iso("  signal_type: %02x", cm_validate_request.signal_type);
+    trace_iso("  timer:       %02x", cm_validate_request.timer);
+    trace_iso("  result:      %02x", cm_validate_request.result);
+}
+
+void SLAC::log_cm_validate_confirmation(const CM_ValidateConfirmation &cm_validate_confirmation)
+{
+    trace_iso("CM_VALIDATE.CNF:");
+    log_homeplug_message_header(cm_validate_confirmation.header);
+    trace_iso("  signal_type: %02x", cm_validate_confirmation.signal_type);
+    trace_iso("  toggle_num:  %02x", cm_validate_confirmation.toggle_num);
+    trace_iso("  result:      %02x", cm_validate_confirmation.result);
+}
+
+void SLAC::log_cm_slac_match_confirmation(const CM_SLACMatchConfirmation &cm_slac_match_confirmation)
+{
+    trace_iso("CM_SLAC_MATCH.CNF:");
+    log_homeplug_message_header(cm_slac_match_confirmation.header);
+    trace_iso("  application_type: %02x", cm_slac_match_confirmation.application_type);
+    trace_iso("  security_type:    %02x", cm_slac_match_confirmation.security_type);
+    trace_iso("  mvf_length:       %04x", cm_slac_match_confirmation.mvf_length);
+    trace_iso("  pev_id:           %02x %02x %02x %02x %02x %02x %02x %02x...", cm_slac_match_confirmation.pev_id[0], cm_slac_match_confirmation.pev_id[1], cm_slac_match_confirmation.pev_id[2], cm_slac_match_confirmation.pev_id[3], cm_slac_match_confirmation.pev_id[4], cm_slac_match_confirmation.pev_id[5], cm_slac_match_confirmation.pev_id[6], cm_slac_match_confirmation.pev_id[7]);
+    trace_iso("  pev_mac:          %02x %02x %02x %02x %02x %02x", cm_slac_match_confirmation.pev_mac[0], cm_slac_match_confirmation.pev_mac[1], cm_slac_match_confirmation.pev_mac[2], cm_slac_match_confirmation.pev_mac[3], cm_slac_match_confirmation.pev_mac[4], cm_slac_match_confirmation.pev_mac[5]);
+    trace_iso("  evse_id:          %02x %02x %02x %02x %02x %02x %02x %02x...", cm_slac_match_confirmation.evse_id[0], cm_slac_match_confirmation.evse_id[1], cm_slac_match_confirmation.evse_id[2], cm_slac_match_confirmation.evse_id[3], cm_slac_match_confirmation.evse_id[4], cm_slac_match_confirmation.evse_id[5], cm_slac_match_confirmation.evse_id[6], cm_slac_match_confirmation.evse_id[7]);
+    trace_iso("  evse_mac:         %02x %02x %02x %02x %02x %02x", cm_slac_match_confirmation.evse_mac[0], cm_slac_match_confirmation.evse_mac[1], cm_slac_match_confirmation.evse_mac[2], cm_slac_match_confirmation.evse_mac[3], cm_slac_match_confirmation.evse_mac[4], cm_slac_match_confirmation.evse_mac[5]);
+    trace_iso("  run_id:           %02x %02x %02x %02x %02x %02x %02x %02x...", cm_slac_match_confirmation.run_id[0], cm_slac_match_confirmation.run_id[1], cm_slac_match_confirmation.run_id[2], cm_slac_match_confirmation.run_id[3], cm_slac_match_confirmation.run_id[4], cm_slac_match_confirmation.run_id[5], cm_slac_match_confirmation.run_id[6], cm_slac_match_confirmation.run_id[7]);
+    trace_iso("  nid:              %02x %02x %02x %02x %02x %02x %02x", cm_slac_match_confirmation.nid[0], cm_slac_match_confirmation.nid[1], cm_slac_match_confirmation.nid[2], cm_slac_match_confirmation.nid[3], cm_slac_match_confirmation.nid[4], cm_slac_match_confirmation.nid[5], cm_slac_match_confirmation.nid[6]);
+    trace_iso("  nmk:              %02x %02x %02x %02x %02x %02x %02x %02x...", cm_slac_match_confirmation.nmk[0], cm_slac_match_confirmation.nmk[1], cm_slac_match_confirmation.nmk[2], cm_slac_match_confirmation.nmk[3], cm_slac_match_confirmation.nmk[4], cm_slac_match_confirmation.nmk[5], cm_slac_match_confirmation.nmk[6], cm_slac_match_confirmation.nmk[7]);
+}
+
+void SLAC::log_cm_slac_match_request(const CM_SLACMatchRequest &cm_slac_match_request)
+{
+    trace_iso("CM_SLAC_MATCH.REQ:");
+    log_homeplug_message_header(cm_slac_match_request.header);
+    trace_iso("  application_type: %02x", cm_slac_match_request.application_type);
+    trace_iso("  security_type:    %02x", cm_slac_match_request.security_type);
+    trace_iso("  mvf_length:       %04x", cm_slac_match_request.mvf_length);
+    trace_iso("  pev_id:           %02x %02x %02x %02x %02x %02x %02x %02x...", cm_slac_match_request.pev_id[0], cm_slac_match_request.pev_id[1], cm_slac_match_request.pev_id[2], cm_slac_match_request.pev_id[3], cm_slac_match_request.pev_id[4], cm_slac_match_request.pev_id[5], cm_slac_match_request.pev_id[6], cm_slac_match_request.pev_id[7]);
+    trace_iso("  pev_mac:          %02x %02x %02x %02x %02x %02x", cm_slac_match_request.pev_mac[0], cm_slac_match_request.pev_mac[1], cm_slac_match_request.pev_mac[2], cm_slac_match_request.pev_mac[3], cm_slac_match_request.pev_mac[4], cm_slac_match_request.pev_mac[5]);
+    trace_iso("  evse_id:          %02x %02x %02x %02x %02x %02x %02x %02x...", cm_slac_match_request.evse_id[0], cm_slac_match_request.evse_id[1], cm_slac_match_request.evse_id[2], cm_slac_match_request.evse_id[3], cm_slac_match_request.evse_id[4], cm_slac_match_request.evse_id[5], cm_slac_match_request.evse_id[6], cm_slac_match_request.evse_id[7]);
+    trace_iso("  evse_mac:         %02x %02x %02x %02x %02x %02x", cm_slac_match_request.evse_mac[0], cm_slac_match_request.evse_mac[1], cm_slac_match_request.evse_mac[2], cm_slac_match_request.evse_mac[3], cm_slac_match_request.evse_mac[4], cm_slac_match_request.evse_mac[5]);
+    trace_iso("  run_id:           %02x %02x %02x %02x %02x %02x %02x %02x...", cm_slac_match_request.run_id[0], cm_slac_match_request.run_id[1], cm_slac_match_request.run_id[2], cm_slac_match_request.run_id[3], cm_slac_match_request.run_id[4], cm_slac_match_request.run_id[5], cm_slac_match_request.run_id[6], cm_slac_match_request.run_id[7]);
+}
+
+void SLAC::log_cm_qualcomm_get_sw_request(const CM_QualcommGetSwRequest &cm_qualcomm_get_sw_request)
+{
+    trace_iso("CM_QUALCOMM_GET_SW.REQ:");
+    log_homeplug_message_header_v0(cm_qualcomm_get_sw_request.header);
+    trace_iso("  vendor_mme: %02x %02x %02x", cm_qualcomm_get_sw_request.vendor_mme[0], cm_qualcomm_get_sw_request.vendor_mme[1], cm_qualcomm_get_sw_request.vendor_mme[2]);
+}
+
+void SLAC::log_cm_qualcomm_get_sw_confirmation(const CM_QualcommGetSwConfirmation &log_cm_qualcomm_get_sw_confirmation)
+{
+    trace_iso("CM_QUALCOMM_GET_SW.CNF:");
+    log_homeplug_message_header_v0(log_cm_qualcomm_get_sw_confirmation.header);
+    trace_iso("  vendor_mme:     %02x %02x %02x", log_cm_qualcomm_get_sw_confirmation.vendor_mme[0], log_cm_qualcomm_get_sw_confirmation.vendor_mme[1], log_cm_qualcomm_get_sw_confirmation.vendor_mme[2]);
+    trace_iso("  status:         %02x", log_cm_qualcomm_get_sw_confirmation.status);
+    trace_iso("  device:         %02x", log_cm_qualcomm_get_sw_confirmation.device);
+    trace_iso("  version_length: %02x", log_cm_qualcomm_get_sw_confirmation.version_length);
+    char version_str[sizeof(log_cm_qualcomm_get_sw_confirmation.version)+1] = "\0";
+    uint8_to_printable_string(log_cm_qualcomm_get_sw_confirmation.version, sizeof(log_cm_qualcomm_get_sw_confirmation.version), version_str, sizeof(version_str));
+    trace_iso("  version:        %s", version_str);
+}
+
+void SLAC::log_cm_qualcomm_link_status_request(const CM_QualcommLinkStatusRequest &cm_qualcomm_link_status_request)
+{
+    trace_iso("CM_QUALCOMM_LINK_STATUS.REQ:");
+    log_homeplug_message_header_v0(cm_qualcomm_link_status_request.header);
+    trace_iso("  vendor_mme: %02x %02x %02x", cm_qualcomm_link_status_request.vendor_mme[0], cm_qualcomm_link_status_request.vendor_mme[1], cm_qualcomm_link_status_request.vendor_mme[2]);
+}
+
+void SLAC::log_cm_qualcomm_link_status_confirmation(const CM_QualcommLinkStatusConfirmation &cm_qualcomm_link_status_confirmation)
+{
+    trace_iso("CM_QUALCOMM_LINK_STATUS.CNF:");
+    log_homeplug_message_header_v0(cm_qualcomm_link_status_confirmation.header);
+    trace_iso("  vendor_mme: %02x %02x %02x", cm_qualcomm_link_status_confirmation.vendor_mme[0], cm_qualcomm_link_status_confirmation.vendor_mme[1], cm_qualcomm_link_status_confirmation.vendor_mme[2]);
+    trace_iso("  link_status: %02x", cm_qualcomm_link_status_confirmation.link_status);
+}
+
+void SLAC::log_cm_qualcomm_op_attr_request(const CM_QualcommOpAttrRequest &cm_qualcomm_op_attr_request)
+{
+    trace_iso("CM_QUALCOMM_OP_ATTR.REQ:");
+    log_homeplug_message_header_v0(cm_qualcomm_op_attr_request.header);
+    trace_iso("  vendor_mme: %02x %02x %02x", cm_qualcomm_op_attr_request.vendor_mme[0], cm_qualcomm_op_attr_request.vendor_mme[1], cm_qualcomm_op_attr_request.vendor_mme[2]);
+    trace_iso("  cookie:     %08lx", cm_qualcomm_op_attr_request.cookie);
+    trace_iso("  report_type: %02x", cm_qualcomm_op_attr_request.report_type);
+}
+
+void SLAC::log_cm_qualcomm_op_attr_confirmation(const CM_QualcommOpAttrConfirmation &cm_qualcomm_op_attr_confirmation)
+{
+    trace_iso("CM_QUALCOMM_OP_ATTR.CNF:");
+    log_homeplug_message_header_v0(cm_qualcomm_op_attr_confirmation.header);
+    trace_iso("  success:            %04x", cm_qualcomm_op_attr_confirmation.success);
+    trace_iso("  cookie:             %08lx", cm_qualcomm_op_attr_confirmation.cookie);
+    trace_iso("  report_type:        %02x", cm_qualcomm_op_attr_confirmation.report_type);
+    trace_iso("  size:               %04x", cm_qualcomm_op_attr_confirmation.size);
+    char hw_platform_str[sizeof(cm_qualcomm_op_attr_confirmation.hw_platform)+1] = "\0";
+    uint8_to_printable_string(cm_qualcomm_op_attr_confirmation.hw_platform, sizeof(cm_qualcomm_op_attr_confirmation.hw_platform), hw_platform_str, sizeof(hw_platform_str));
+    trace_iso("  hw_platform:        %s", hw_platform_str);
+    char sw_platform_str[sizeof(cm_qualcomm_op_attr_confirmation.sw_platform)+1] = "\0";
+    uint8_to_printable_string(cm_qualcomm_op_attr_confirmation.sw_platform, sizeof(cm_qualcomm_op_attr_confirmation.sw_platform), sw_platform_str, sizeof(sw_platform_str));
+    trace_iso("  sw_platform:        %s", sw_platform_str);
+    trace_iso("  version_major:      %08lx", cm_qualcomm_op_attr_confirmation.version_major);
+    trace_iso("  version_minor:      %08lx", cm_qualcomm_op_attr_confirmation.version_minor);
+    trace_iso("  version_pib:        %08lx", cm_qualcomm_op_attr_confirmation.version_pib);
+    trace_iso("  version_build:      %08lx", cm_qualcomm_op_attr_confirmation.version_build);
+    trace_iso("  reserved:           %08lx", cm_qualcomm_op_attr_confirmation.reserved);
+    char build_date_str[sizeof(cm_qualcomm_op_attr_confirmation.build_date)+1] = "\0";
+    uint8_to_printable_string(cm_qualcomm_op_attr_confirmation.build_date, sizeof(cm_qualcomm_op_attr_confirmation.build_date), build_date_str, sizeof(build_date_str));
+    trace_iso("  build_date:         %s", build_date_str);
+    char release_type_str[sizeof(cm_qualcomm_op_attr_confirmation.release_type)+1] = "\0";
+    uint8_to_printable_string(cm_qualcomm_op_attr_confirmation.release_type, sizeof(cm_qualcomm_op_attr_confirmation.release_type), release_type_str, sizeof(release_type_str));
+    trace_iso("  release_type:       %s", release_type_str);
+    trace_iso("  sdram_type:         %02x", cm_qualcomm_op_attr_confirmation.sdram_type);
+    trace_iso("  reserved2:          %02x", cm_qualcomm_op_attr_confirmation.reserved2);
+    trace_iso("  line_freq_zc:       %02x", cm_qualcomm_op_attr_confirmation.line_freq_zc);
+    trace_iso("  sdram_size:         %08lx", cm_qualcomm_op_attr_confirmation.sdram_size);
+    trace_iso("  authorization_mode: %02x", cm_qualcomm_op_attr_confirmation.authorization_mode);
+}
