@@ -1,0 +1,40 @@
+/** @jsxImportSource preact */
+import { h } from "preact";
+import * as options from "../../options";
+let x = {
+    "meters_sun_spec": {
+        "status": {
+        },
+        "navbar": {
+        },
+        "content": {
+            "meter_class": "SunSpec",
+
+            "config_display_name": "Anzeigename",
+            "config_host": "Hostname oder IP-Adresse",
+            "config_port": "Port",
+            "config_port_muted": "typischerweise 502 oder 1502",
+            "config_device_address": "Geräteadresse",
+            "config_serial_number": "Seriennummer",
+            "config_unique_id": "Eindeutige ID",
+            "config_unique_id_muted": "optional; Hersteller, Modell, Seriennummer",
+            "config_model_id": "Modell",
+            "config_model_instance": "Modellinstanz",
+            "config_dc_port_type": "DC-Anschlussart",
+            "config_location": "Messort",
+            "config_location_depends_model_id": "Hängt vom Modell ab...",
+            "config_location_depends_dc_port_type": "Hängt von der DC-Anschlussart ab...",
+            "config_manual_override": "Gerät manuell einrichten",
+
+            "dc_port_type_photovoltaic": "PV",
+            "dc_port_type_energy_storage_system": "Speicher",
+            "dc_port_type_electric_vehicle": "Fahrzeug",
+            "dc_port_type_generic_injecting": "Generisch (abgebend)",
+            "dc_port_type_generic_absorbing": "Generisch (aufnehmend)",
+            "dc_port_type_generic_bidirectional": "Generisch (bidirektional)",
+            "dc_port_type_dc_dc": "DC/DC"
+        },
+        "script": {
+        }
+    }
+}

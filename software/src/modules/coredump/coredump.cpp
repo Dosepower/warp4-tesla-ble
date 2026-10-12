@@ -1,0 +1,277 @@
+/* esp32-firmware
+ * Copyright (C) 2023 Frederic Henrichs <frederic@tinkerforge.com>
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, write to the
+ * Free Software Foundation, Inc., 59 Temple Place - Suite 330,
+ * Boston, MA 02111-1307, USA.
+ */
+
+#include "coredump.h"
+
+#include <esp_core_dump.h>
+#include <esp_partition.h>
+
+#include "event_log_prefix.h"
+#include "generated/module_dependencies.h"
+#include "build.h"
+#include "tools/string_builder.h"
+
+#include "gcc_warnings.h"
+
+// Function missing from esp_core_dump.h
+extern "C" esp_err_t esp_core_dump_partition_and_size_get(const esp_partition_t **partition, uint32_t* size);
+
+// Pre- and postfix take up 54 characters.
+COREDUMP_RTC_DATA_ATTR char tf_coredump_info[512];
+
+#if defined(__GNUC__)
+    #pragma GCC diagnostic push
+    #pragma GCC diagnostic ignored "-Weffc++"
+#endif
+
+Coredump::Coredump()
+{
+    StaticJsonDocument<500> tf_coredump_json;
+    tf_coredump_json["firmware_version"] = build_version_full_str();
+    tf_coredump_json["firmware_commit_id"] = build_commit_id_str();
+    tf_coredump_json["firmware_file_name"] = build_filename_str();
+
+    if (build_coredump_info(tf_coredump_json)) {
+        setup_error = CoredumpSetupError::OK;
+        return;
+    }
+
+    tf_coredump_json.remove("firmware_file_name");
+
+    if (build_coredump_info(tf_coredump_json)) {
+        setup_error = CoredumpSetupError::Truncated;
+        return;
+    }
+
+    setup_error = CoredumpSetupError::BufferToSmall;
+}
+
+#if defined(__GNUC__)
+    #pragma GCC diagnostic pop
+#endif
+
+bool Coredump::build_coredump_info(JsonDocument &tf_coredump_json)
+{
+    String tf_coredump_json_string;
+    serializeJson(tf_coredump_json, tf_coredump_json_string);
+
+    constexpr const char *prefix = "___tf_coredump_info_start___";
+    constexpr const char *suffix = "___tf_coredump_info_end___";
+    constexpr size_t prefix_len = constexpr_strlen(prefix);
+    constexpr size_t suffix_len = constexpr_strlen(suffix);
+
+    if (prefix_len + tf_coredump_json_string.length() + suffix_len >= sizeof(tf_coredump_info))
+        return false;
+
+    StringWriter sw(tf_coredump_info, sizeof(tf_coredump_info));
+
+    sw.puts(prefix, prefix_len);
+    sw.puts(tf_coredump_json_string);
+    sw.puts(suffix, suffix_len);
+
+    return true;
+}
+
+void Coredump::pre_init()
+{
+    if (esp_reset_reason() != ESP_RST_PANIC) {
+        return;
+    }
+
+    char task_name[16];
+    uint32_t exc_cause;
+    esp_err_t summary_err;
+    char backtrace[192];
+    StringWriter sw_bt(backtrace, ARRAY_SIZE(backtrace));
+
+    { // Scope for summary
+        esp_core_dump_summary_t summary;
+        summary_err = esp_core_dump_get_summary(&summary);
+
+        if (summary_err == ESP_OK) {
+            memcpy(task_name, summary.exc_task, sizeof(task_name));
+            exc_cause = summary.ex_info.exc_cause;
+
+            sw_bt.puts("Backtrace:");
+
+            const uint32_t frame_count = std::min(summary.exc_bt_info.depth, static_cast<uint32_t>(ARRAY_SIZE(summary.exc_bt_info.bt)));
+            const uint32_t *bt = summary.exc_bt_info.bt;
+            for (uint32_t i = 0; i < frame_count; i ++) {
+                sw_bt.printf(" 0x%08lx", bt[i]);
+            }
+
+            if (summary.exc_bt_info.corrupted) {
+                sw_bt.puts(" |<-CORRUPTED\n");
+            } else {
+                sw_bt.putc('\n');
+            }
+        } else {
+            exc_cause = EXCCAUSE_EXCCAUSE_MASK + 1;
+        }
+    }
+
+    { // Scope for panic_reason
+        char panic_reason[256];
+        esp_err_t panic_err = esp_core_dump_get_panic_reason(panic_reason, sizeof(panic_reason));
+
+        if (panic_err == ESP_OK) {
+            logger.printfln("Task '%.16s' panicked: '%s'", task_name, panic_reason);
+        } else if (summary_err == ESP_OK) {
+            const char *exc_name = exc_cause < ARRAY_SIZE(exc_cause_table) ? exc_cause_table[exc_cause] : "<unknown>";
+            logger.printfln("Task '%.16s' caused exception %lu: %s", task_name, exc_cause, exc_name);
+        } else {
+            bool encrypted = false;
+
+            {
+                const esp_partition_t *core_part = nullptr;
+                uint32_t out_size;
+
+                if (esp_core_dump_partition_and_size_get(&core_part, &out_size) == ESP_OK) {
+                    encrypted = core_part->encrypted;
+                }
+            }
+
+            logger.printfln("Exception/panic information unavailable. Summary: %s. Panic: %s. Encrypted: %i.", esp_err_to_name(summary_err), esp_err_to_name(panic_err), encrypted);
+        }
+    }
+
+    const size_t backtrace_length = sw_bt.getLength();
+    if (backtrace_length > 0) {
+        logger.print_plain(backtrace, backtrace_length);
+    }
+}
+
+void Coredump::pre_setup()
+{
+    state = Config::Object({
+        {"coredump_available", Config::Bool(false)}
+    });
+
+    if (setup_error == CoredumpSetupError::BufferToSmall) {
+        logger.printfln("Buffer too small for any info data.");
+    } else if (setup_error == CoredumpSetupError::Truncated) {
+        logger.printfln("Buffer too small for all data; info data truncated.");
+    }
+}
+
+void Coredump::setup()
+{
+    const esp_err_t status = esp_core_dump_image_check();
+
+    switch(status) {
+        case ESP_OK:
+            state.get("coredump_available")->updateBool(true);
+            break;
+        case ESP_ERR_NOT_FOUND:
+            break;
+        case ESP_ERR_INVALID_SIZE:
+            // Don't report this because it's the default error when a core dump was erased.
+            break;
+        case ESP_ERR_INVALID_CRC:
+            // esp_core_dump_image_check() writes confusing log messages directly to the console when checksum verification fails.
+            // Change this to a plain printf if it shouldn't be in the event log.
+            logger.printfln("Core dump has invalid CRC");
+            break;
+        default:
+            logger.printfln("Core dump unavailable: %s (0x%lx)", esp_err_to_name(status), static_cast<uint32_t>(status));
+    }
+
+    initialized = true;
+}
+
+void Coredump::register_urls()
+{
+    api.addState("coredump/state", &state);
+
+    server.on_HTTPThread("/coredump/erase", HTTP_GET, [this](WebServerRequest request) {
+        esp_core_dump_image_erase();
+
+        if (esp_core_dump_image_check() == ESP_OK) {
+            return request.send_plain(503, "Error while erasing core dump");
+        }
+
+        task_scheduler.scheduleOnce([this]() {
+            this->state.get("coredump_available")->updateBool(false);
+        });
+
+        return request.send_plain(200);
+    });
+
+    server.on_HTTPThread("/coredump/coredump.elf", HTTP_GET, [this](WebServerRequest request) {
+        constexpr size_t BUFFER_SIZE = 2048;
+        char buffer[BUFFER_SIZE];
+
+        esp_err_t ret = esp_core_dump_image_check();
+        if (ret != ESP_OK) {
+            if (ret == ESP_ERR_INVALID_SIZE) {
+                return request.send_plain(404, "No core dump stored");
+            }
+            StringWriter sw(buffer, BUFFER_SIZE);
+            sw.printf("No core dump image available: %s (0x%lX)", esp_err_to_name(ret), static_cast<uint32_t>(ret));
+            return request.send_plain(503, sw);
+        }
+
+        const esp_partition_t *core_part;
+        uint32_t size_u32;
+
+        ret = esp_core_dump_partition_and_size_get(&core_part, &size_u32);
+
+        if (ret != ESP_OK) {
+            StringWriter sw(buffer, BUFFER_SIZE);
+            sw.printf("Failed to get core dump image: %s (0x%lX)", esp_err_to_name(ret), static_cast<uint32_t>(ret));
+            return request.send_plain(503, sw);
+        }
+
+        request.beginChunkedResponse_bytes(200);
+
+        const size_t size = static_cast<size_t>(size_u32);
+
+        for (size_t i = 0; i < size; i += BUFFER_SIZE) {
+            size_t to_send = std::min(BUFFER_SIZE, size - i);
+
+            ret = esp_partition_read(core_part, i, buffer, to_send);
+
+            if (ret != ESP_OK) {
+                logger.printfln("esp_partition_read failed: %s (0x%04x)", esp_err_to_name(ret), static_cast<unsigned>(ret));
+                return WebServerRequestReturnProtect{.error = ESP_FAIL};
+            }
+
+            size_t to_skip = 0;
+
+            if (i == 0 && to_send >= 4) {
+                constexpr char elf_header[4] = {0x7F, 'E', 'L', 'F'};
+
+                for (size_t k = 0; k <= to_send - 4; ++k) {
+                    if (memcmp(buffer + k, elf_header, 4) == 0) {
+                        to_skip = k;
+                        break;
+                    }
+                }
+
+                if (to_skip == 0 && memcmp(buffer, elf_header, 4) != 0) {
+                    logger.printfln("Could not find ELF header in the first %zu bytes of the core dump image", to_send);
+                }
+            }
+
+            SEND_CHUNK_OR_FAIL_LEN(request, buffer + to_skip, to_send - to_skip);
+        }
+
+        return request.endChunkedResponse();
+    });
+}

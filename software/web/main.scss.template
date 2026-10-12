@@ -1,0 +1,1040 @@
+// Toggle global options
+//$enable-gradients: true;
+//$enable-shadows: true;
+
+// Customize some defaults
+//$body-color: purple;
+//$body-bg: #f5f5f5;
+
+$body-color: black;
+$gray-700: black;
+$gray-900: black;
+
+$cyan: #0dcaf0;
+// Bootstrap 5: $min-contrast-ratio replaces $yiq-contrasted-threshold
+// Default is 4.5. A value of ~3 matches our previous color contrast behavior.
+$min-contrast-ratio: 3;
+
+// Bootstrap 5 uses a different native font stack. Set to Bootstrap 4's font stack for consistency.
+// Not sure which is better, but it looks unfamiliar on first sight
+$font-family-sans-serif: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans", "Liberation Sans", sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji";
+
+// Dark mode customizations
+$body-bg-dark: #1e1e1e;
+$body-secondary-bg-dark: #2d2d2d;
+$body-tertiary-bg-dark: #3a3a3a;
+$border-color-dark: #495057;
+
+@import "../node_modules/bootstrap/scss/functions";
+@import "../node_modules/bootstrap/scss/variables";
+@import "../node_modules/bootstrap/scss/variables-dark";
+
+$grid-breakpoints: (
+        xs: 0,
+        sm: 576px,
+        md: 768px,
+        lg: 992px,
+        xl: 1290px
+);
+
+$container-max-widths: (
+        sm: 540px,
+        md: 720px,
+        lg: 960px,
+        xl: 1230px
+);
+
+{{{module_pre_imports}}}
+
+// Bootstrap 5 disables negative margins by default. Enable them for mx-n1, mb-n2, etc.
+$enable-negative-margins: true;
+
+@import "../node_modules/bootstrap/scss/maps";
+@import "../node_modules/bootstrap/scss/mixins";
+@import "../node_modules/bootstrap/scss/utilities";
+@import "../node_modules/bootstrap/scss/root";
+@import "../node_modules/bootstrap/scss/reboot";
+@import "../node_modules/bootstrap/scss/type";
+//@import "../node_modules/bootstrap/scss/images";
+//@import "../node_modules/bootstrap/scss/code";
+@import "../node_modules/bootstrap/scss/containers";
+@import "../node_modules/bootstrap/scss/grid";
+@import "../node_modules/bootstrap/scss/tables";
+@import "../node_modules/bootstrap/scss/forms";
+@import "../node_modules/bootstrap/scss/buttons";
+@import "../node_modules/bootstrap/scss/transitions";
+@import "../node_modules/bootstrap/scss/dropdown";
+@import "../node_modules/bootstrap/scss/button-group";
+// input-group and custom-forms is now part of forms in Bootstrap 5
+//@import "../node_modules/bootstrap/scss/input-group";
+//@import "../node_modules/bootstrap/scss/custom-forms";
+@import "../node_modules/bootstrap/scss/nav";
+@import "../node_modules/bootstrap/scss/navbar";
+@import "../node_modules/bootstrap/scss/card";
+//@import "../node_modules/bootstrap/scss/breadcrumb";
+//@import "../node_modules/bootstrap/scss/pagination";
+//@import "../node_modules/bootstrap/scss/badge";
+@import "../node_modules/bootstrap/scss/alert";
+@import "../node_modules/bootstrap/scss/progress";
+@import "../node_modules/bootstrap/scss/list-group";
+@import "../node_modules/bootstrap/scss/close";
+//@import "../node_modules/bootstrap/scss/toasts";
+@import "../node_modules/bootstrap/scss/modal";
+//@import "../node_modules/bootstrap/scss/tooltip";
+//@import "../node_modules/bootstrap/scss/popover";
+//@import "../node_modules/bootstrap/scss/carousel";
+@import "../node_modules/bootstrap/scss/spinners";
+@import "../node_modules/bootstrap/scss/helpers";
+@import "../node_modules/bootstrap/scss/utilities/api";
+@import "../node_modules/uplot/dist/uPlot.min";
+
+.borderless-form-control {
+    @extend .form-control;
+    border: none;
+    height: auto;
+
+    // .form-control sets font-size: 1rem, but the body uses 0.875rem.
+    // .invalid-feedback uses font-size: 0.875em (relative to parent),
+    // use 0.875 * 0.875rem = 0.766rem to match other invalid-feedback.
+    > .invalid-feedback {
+        font-size: 0.766rem;
+    }
+}
+
+body {
+  font-size: 0.875rem;
+  line-height: 1.2;
+}
+
+.form-label {
+    font-size: 1.25rem;
+    line-height: 1.2;
+}
+
+.form-label-sm {
+    font-size: 1rem;
+}
+
+/*
+ * Bootstrap 5 uses the browser default, restore Bootstrap 4 behavior
+ */
+a:not(:hover) {
+    text-decoration: none;
+}
+
+/*
+ * Bootstrap 5 removed .form-group class. Add it back for vertical spacing.
+ */
+.form-group {
+    margin-bottom: 1rem;
+}
+
+/*
+* Sidebar
+*/
+
+.sidebar {
+  position: fixed;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 1019; /* Behind the navbar */
+  padding: $navbar-height 0 0; /* Height of navbar */
+  box-shadow: inset -1px 0 0 rgba(0, 0, 0, 0.1);
+}
+
+@media (min-width: 768px) {
+  .sidebar {
+    /* Keep the menu below the header, but let it follow native pull-to-refresh. */
+    position: sticky;
+    top: $navbar-height;
+    bottom: auto;
+    flex: 0 0 auto;
+    align-self: flex-start;
+    padding-top: 0;
+  }
+}
+
+@media (max-width: 767.98px) {
+  .sidebar {
+    top: $navbar-height;
+    padding-top: 0;
+  }
+}
+
+.alert_placeholder {
+    position: fixed;
+    top: $navbar-height;
+    left: 0px;
+    right: 0px;
+    z-index: 9999;
+}
+
+.alert_placeholder-app {
+    position: fixed;
+    top: 0;
+    left: 0px;
+    right: 0px;
+    z-index: 9999;
+}
+
+.custom-alert {
+    margin-bottom: 0;
+}
+
+.custom-alert .close {
+    padding-top: 0.5rem;
+}
+
+.sidebar-sticky {
+  position: relative;
+  top: 0;
+  height: calc(100vh - #{$navbar-height});
+  padding-top: 0.5rem;
+  overflow-x: hidden;
+  overflow-y: auto; /* Scrollable contents if viewport is shorter than content. */
+}
+
+@supports (position: sticky) {
+  .sidebar-sticky {
+    position: sticky;
+  }
+  @media (min-width: 576px) {
+        .sticky-top {
+            position: sticky;
+        }
+    }
+}
+
+@media (max-width: 575.98px) {
+    .sticky-top {
+        position: static;
+    }
+}
+
+/*
+ * Sticky page headers - positioned below the navbar on larger screens
+ */
+.sticky-top-app {
+    position: sticky;
+    top: 0;
+    z-index: 1010;
+    background: var(--bs-body-bg);
+}
+
+.sticky-under-top {
+    position: sticky;
+    z-index: 1010;
+    background: var(--bs-body-bg);
+}
+
+@media (max-width: 575.98px) {
+    .sticky-under-top {
+        top: 0;
+    }
+}
+
+@media (min-width: 576px) {
+    .sticky-under-top {
+        top: $navbar-height;
+    }
+}
+
+/*
+@media (min-width: 768px) {
+    .sticky-under-top {
+        position: static;
+    }
+}
+*/
+
+.tab-header-shadow {
+    box-shadow: 0 .25rem .5rem -.6rem rgb(0, 0, 0) !important;
+}
+
+.sidebar .nav-link {
+  font-weight: 500;
+  color: #333;
+}
+
+.sidebar .nav-link.active {
+  color: var(--bs-primary);
+}
+
+@media (hover: hover) {
+    .sidebar .nav-link:hover {
+        color: var(--bs-primary);
+    }
+}
+
+.sidebar .nav-link.disabled {
+    font-weight: 500;
+    color: #AAA;
+}
+
+.sidebar-heading {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+}
+
+/*
+* Navbar
+*/
+
+.navbar-brand {
+  padding-top: 0.75rem;
+  padding-bottom: 0.75rem;
+  font-size: 1rem;
+  background-color: $navbar-color;
+  /*box-shadow: inset -1px 0 0 rgba(0, 0, 0, .25);*/
+}
+
+.navbar {
+  background-color: $navbar-color;
+  box-shadow: 0 0.25rem 0.5rem rgba(0, 0, 0, 0.15) !important;
+  height: $navbar-height;
+}
+
+.navbar .navbar-toggler {
+  top: 0.25rem;
+  left: 1rem;
+}
+
+.navbar .form-control {
+  padding: 0.75rem 1rem;
+  border-width: 0;
+  border-radius: 0;
+}
+
+.form-control-dark {
+  color: #fff;
+  background-color: rgba(255, 255, 255, 0.1);
+  border-color: rgba(255, 255, 255, 0.1);
+}
+
+.form-control-dark:focus {
+  border-color: transparent;
+  box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.25);
+}
+
+.bd-placeholder-img {
+  font-size: 1.125rem;
+  text-anchor: middle;
+  -webkit-user-select: none;
+  -moz-user-select: none;
+  -ms-user-select: none;
+  user-select: none;
+}
+
+@media (min-width: 768px) {
+  .bd-placeholder-img-lg {
+    font-size: 3.5rem;
+  }
+}
+
+.text-muted {
+    color: rgba(0,0,0,.66) !important;
+}
+
+.text-muted-sm {
+    color: rgba(0,0,0,.66) !important;
+    font-size: 0.75rem;
+}
+
+.table > thead {
+    background-color: #e9ecef;
+
+    > tr > th {
+        background-color: inherit;
+    }
+}
+
+.btn-outline-primary.disabled, .btn-outline-primary:disabled {
+    border-color: rgba(0,0,0,.125) !important;
+    color: rgba(0,0,0,.66) !important;
+    opacity: 1 !important;
+}
+
+.btn-outline-secondary.disabled, .btn-outline-secondary:disabled {
+    border-color: rgba(0,0,0,.125) !important;
+    color: rgba(0,0,0,.66) !important;
+    opacity: 1 !important;
+}
+
+.btn-outline-success.disabled, .btn-outline-success:disabled {
+    border-color: rgba(0,0,0,.125) !important;
+    color: rgba(0,0,0,.66) !important;
+    opacity: 1 !important;
+}
+
+.btn-outline-danger.disabled, .btn-outline-danger:disabled {
+    border-color: rgba(0,0,0,.125) !important;
+    color: rgba(0,0,0,.66) !important;
+    opacity: 1 !important;
+}
+
+.btn-outline-warning.disabled, .btn-outline-warning:disabled {
+    border-color: rgba(0,0,0,.125) !important;
+    color: rgba(0,0,0,.66) !important;
+    opacity: 1 !important;
+}
+
+.btn-outline-info.disabled, .btn-outline-info:disabled {
+    border-color: rgba(0,0,0,.125) !important;
+    color: rgba(0,0,0,.66) !important;
+    opacity: 1 !important;
+}
+
+.btn-outline-dark.disabled, .btn-outline-dark:disabled {
+    border-color: rgba(0,0,0,.125) !important;
+    color: rgba(0,0,0,.66) !important;
+    opacity: 1 !important;
+}
+
+.text-muted {
+    display: inline-block;
+}
+
+.navbar-dark .navbar-toggler:hover {
+    background-color: #5a6268
+}
+
+.bg-light {
+    background-color: #eeeff0 !important;
+}
+
+.nav-nested {
+    background-color: #f8f9fa;
+    box-shadow: rgba(0, 0, 0, 0.1) -1px 0px 0px inset;
+}
+
+.unrotated-chevron {
+    transition: 0.50s;
+}
+
+.rotated-chevron {
+    transition: 0.50s;
+    transform: rotate(90deg);
+}
+
+// https://developer.chrome.com/docs/css-ui/animate-to-height-auto
+@supports (interpolate-size: allow-keywords) {
+    .sub-page-status-transition {
+        height: 0;
+        overflow-y: clip;
+        interpolate-size: allow-keywords;
+        transition: height 0.35s ease;
+
+        &.show {
+            height: auto;
+        }
+    }
+}
+
+@supports (not (interpolate-size: allow-keywords)) {
+/*
+    // FIXME: this transition requires the use of display grid. this
+    //        results in an improper resizing behavior in combination
+    //        with display flex used by the Bootstrap row/col system
+    .sub-page-status-transition {
+        display: grid;
+        grid-template-rows: 0fr;
+        transition: grid-template-rows 0.35s ease;
+
+        > div {
+            overflow: clip;
+            min-height: 0;
+        }
+
+        &.show {
+            grid-template-rows: 1fr;
+        }
+    }
+*/
+    // FIXME: instead use no transition at all
+    .sub-page-status-transition {
+        height: 0;
+        overflow-y: clip;
+
+        &.show {
+            height: auto;
+        }
+    }
+}
+
+@include media-breakpoint-up(lg) {
+    .evse-v2-padding-fix-lg {
+        padding-right: 0;
+    }
+}
+
+@include media-breakpoint-only(md) {
+    .evse-v2-padding-fix-md {
+        padding-right: 0;
+    }
+}
+
+@include media-breakpoint-down(sm) {
+    .evse-v2-padding-fix-sm {
+        padding-right: 0;
+    }
+}
+
+@include media-breakpoint-only(xs) {
+    .pr-xs-only-0 {
+        padding-right: 0;
+    }
+}
+
+@include media-breakpoint-only(xs) {
+    .w-xs-only-100 {
+        width: 100% !important;
+    }
+}
+
+.progress-bar-no-transition {
+    transition: none !important;
+}
+
+.bg-disabled {
+    opacity: .65;
+}
+
+@media (max-width: 370px) {
+    .navbar-toggler.ms-3 {
+        margin-left: .5rem !important;
+    }
+}
+
+.no-spin::-webkit-inner-spin-button, .no-spin::-webkit-outer-spin-button {
+    -webkit-appearance: none !important;
+    margin: 0 !important;
+}
+
+.no-spin {
+    -moz-appearance:textfield !important;
+}
+
+.input-indicator {
+    padding-left: calc(0.75rem - 5px);
+    border-left: 5px solid;
+}
+
+.input-indicator-primary {
+    border-left-color: var(--bs-primary);
+}
+.input-indicator-secondary {
+    border-left-color: var(--bs-secondary);
+}
+.input-indicator-success {
+    border-left-color: var(--bs-success);
+}
+.input-indicator-warning {
+    border-left-color: var(--bs-warning);
+}
+.input-indicator-danger {
+    border-left-color: var(--bs-danger);
+}
+.input-indicator-light {
+    border-left-color: var(--bs-light);
+}
+.input-indicator-link {
+    border-left-color: var(--bs-link);
+}
+
+@keyframes shake {
+  0% {
+    transform: translate(0);
+  }
+  20% {
+    transform: translate(1em);
+  }
+  40% {
+    transform: translate(-1em);
+  }
+  60% {
+    transform: translate(1em);
+  }
+  80% {
+    transform: translate(-1em);
+  }
+  100% {
+    transform: translate(0);
+  }
+}
+
+.shake {
+  animation: shake 0.5s infinite;
+  box-shadow: 0 0 0 .2rem rgba(255, 0, 0, 0.5) !important;
+}
+
+{{{module_post_imports}}}
+
+// Header status
+.header-status {
+    display: flex;
+    align-items: center;
+    margin-left: auto;
+    margin-right: 0.5rem;
+}
+@include media-breakpoint-up(md) {
+    .header-status {
+        margin-right: 0;
+        height: $navbar-height;
+    }
+}
+#header-status-dropdown::after {
+    // Hide the default dropdown caret on the status button
+    display: none;
+}
+
+// Mobile status button on the status page
+// Used in a flex container on the status page header
+.status-button-mobile {
+    border-radius: 0 !important;
+}
+
+#status-button-mobile::after {
+    // Hide the default dropdown caret
+    display: none;
+}
+
+.message-box-body {
+    font-size: 1rem;
+}
+
+@include media-breakpoint-only(xs) {
+    .page-header {
+        font-size: 1.75rem;
+    }
+}
+
+@include media-breakpoint-up(sm) {
+    .page-header {
+        font-size: 2rem;
+    }
+}
+
+.form-separator {
+    font-size: 1.75rem;
+}
+
+.form-separator-sm {
+    font-size: 1.25rem;
+}
+
+.status-meters-chart {
+    position: relative;
+    aspect-ratio: 1.33333;
+}
+
+@include media-breakpoint-up(md) {
+    .status-meters-chart {
+        position: relative;
+        aspect-ratio: 3;
+    }
+}
+
+.meters-chart {
+    position: relative;
+    aspect-ratio: 1.5;
+}
+
+@include media-breakpoint-up(md) {
+    .meters-chart {
+        position: relative;
+        aspect-ratio: 3;
+    }
+}
+
+.em-energy-analysis-status-chart {
+    position: relative;
+    aspect-ratio: 1.33333;
+}
+
+@include media-breakpoint-up(md) {
+    .em-energy-analysis-status-chart {
+        position: relative;
+        aspect-ratio: 3;
+    }
+}
+
+.em-energy-analysis-chart {
+    position: relative;
+    aspect-ratio: 1.5;
+}
+
+@include media-breakpoint-up(md) {
+    .em-energy-analysis-chart {
+        position: relative;
+        aspect-ratio: 3;
+    }
+}
+
+.d-flex-ni {
+    display: flex;
+}
+
+.u-hide-first-series-in-legend .u-legend .u-series:first-child {
+    display: none;
+}
+
+.u-time-in-legend-alone .u-legend .u-series:first-child th {
+    cursor: default;
+}
+
+.u-time-in-legend-alone .u-legend .u-series:first-child {
+    display: block;
+}
+
+.u-hide-marker-in-legend .u-legend .u-marker {
+    display: none;
+}
+
+.u-hide-empty-legend .u-legend tbody:empty {
+    display: none;
+}
+
+.u-legend tbody {
+    padding-bottom: 0.25rem;
+}
+
+.u-series>* {
+    padding: 2px 4px;
+}
+
+table ul {
+    margin-bottom: 0 !important;
+    padding-left: 1rem !important;
+}
+
+.card-body th {
+    border-top: none;
+}
+
+/*
+ * Bootstrap 5 Card + Table border-radius fix
+ * When a table is inside a Card.Body with overflow, the table corners
+ * can break the card's border-radius. This ensures proper rounding.
+ */
+.card > .card-body:first-child:last-child {
+    border-radius: inherit;
+}
+
+.card > .card-body > .table {
+    border-radius: inherit;
+}
+
+.card > .card-body > .table > :first-child > tr:first-child > * {
+    border-top: none;
+}
+
+.card > .card-body > .table > :last-child > tr:last-child > * {
+    border-bottom: none;
+}
+
+@media (min-width: 992px) {
+  .pt-lg-col-form-label {
+    padding-top: calc(.375rem + 1px) !important;
+  }
+}
+
+@media (min-width: 992px) {
+  .py-lg-col-form-label {
+    padding-top: calc(.375rem + 1px) !important;
+    padding-bottom: calc(.375rem + 1px) !important;
+  }
+}
+
+// This is the _second_ nested modal!
+.modal-backdrop-1 {
+    z-index: 1060 !important;
+}
+.modal-1 {
+    z-index: 1065 !important;
+}
+
+.modal-backdrop-2 {
+    z-index: 1070 !important;
+}
+.modal-2 {
+    z-index: 1075 !important;
+}
+
+.modal-backdrop-3 {
+    z-index: 1080 !important;
+}
+
+.modal-3 {
+    z-index: 1085 !important;
+}
+
+.table-card-mode .card-body .form-group,
+.table-extra-value .card-body .form-group {
+    margin-bottom: 0.5rem;
+}
+
+.list-group-item {
+    padding: 0.75rem;
+}
+
+// Use modal-width-auto as dialog class for a modal that always has the width of it's content, even < 576px viewport width.
+// These are bootstrap's modal-dialog(-centered) with the media query removed and a max-width of max-content.
+.modal-dialog.modal-width-auto {
+    max-width: max-content !important;
+    margin: $modal-dialog-margin-y-sm-up auto;
+}
+
+.modal-dialog.modal-width-auto.modal-dialog-centered {
+    min-height: subtract(100%, $modal-dialog-margin-y-sm-up * 2);
+
+    &::before {
+      height: subtract(100vh, $modal-dialog-margin-y-sm-up * 2);
+      height: min-content;
+    }
+}
+
+.form-row-help {
+    background-color: #ffffe7;
+    color: #212529;
+}
+
+[data-bs-theme="dark"] .form-row-help {
+    background-color: #3d3d00;
+    color: #e9ecef;
+}
+
+.form-row-help :last-child,
+.alert :last-child {
+    margin-bottom: 0;
+}
+
+// Reconstruct Bootstrap 4's btn-outline-secondary hover behavior
+.help-circle {
+    color: var(--bs-secondary);
+    border-radius: 50%;
+    transition: color 0.15s ease-in-out, background-color 0.15s ease-in-out;
+
+    &:hover {
+        color: #fff;
+        background-color: var(--bs-secondary);
+    }
+}
+
+.help-circle-expanded {
+    color: #fff;
+    background-color: var(--bs-dark);
+    border-radius: 50%;
+
+    &:hover {
+        color: #fff;
+        background-color: var(--bs-dark);
+    }
+}
+
+.alter-triangle {
+    color: var(--bs-secondary);
+    clip-path: path("M8,4 l-7.5,12 s-5,6,4,7 h15 s8,1,4,-7 l-7.5,-12 s-4,-8,-8,0 Z");
+    transition: color 0.15s ease-in-out, background-color 0.15s ease-in-out;
+
+    &:hover {
+        color: #fff;
+        background-color: var(--bs-secondary);
+    }
+}
+
+.alter-triangle-expanded {
+    color: #fff;
+    background-color: var(--bs-dark);
+    clip-path: path("M8,4 l-7.5,12 s-5,6,4,7 h15 s8,1,4,-7 l-7.5,-12 s-4,-8,-8,0 Z");
+
+    &:hover {
+        color: #fff;
+        background-color: var(--bs-dark);
+    }
+}
+
+input.borderless-form-control:disabled, input.form-control:disabled, select.borderless-form-control:disabled, select.form-control:disabled {
+    color: var(--bs-secondary);
+}
+
+// Bootstrap 5: Change some styling to match Boostrap 4
+.form-control[readonly] {
+    background-color: var(--bs-secondary-bg);
+}
+.input-group-text {
+    background-color: var(--bs-secondary-bg);
+}
+input[type="file"].form-control::file-selector-button {
+    background-color: var(--bs-primary);
+    border-color: var(--bs-primary);
+    color: #fff;
+}
+
+input[type="file"].form-control:hover:not(:disabled):not([readonly])::file-selector-button {
+    background-color: var(--bs-primary);
+    border-color: var(--bs-primary);
+    color: #fff;
+}
+.input-group > .input-group-text.form-check {
+    margin-bottom: 0;
+    min-height: calc(1.5em + .75rem + calc(var(--bs-border-width) * 2));
+}
+// Make form-select inside input-group size to content when it's the first child.
+// In BS4, selects as prepend elements had width:auto behavior. BS5 changed to flex:1 1 auto.
+.input-group > .form-select:first-child {
+    flex: 0 0 auto;
+    width: auto;
+}
+
+// Dark mode customizations
+$link-color-dark: $link-color;
+$link-hover-color-dark: $link-hover-color;
+
+:root {
+    --chart-axis-stroke: rgba(0, 0, 0, 0.1);
+    --chart-axis-text: black;
+    --chart-grid-stroke: rgba(0, 0, 0, 0.1);
+}
+
+.u-legend {
+    color: $body-color;
+}
+
+[data-bs-theme="dark"] {
+    // Chart colors
+    --chart-axis-stroke: rgba(255, 255, 255, 0.2);
+    --chart-axis-text: #adb5bd;
+    --chart-grid-stroke: rgba(255, 255, 255, 0.1);
+
+    // Sidebar
+    .sidebar {
+        box-shadow: inset -1px 0 0 rgba(255, 255, 255, 0.1);
+    }
+
+    .sidebar .nav-link {
+        color: #c9cdd1;
+    }
+
+    .sidebar .nav-link.active {
+        color: var(--bs-primary);
+    }
+
+    @media (hover: hover) {
+        .sidebar .nav-link:hover {
+            color: var(--bs-primary);
+        }
+    }
+
+    .sidebar .nav-link.disabled {
+        color: #6c757d;
+    }
+
+    // Sidebar and card backgrounds
+    .bg-light {
+        background-color: #252525 !important;
+    }
+
+    .nav-nested {
+        background-color: #1c1c1c;
+        box-shadow: rgba(255, 255, 255, 0.1) -1px 0px 0px inset;
+    }
+
+    // Sticky elements backgrounds
+    .sticky-top-app,
+    .sticky-under-top {
+        background: var(--bs-body-bg);
+    }
+
+    // Text muted dark mode
+    .text-muted {
+        color: rgba(255, 255, 255, 0.66) !important;
+    }
+
+    .text-muted-sm {
+        color: rgba(255, 255, 255, 0.66) !important;
+    }
+
+    .table > thead {
+        background-color: #3a3a3a;
+
+        > tr > th {
+            background-color: inherit;
+        }
+    }
+
+    // Disabled button outlines
+    .btn-outline-primary.disabled, .btn-outline-primary:disabled,
+    .btn-outline-secondary.disabled, .btn-outline-secondary:disabled,
+    .btn-outline-success.disabled, .btn-outline-success:disabled,
+    .btn-outline-danger.disabled, .btn-outline-danger:disabled,
+    .btn-outline-warning.disabled, .btn-outline-warning:disabled,
+    .btn-outline-info.disabled, .btn-outline-info:disabled,
+    .btn-outline-dark.disabled, .btn-outline-dark:disabled {
+        border-color: rgba(255, 255, 255, 0.2) !important;
+        color: rgba(255, 255, 255, 0.5) !important;
+    }
+
+    // Disabled form controls
+    input.borderless-form-control:disabled, input.form-control:disabled {
+        color: #adb5bd;
+    }
+
+    // Tab header shadow
+    .tab-header-shadow {
+        box-shadow: 0 .25rem .5rem -.6rem rgba(0, 0, 0, 0.5) !important;
+    }
+
+    // uPlot chart styles
+    .uplot,
+    .uplot *,
+    .u-legend,
+    .u-legend th,
+    .u-legend td,
+    .u-series,
+    .u-series th,
+    .u-series td,
+    .u-value {
+        color: #c9cdd1 !important;
+    }
+    .uplot {
+        background-color: var(--bs-body-bg);
+    }
+    .u-legend {
+        background-color: var(--bs-body-bg);
+    }
+
+    // Cards
+    .card {
+        background-color: #252525;
+
+        &.uplot-card > div {
+            overflow: hidden;
+            border-radius: inherit;
+        }
+
+        .uplot {
+            background-color: var(--bs-body-bg);
+        }
+
+        .u-legend {
+            background-color: var(--bs-body-bg);
+        }
+    }
+}
+
+@media (min-width: 768px) {
+    .ms-md-n1px {
+        margin-left: -1px;
+    }
+
+    .rounded-end-md-0 {
+        border-bottom-right-radius: 0 !important;
+        border-top-right-radius: 0 !important;
+    }
+
+    .rounded-start-md-0 {
+        border-bottom-left-radius: 0 !important;
+        border-top-left-radius: 0 !important;
+    }
+}

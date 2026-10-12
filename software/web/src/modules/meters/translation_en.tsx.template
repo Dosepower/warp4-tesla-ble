@@ -1,0 +1,160 @@
+/** @jsxImportSource preact */
+import { h } from "preact";
+import { Comparator } from "modules/meters/generated/comparator.enum";
+let x = {
+    "meters": {
+        "status": {
+            "power_history": null,
+            "current_power": "Power",
+            "power_sums": "Powers",
+            "meters_without_location": /*FFN*/(meter_names: string[]) => <p>No location is configured for the following {meter_names.length > 1 ? <>energy meters</> : <>energy meter</>}. Please select a location for {meter_names.length > 1 ? <>these <a href="#meters">energy meters</a></> : <>this <a href="#meters">energy meter</a></>}, to include {meter_names.length > 1 ? <>them</> : <>it</>} in the powers and power history:</p>/*NF*/,
+            "voltage_alert_label": "Energy Meters",
+            "voltage_alert_message": /*FFN*/(voltages_out_of_range: [string, string][]) => {
+                let result = [];
+
+                for (let voltage of voltages_out_of_range.slice(0, -1)) {
+                    if (result.length > 0) {
+                        result.push(<>, </>);
+                    }
+
+                    result.push(<><strong>{voltage[0]}</strong> ({voltage[1]} V)</>);
+                }
+
+                if (result.length > 0) {
+                    result.push(<> and </>);
+                }
+
+                let last_voltage = voltages_out_of_range.slice(-1)[0];
+
+                result.push(<><strong>{last_voltage[0]}</strong> ({last_voltage[1]} V)</>);
+
+                return <>The {result.length > 1 ? <>voltages</> : <>voltage</>} of {result} {result.length > 1 ? <>are</> : <>is</>} outside of the acceptable range. {__("The_device")} will <strong>not</strong> work properly. Please check the connection of the supply cable, especially the neutral conductor!</>;
+            }/*NF*/
+        },
+        "navbar": {
+            "meters": "Energy Meters"
+        },
+        "content": {
+            "meters": "Energy Meters",
+            "history_48": "History (48 h)",
+            "history_24": "History (24 h)",
+            "history_12": "History (12 h)",
+            "history_6": "History (6 h)",
+            "history_3": "History (3 h)",
+            "live": "Live (6 min)",
+            "no_data": "No data available",
+            "loading": "Loading data...",
+            "detailed_values": "Details",
+            "detailed_values_none": "No values are available yet.",
+
+            {{{values}}},
+
+            {{{groups}}},
+
+            {{{fragments}}},
+
+            "table_display_name": "Display name",
+            "table_power": "Power",
+            "table_state_of_charge": "State of charge",
+            "table_energy_import": "Energy draw",
+            "table_energy_export": "Energy feed",
+            "table_phases": "Phases",
+
+            "add_meter_title": "Add energy meter",
+            "add_meter_message": /*SFN*/(have: number, max: number) => `${have} of ${max} energy meters configured`/*NF*/,
+            "add_meter_slot": "Number",
+            "add_meter_slot_reserved_charger": "Reserved for charger meter",
+            "add_meter_class": "Class",
+            "invalid_slot_for_charger_internal_meter": /*SFN*/(slot: number) => `The charger internal meter can only be configured for meter number ${slot}.`/*NF*/,
+
+            "edit_meter_title": "Edit energy meter",
+            "edit_meter_slot": "Number",
+            "unknown_slot": /*SFN*/ (slot: number) => `Unknown meter number ${slot}`/*NF*/,
+            "edit_meter_class": "Class",
+
+            "last_reset": "Last energy meter reset",
+            "last_reset_unknown": "Unknown",
+            "last_reset_counter": /*SFN*/ (n: number) => `${n} times resetted`/*NF*/,
+            "reset": "Reset",
+            "never": "Never",
+
+            "reset_modal": "Reset meter values?",
+            "reset_modal_body": /*SFN*/(meter_name: string) => `Really reset all resettable meter values of ${meter_name}?`/*NF*/,
+            "reset_modal_abort": "Abort",
+            "reset_modal_confirm": "Reset",
+            "reset_failed": "Failed to reset meter values",
+
+            "meter_type": "Energy meter type",
+
+            "location_other": "Other",
+            "location_charger": "Charger",
+            "location_inverter": "Inverter",
+            "location_grid": "Grid",
+            "location_battery": "Battery",
+            "location_load": "Load",
+            "location_pv": "PV",
+            "location_vehicle": "Vehicle",
+
+            "config_excluded": "Excluded from summaries",
+            "config_excluded_desc": "Exclude meter from location-based summaries, e.g. the power summary on the status page.",
+            "config_excluded_help": "For some reasons it might be necessary to collect certain meter values multiple times. But this also results in erroneously including those meter values multiple times in location-based summaries, which distords the summaries. In these cases meters that collect meter values a second time can be excluded from location-based summaries."
+        },
+        "automation": {
+            "meter_reset": "Reset energy meter",
+            "automation_action_text": /*FFN*/(meter_name: string) => <><b>reset</b> energy meter <b>{meter_name}</b>.</>/*NF*/,
+            "meter_slot": "Meter",
+            "meter_value": "Meter value",
+            "automation_trigger_text": /*FFN*/(meter_name: string, value_name: string, comparator: Comparator, threshold_value: string, hyst: string, unit: string) => <>When <b>{value_name}</b> of energy meter <b>{meter_name}</b> {__("meters.automation.comparator_string")(comparator, threshold_value + " " + unit)}</>/*NF*/,
+            "value_id": "Value",
+            "comparator": "Condition",
+            "comparator_select_entry": /*SFN*/(c: Comparator) => {
+                switch (c) {
+                    case Comparator.Greater:        return "Greater than (>)";
+                    case Comparator.Less:           return "Less than (<)";
+                    case Comparator.GreaterOrEqual: return "Greater than or equal (\u2265)";
+                    case Comparator.LessOrEqual:    return "Less than or equal (\u2264)";
+                    case Comparator.Equal:          return "Equal to (=)";
+                    case Comparator.NotEqual:       return "Not equal to (\u2260)";
+                    default: return "?"
+                }}/*NF*/,
+            "comparator_string": /*FFN*/(c: Comparator, threshold_value: string) => {
+                switch (c) {
+                    case Comparator.Greater:        return <><b>rises</b> above <b>{threshold_value}</b></>;
+                    case Comparator.Less:           return <><b>falls</b> below <b>{threshold_value}</b></>;
+                    case Comparator.GreaterOrEqual: return <><b>rises</b> to <b>{threshold_value}</b> </>;
+                    case Comparator.LessOrEqual:    return <><b>falls</b> to <b>{threshold_value}</b></>;
+                    case Comparator.Equal:          return <><b>reaches</b> <b>{threshold_value}</b></>;
+                    case Comparator.NotEqual:       return <><b>deviates</b> from <b>{threshold_value}</b></>;
+                    default: return <>?</>;
+                }}/*NF*/,
+            "threshold": "Threshold",
+            "hysteresis": "Hysteresis",
+            "hysteresis_muted": "prevents re-triggering"
+        },
+        "script": {
+            "time": "Time of day",
+            "power": "Power",
+            "save_failed": "Failed to save the energy meters settings.",
+            "reboot_content_changed": "energy meters settings",
+            "meter": /*SFN*/(slot: number|"?") => "Meter #" + slot/*NF*/,
+
+            "meter_type_0": "No energy meter found",
+            "meter_type_1": "Eastron SDM72",
+            "meter_type_2": "Eastron SDM630",
+            "meter_type_3": "Eastron SDM72V2",
+            "meter_type_4": "Eastron SDM72CTM",
+            "meter_type_5": "Eastron SDM630MCT",
+            "meter_type_6": "Eltako DSZ15DZMOD",
+            "meter_type_7": "YTL DEM4A",
+            "meter_type_8": "Lovato DMED341MID7ER",
+            "meter_type_9": "Eltako DSZ16D[ZE]",
+            "meter_type_10": "Iskra WM3M4C",
+            "meter_type_11": "Iskra WM3M4",
+            "meter_type_200": "Unknown/Custom (basic)",
+            "meter_type_201": "Unknown/Custom (extra values)",
+            "meter_type_254": "Internal",
+            "meter_type_255": "Auto detect",
+            "reboot_required": "Reboot required"
+        }
+    }
+}

@@ -1,0 +1,18 @@
+// WARNING: Edit only modules.cpp.template. Do not edit modules.cpp.
+
+#include "modules.h"
+
+{{{imodule_extern_decls}}}
+
+extern constexpr const imodule_info imodules[] = {
+    {{{imodules_array}}}
+};
+
+extern constexpr const size_t imodules_count = {{{imodules_count}}};
+
+ConfigRoot modules_get_init_config()
+{
+    return Config::Object({
+        {{{module_init_config}}}
+    });
+}

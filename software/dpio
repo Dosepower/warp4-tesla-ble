@@ -1,0 +1,30 @@
+#!/bin/bash
+
+# The last two directories of the cwd. For example esp32-firmware/software if this script is in /home/pio/tf/esp32-firmware/software
+DIRNAME2=$(basename "$(dirname " $(realpath .)")")/$(basename " $(realpath .)")
+
+if [[ -v PLATFORMIO_BUILD_FLAGS ]]; then
+    PIO_FLAGS="-e PLATFORMIO_BUILD_FLAGS=$PLATFORMIO_BUILD_FLAGS"
+else
+    PIO_FLAGS=""
+fi
+
+PIO_CACHE_DIR=${PLATFORMIO_WORKSPACE_DIR:-.pio}
+PIO_DIR=$(realpath ${DPIO_DIR:-~/.platformio})
+
+C_ROOT="$HOME/.cache/tf_esp32_firmware_docker_pio_uv"
+mkdir -p ${C_ROOT}/cache_uv
+mkdir -p ${C_ROOT}/local_share_uv
+
+mkdir -p $PIO_DIR
+
+docker run \
+       --rm \
+       -v $(realpath ../..):/tf \
+       -v $PIO_DIR:/home/pio/.platformio \
+       -v $C_ROOT/cache_uv:/home/pio/.cache/uv \
+       -v $C_ROOT/local_share_uv:/home/pio/.local/share/uv \
+       $PIO_FLAGS \
+       -e PLATFORMIO_WORKSPACE_DIR=$PIO_CACHE_DIR\
+       tinkerforge/build_environment_esp32 \
+       /bin/bash -c "groupmod -g $(id -g) $(id -gn) 2>/dev/null || groupadd -g $(id -g) $(id -gn) && usermod -u $(id -u) -g $(id -g) pio && su pio -c \"cd /tf/$DIRNAME2 && uv run pio $*\""

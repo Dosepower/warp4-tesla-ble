@@ -1,0 +1,353 @@
+/* esp32-firmware
+ * Copyright (C) 2025 Julius Dill <julius@tinkerforge.com>
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, write to the
+ * Free Software Foundation, Inc., 59 Temple Place - Suite 330,
+ * Boston, MA 02111-1307, USA.
+ */
+
+#pragma once
+
+#include "../generated/usecases.enum.h"
+#include "../spine_connection.h"
+#include "../spine_types.h"
+#include "config.h"
+#include "usecase_helpers.h"
+#include <functional>
+#include <map>
+#include <vector>
+
+// Minimum interval between two notifications of measurement data (MPC, MGCP, EVCEM). Changes are notified at most this late.
+// The MPC test specification (V1.0.2, 6.7) requires changes to be notified within 120 s.
+#define EEBUS_MEASUREMENT_NOTIFY_INTERVAL 5_s
+
+/**
+ * @brief Return structure for usecase message handlers.
+ *
+ * Indicates how a usecase handled an incoming message and whether
+ * a response should be sent.
+ */
+struct MessageReturn {
+    /**
+     * If true, the usecase has handled the message and no further processing is required.
+     */
+    bool is_handled = false;
+    /**
+     * If true, a response should be sent back to the sender.
+     */
+    bool send_response = false;
+    /**
+     * If a response should be sent, contains the command classifier to use.
+     */
+    CmdClassifierType cmd_classifier = CmdClassifierType::EnumUndefined;
+};
+
+// Forward declaration
+class EEBusUseCases;
+
+/**
+ * @brief Coalesces and rate-limits notifications of frequently changing data, e.g. measurements.
+ *
+ * request() schedules the send function to run once, at the earliest min_interval after the last send.
+ * All requests until then result in a single notification with the data current at send time.
+ */
+class ThrottledNotify
+{
+public:
+    ThrottledNotify(millis_t min_interval, std::function<void(void)> &&send) : min_interval(min_interval), send(std::move(send))
+    {
+    }
+    ~ThrottledNotify();
+    ThrottledNotify(const ThrottledNotify &) = delete;
+    ThrottledNotify &operator=(const ThrottledNotify &) = delete;
+
+    /** @brief Request a notification. Does nothing if one is already scheduled. */
+    void request();
+
+private:
+    const millis_t min_interval;
+    const std::function<void(void)> send;
+    micros_t last_sent = 0_us;
+    uint64_t task = 0;
+};
+
+/**
+ * @brief Base class for all EEBUS use cases.
+ *
+ * Provides the common framework for implementing EEBUS use cases as defined
+ * in the EEBUS Use Case Technical Specifications. Each use case has one or
+ * more features and belongs to an entity.
+ *
+ * This class should only be inherited from, never instantiated directly.
+ */
+class EebusUsecase
+{
+public:
+    virtual ~EebusUsecase() = default;
+
+    /**
+     * @brief Get the type identifier for this use case.
+     * @return The Usecases enum value for this use case.
+     */
+    [[nodiscard]] virtual Usecases get_usecase_type() const = 0;
+
+    /**
+     * @brief Set the entity address for this use case.
+     * @param address Vector of integers representing the SPINE entity address.
+     */
+    void set_entity_address(const std::vector<int> &address)
+    {
+        entity_address = address;
+    }
+
+    /**
+     * @brief Get the entity address for this use case.
+     * @return Vector of integers representing the SPINE entity address.
+     */
+    [[nodiscard]] std::vector<int> get_entity_address() const
+    {
+        return entity_address;
+    }
+
+    /**
+     * @brief Check if the given address matches this use case's entity address.
+     * @param address Address to compare against.
+     * @return True if the addresses match.
+     */
+    [[nodiscard]] bool matches_entity_address(const std::vector<int> &address) const
+    {
+        return entity_address == address;
+    }
+
+    /**
+     * @brief Check if this use case entity is active.
+     * @return True if the entity is active.
+     */
+    [[nodiscard]] bool isActive() const
+    {
+        return entity_active;
+    }
+
+    void set_active(bool active)
+    {
+        entity_active = active;
+    }
+
+    /**
+     * @brief Send a full read request for a specific function.
+     *
+     * Sends a SPINE read message to the given receiver requesting the
+     * complete data for the specified function.
+     *
+     * @param sending_feature The feature address of the sender (this device).
+     * @param receiver The target feature address to send the read to.
+     * @param function The function to read.
+     */
+    void send_full_read(AddressFeatureType sending_feature, FeatureAddressType receiver, SpineDataTypeHandler::Function function);
+
+    /**
+     * @brief Inform the use case that supported entities have been updated and that the NodeManagement shall be informed of the updated structure.
+     */
+    void entities_updated() const;
+
+    /**
+     * @brief Inform the use case that the usecase or supported scenarios have been updated and that the NodeManagement shall be informed of the updated structure.
+     */
+    void usecase_updated() const;
+
+    /**
+     * @brief Handle an incoming SPINE message.
+     *
+     * Each use case must implement this to handle messages targeted at its features.
+     *
+     * @param header SPINE header containing command classifier and target info.
+     * @param data The function call data.
+     * @param response JsonObject to write the response data to.
+     * @return MessageReturn indicating if/how the message was handled.
+     */
+    virtual MessageReturn handle_message(HeaderType &header, SpineDataTypeHandler *data, JsonObject response) = 0;
+
+    /**
+     * @brief Get the use case information for discovery.
+     *
+     * Returns information about which use cases this entity supports,
+     * used during SPINE node management discovery.
+     *
+     * @return UseCaseInformationDataType containing use case details.
+     */
+    UseCaseInformationDataType get_usecase_information() const;
+
+    /**
+     * @brief Get the list of feature types supported by this use case.
+     * @return Vector of FeatureTypeEnumType values.
+     */
+    [[nodiscard]] virtual std::vector<FeatureTypeEnumType> get_supported_features() const = 0;
+
+    /**
+     * @brief Set a feature address for a given feature type.
+     *
+     * Associates a feature address with a feature type for this use case.
+     * Both the address and type must be unique within the use case.
+     *
+     * @param feature_address The feature address (must be unique).
+     * @param feature_type The feature type (must be unique).
+     */
+    void set_feature_address(AddressFeatureType feature_address, FeatureTypeEnumType feature_type);
+
+    /**
+     * @brief Get detailed discovery entity information for this use case.
+     * @return Entity information for SPINE discovery.
+     */
+    [[nodiscard]] virtual NodeManagementDetailedDiscoveryEntityInformationType get_detailed_discovery_entity_information() const = 0;
+
+    /**
+     * @brief Get detailed discovery feature information for all features.
+     * @return Vector of feature information for SPINE discovery.
+     */
+    [[nodiscard]] virtual std::vector<NodeManagementDetailedDiscoveryFeatureInformationType> get_detailed_discovery_feature_information() const = 0;
+
+    /**
+     * @brief Called when a heartbeat is received.
+     *
+     * Override this in use cases that utilize heartbeats.
+     *
+     * @param source The DeviceDiagnosis server that sent the heartbeat. The device is not set if it is unknown.
+     */
+    virtual void receive_heartbeat(const FeatureAddressType & /*source*/)
+    {
+    }
+
+    /**
+     * @brief Called when a heartbeat timeout occurs.
+     *
+     * Override this in use cases that utilize heartbeats.
+     */
+    virtual void receive_heartbeat_timeout()
+    {
+    }
+
+    /**
+     * @brief Called when supported use cases or entities change.
+     *
+     * Override this to respond to changes in the remote device's capabilities.
+     *
+     * @param conn The SpineConnection that was updated.
+     */
+    virtual void inform_spineconnection_usecase_update(SpineConnection *conn)
+    {
+    }
+
+    /**
+     * @brief Called before a binding request of a peer is accepted.
+     *
+     * Override this to reject bindings to features of this use case.
+     *
+     * @param client The client feature of the peer requesting the binding. The device is always set.
+     * @param server The local server feature to be bound. The device is always set.
+     * @return false if the binding has to be rejected.
+     */
+    virtual bool validate_binding_request(const FeatureAddressType &client, const FeatureAddressType &server)
+    {
+        return true;
+    }
+
+    /**
+     * @brief Called after a new binding of a peer was accepted.
+     *
+     * @param client The client feature of the peer. The device is always set.
+     * @param server The local server feature that was bound. The device is always set.
+     */
+    virtual void inform_binding_added(const FeatureAddressType &client, const FeatureAddressType &server)
+    {
+    }
+
+    /**
+     * @brief Called when a peer returns a result that might be relevant to the usecase.
+     * Checks awaited_acks if the message counter is know the usecase and marks it accordingly.
+     * Cleans up awaited acknowledgement if the usecase doesnt take care of it.
+     *
+     * @param header
+     * @param result
+     */
+    virtual void handle_result(const HeaderType &header, ResultDataType &result);
+
+protected:
+    std::vector<int> entity_address{}; ///< The entity address for this use case.
+    bool entity_active = true;         ///< Whether the entity is active.
+
+    std::string usecase_actor;              ///< The actor of the use case, e.g. "ControllableSystem" or "EnergyManager".
+    std::string usecase_name;               ///< The name of the use case, e.g. "limitationOfPowerConsumption" or "evCommissioningAndConfiguration".
+    std::string usecase_version;            ///< The version of the use case, e.g. "1.0.0".
+    std::vector<int> supported_scenarios{}; ///< The scenarios supported by this use case, e.g. {1, 2, 3, 4, 5, 6, 7, 8}.
+
+    /// Map of feature types to their addresses.
+    std::map<FeatureTypeEnumType, AddressFeatureType> feature_addresses{};
+
+    /**
+     * @brief Get the feature type for a given feature address.
+     * @param feature_address The feature address to look up.
+     * @return The feature type, or EnumUndefined if not found.
+     */
+    [[nodiscard]] FeatureTypeEnumType get_feature_by_address(AddressFeatureType feature_address) const;
+
+    /**
+     * @brief Build a FeatureAddressType for the given feature.
+     * @param feature The feature address.
+     * @return Complete FeatureAddressType with device and entity info.
+     */
+    [[nodiscard]] FeatureAddressType get_feature_address(AddressFeatureType feature) const
+    {
+        FeatureAddressType address{};
+        address.feature = feature;
+        address.entity = entity_address;
+        address.device = EEBUS_USECASE_HELPERS::get_spine_device_name();
+        return address;
+    }
+
+    NodeManagementDetailedDiscoveryEntityInformationType build_entity_info(EntityTypeEnumType type, const char *label = nullptr) const;
+
+    NodeManagementDetailedDiscoveryFeatureInformationType build_feature_information(FeatureTypeEnumType feature_type, RoleType role = RoleType::server) const;
+
+    FunctionPropertyType build_function_property(FunctionEnumType function, bool write = false, bool partial_write = false) const;
+
+    struct AwaitedAcks {
+        FunctionEnumType function;
+        FeatureAddressType target_feature;
+        CmdClassifierType cmd_type;
+        int msg_counter;
+        bool ack_received = false;
+        bool successful = false;
+    };
+    std::vector<AwaitedAcks> awaited_acks{};
+
+    /**
+     * Send a SPINE message to the given destination with the specified payload and command classifier.
+     * Should be used for all spine sending, especially if ack flags need to be handled.
+     * @param destination SPINE address of the destination
+     * @param sender The sending address
+     * @param payload Payload what should be sent
+     * @param cmd_classifier Command classifier
+     * @param want_ack Add to acknowledgement check.
+     * @return
+     */
+    int send_spine_message(const FeatureAddressType &destination, FeatureAddressType &sender, JsonVariantConst payload, CmdClassifierType cmd_classifier, bool want_ack = false);
+
+    template <typename T> int send_spine_message(const FeatureAddressType &destination, FeatureAddressType &sender, T payload, CmdClassifierType cmd_classifier, const char *function_name, bool want_ack = false);
+
+    /**
+     * Schedule a one-shot task that is skipped if the usecases were destroyed (EEBUS disabled) in the meantime.
+     * Use it for every deferred task that captures a usecase and is not cancelled in its destructor.
+     */
+    static uint64_t schedule_once_while_alive(std::function<void(void)> &&fn, millis_t delay = 0_ms);
+};

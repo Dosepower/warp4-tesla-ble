@@ -1,0 +1,8 @@
+Tesla BLE Clean Core
+
+Independently authored C++ implementation derived from the official
+Tesla vehicle-command reference, commit a4b43c1eff0e09d77deb9f2dce97031141fe8c8a.
+Reference copyright: Copyright Tesla, Inc.
+Licensed under the Apache License, Version 2.0.
+See LICENSE and PROVENANCE.md for attribution and exact source sections.
+This is not an official Tesla product.

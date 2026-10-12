@@ -1,0 +1,424 @@
+/* esp32-firmware
+ * Copyright (C) 2026 Olaf Lüke <olaf@tinkerforge.com>
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, write to the
+ * Free Software Foundation, Inc., 59 Temple Place - Suite 330,
+ * Boston, MA 02111-1307, USA.
+ */
+
+#include "p14a_enwg.h"
+
+#include <algorithm>
+
+#include "event_log_prefix.h"
+#include "generated/module_dependencies.h"
+#include "generated/p14a_enwg_source.enum.h"
+
+void P14aEnwg::pre_setup()
+{
+#if MODULE_EM_V1_AVAILABLE()
+    const uint32_t max_input_index = 1; // EM V1 has 2 inputs (0-1)
+#else
+    const uint32_t max_input_index = 3; // EM V2 has 4 inputs (0-3)
+#endif
+
+    source_prototypes[0] = {P14aEnwgSource::Input, Config::Object({
+        {"limit_on_close", Config::Bool(true)},               // true = active when input closed, false = active when open
+        {"limit_w", Config::Uint32(4200)},                    // Limit in W when triggered via input
+        {"input_index", Config::Uint(0, 0, max_input_index)}, // EM only: which input to use
+    })};
+    source_prototypes[1] = {P14aEnwgSource::EEBus, *Config::Null()};
+    source_prototypes[2] = {P14aEnwgSource::API,   *Config::Null()};
+
+    config = ConfigRoot{Config::Object({
+        {"enable", Config::Bool(false)},
+        {"source", Config::Union<P14aEnwgSource>(
+            Config::Object({
+                {"limit_on_close", Config::Bool(true)},
+                {"limit_w", Config::Uint32(4200)},
+                {"input_index", Config::Uint(0, 0, max_input_index)},
+            }),
+            P14aEnwgSource::Input,
+            source_prototypes,
+            ARRAY_SIZE(source_prototypes)
+        )},
+        {"limit_charger", Config::Bool(false)},        // Charger only: apply limit to this charger
+        {"limit_charge_manager", Config::Bool(false)}, // Apply limit to managed chargers
+        {"limit_heating", Config::Bool(false)},        // EM only: apply limit to heating
+        {"heating_max_power", Config::Uint32(0)},      // EM only: maximum power draw of heating in W
+    }), [this](Config &update, ConfigSource source) -> String {
+        bool was_enabled = config.get("enable")->asBool();
+        bool will_enable = update.get("enable")->asBool();
+        bool was_input = config.get("source")->getTag<P14aEnwgSource>() == P14aEnwgSource::Input;
+        bool will_input = update.get("source")->getTag<P14aEnwgSource>() == P14aEnwgSource::Input;
+
+        bool had_timer = was_enabled && was_input;
+        bool need_timer = will_enable && will_input;
+
+        if (!had_timer && need_timer) {
+            start_input_check();
+        } else if (had_timer && !need_timer) {
+            stop_input_check();
+        }
+
+        if (!was_enabled && will_enable) {
+            // Report the initial state to the automation module once the module gets enabled, same as on boot.
+            last_trigger_state = TriggerState::Unknown;
+        }
+
+#if MODULE_AUTOMATION_AVAILABLE()
+        automation.set_enabled(AutomationTriggerID::P14aEnwg, will_enable);
+#endif
+
+        task_scheduler.scheduleOnce([this]() {
+            this->update();
+        }, 0_s);
+
+        return "";
+    }};
+
+    state = Config::Object({
+        {"active", Config::Bool(false)}, // Is §14a currently triggered
+        {"limit_w", Config::Uint32(0)},  // Current effective limit in W (0 when not active)
+    });
+
+    control = Config::Object({
+        {"active", Config::Bool(false)}, // Set §14a active via API
+        {"limit_w", Config::Uint32(0)},  // Power limit in W when set via API
+    });
+
+#if MODULE_AUTOMATION_AVAILABLE()
+    automation.register_trigger(
+        AutomationTriggerID::P14aEnwg,
+        Config::Object({
+            {"active", Config::Bool(true)} // true = §14a triggered, false = §14a not triggered
+        }),
+        nullptr,
+        false
+    );
+#endif
+}
+
+void P14aEnwg::setup()
+{
+    api.restorePersistentConfig("p14a_enwg/config", &config);
+
+#if MODULE_AUTOMATION_AVAILABLE()
+    automation.set_enabled(AutomationTriggerID::P14aEnwg, is_enabled());
+#endif
+
+    if (is_enabled()) {
+        if (config.get("source")->getTag<P14aEnwgSource>() == P14aEnwgSource::Input) {
+            // The first check_inputs() run always calls update().
+            start_input_check();
+        } else {
+            // Evaluate the initial state once, so that the automation trigger fires for the initial state after boot.
+            task_scheduler.scheduleOnce([this]() {
+                this->update();
+            });
+        }
+    }
+
+    initialized = true;
+}
+
+void P14aEnwg::register_urls()
+{
+    api.addPersistentConfig("p14a_enwg/config", &config);
+    api.addState("p14a_enwg/state", &state);
+
+    // "Volatile" control endpoint for API source.
+    // Resets to inactive on reboot.
+    api.addState("p14a_enwg/control", &control);
+    api.addCommand(
+        "p14a_enwg/control_update",
+        &control,
+        {},
+        [this](Language /*language*/, String & /*errmsg*/) {
+            if (config.get("source")->getTag<P14aEnwgSource>() == P14aEnwgSource::API) {
+                this->update();
+            }
+        },
+        true);
+}
+
+void P14aEnwg::register_events()
+{
+#if MODULE_EVSE_COMMON_AVAILABLE()
+    event.registerEvent("evse/gpio_configuration", {}, [this](const Config *) {
+        this->check_evse_shutdown_input();
+        return EventResult::Deregister;
+    });
+#endif
+}
+
+void P14aEnwg::check_evse_shutdown_input()
+{
+#if MODULE_EVSE_COMMON_AVAILABLE()
+    const Config *gpio_cfg = api.getState("evse/gpio_configuration", false);
+    if (gpio_cfg == nullptr) {
+        return;
+    }
+
+    uint8_t shutdown_input = gpio_cfg->get("shutdown_input")->asUint();
+
+    // Old values 3 and 4 are the §14a 4200W limit options:
+    // 3 = limit to 4200W on open, 4 = limit to 4200W on close.
+    if ((shutdown_input != 3) && (shutdown_input != 4)) {
+        return;
+    }
+
+    // Migrate: if p14a_enwg is not yet enabled, auto-configure from EVSE settings.
+    if (!config.get("enable")->asBool()) {
+        logger.printfln("Migrating EVSE shutdown input §14a configuration to p14a_enwg module.");
+        config.get("enable")->updateBool(true);
+        config.get("source")->changeUnionVariant<P14aEnwgSource>(P14aEnwgSource::Input);
+        config.get("source")->get()->get("limit_on_close")->updateBool(shutdown_input == 4);
+        config.get("source")->get()->get("limit_w")->updateUint(4200);
+        config.get("limit_charger")->updateBool(true);
+        API::writeConfig("p14a_enwg/config", &config);
+        api.callCommand("evse/p14a_enwg_enabled_update", Config::ConfUpdateObject{{
+            {"enabled", true}
+        }});
+        start_input_check();
+    }
+
+    // Reset the EVSE shutdown input to "not configured" since p14a_enwg now handles it.
+    uint8_t input_val  = gpio_cfg->get("input")->asUint();
+    uint8_t output_val = gpio_cfg->get("output")->asUint();
+    api.callCommand("evse/gpio_configuration_update", Config::ConfUpdateObject{{
+        {"shutdown_input", (uint8_t)0},
+        {"input",          input_val},
+        {"output",         output_val}
+    }});
+    logger.printfln("Reset EVSE shutdown input from §14a mode (%u) to not configured.", shutdown_input);
+#endif
+}
+
+bool P14aEnwg::get_em_input()
+{
+#if MODULE_EM_COMMON_AVAILABLE()
+    uint32_t input_index = config.get("source")->get()->get("input_index")->asUint();
+    bool inputs[4] = {};
+    size_t inputs_len = ARRAY_SIZE(inputs);
+    bool outputs[4] = {};
+    size_t outputs_len = ARRAY_SIZE(outputs);
+    em_common.get_input_output_states(inputs, &inputs_len, outputs, &outputs_len);
+    if (input_index < inputs_len) {
+        return inputs[input_index];
+    }
+#endif
+    return false;
+}
+
+void P14aEnwg::check_inputs()
+{
+    if (!is_enabled()) {
+        return;
+    }
+
+    if (config.get("source")->getTag<P14aEnwgSource>() != P14aEnwgSource::Input) {
+        return;
+    }
+
+    bool input_value = false;
+    uint32_t phases = 0;
+
+#if MODULE_EVSE_V2_AVAILABLE()
+    input_value = evse_v2.is_shutdown_input_closed();
+    phases = evse_common.backend->get_phases();
+#endif
+
+#if MODULE_EM_COMMON_AVAILABLE()
+    input_value = get_em_input();
+#endif
+
+    // Update on the first check after boot or after enabling the module, so that the initial state is reported to the automation module.
+    if ((last_trigger_state == TriggerState::Unknown) || (input_value != last_input_value) || (phases != last_phases)) {
+        last_input_value = input_value;
+        last_phases = phases;
+        update();
+    }
+}
+
+void P14aEnwg::update()
+{
+    if (!is_enabled()) {
+        set_state(false, 0);
+#if MODULE_EVSE_COMMON_AVAILABLE()
+        if (last_current_mA != 32000) {
+            evse_common.set_p14a_enwg_current(32000);
+            last_current_mA = 32000;
+        }
+#endif
+        return;
+    }
+
+    const P14aEnwgSource source = config.get("source")->getTag<P14aEnwgSource>();
+
+    bool active = false;
+    uint32_t limit_w = 0;
+
+    switch (source) {
+        case P14aEnwgSource::Input: {
+            bool input_value = false;
+
+#if MODULE_EVSE_V2_AVAILABLE()
+            input_value = evse_v2.is_shutdown_input_closed();
+#endif
+
+#if MODULE_EM_COMMON_AVAILABLE()
+            input_value = get_em_input();
+#endif
+
+            bool limit_on_close = config.get("source")->get()->get("limit_on_close")->asBool();
+            // input_value == true means input is closed.
+            active = limit_on_close ? input_value : !input_value;
+            limit_w = config.get("source")->get()->get("limit_w")->asUint();
+            break;
+        }
+
+        case P14aEnwgSource::EEBus:
+            active = eebus_active;
+            limit_w = eebus_limit_w;
+            break;
+
+        case P14aEnwgSource::API:
+            active = control.get("active")->asBool();
+            limit_w = control.get("limit_w")->asUint();
+            break;
+    }
+
+    set_state(active, limit_w);
+
+#if MODULE_EVSE_COMMON_AVAILABLE()
+    uint16_t new_current_mA = 32000;
+
+    if (config.get("limit_charger")->asBool() && active) {
+        uint32_t phases = evse_common.backend->get_phases();
+        if (phases == 0) {
+            phases = 3;
+        }
+        int limit_mA = static_cast<int>(limit_w) * 1000 / 230 / static_cast<int>(phases);
+        limit_mA = std::min(limit_mA, 32000);
+        limit_mA = std::max(limit_mA, 6000);
+        new_current_mA = static_cast<uint16_t>(limit_mA);
+    }
+
+    if (new_current_mA != last_current_mA) {
+        evse_common.set_p14a_enwg_current(new_current_mA);
+        last_current_mA = new_current_mA;
+    }
+#endif
+}
+
+void P14aEnwg::start_input_check()
+{
+    if (input_check_task_id != 0) {
+        return;
+    }
+
+    input_check_task_id = task_scheduler.scheduleWithFixedDelay([this]() {
+        this->check_inputs();
+    }, 1_s, 1_s);
+}
+
+void P14aEnwg::stop_input_check()
+{
+    if (input_check_task_id == 0) {
+        return;
+    }
+
+    task_scheduler.cancel(input_check_task_id);
+    input_check_task_id = 0;
+
+    // Don't reset state and current here:
+    // stop_input_check() is only called from the config update handler, which always schedules update() that then sets state and current according to the new config.
+    // Resetting here could produce a spurious active -> inactive -> active sequence for the automation trigger when switching from Input to another active source.
+}
+
+void P14aEnwg::set_state(bool active, uint32_t limit_w)
+{
+    state.get("active")->updateBool(active);
+    state.get("limit_w")->updateUint(active ? limit_w : 0);
+
+    const TriggerState new_trigger_state = active ? TriggerState::Active : TriggerState::Inactive;
+
+    if (new_trigger_state == last_trigger_state) {
+        return;
+    }
+
+    const bool was_unknown = last_trigger_state == TriggerState::Unknown;
+    last_trigger_state = new_trigger_state;
+
+    if (was_unknown && !is_enabled()) {
+        return;
+    }
+
+#if MODULE_AUTOMATION_AVAILABLE()
+    task_scheduler.scheduleOnce([this, active]() {
+        bool active_ = active;
+        automation.trigger(AutomationTriggerID::P14aEnwg, &active_, this);
+    });
+#endif
+}
+
+void P14aEnwg::set_eebus_limit(bool active, uint32_t limit_w)
+{
+    eebus_active = active;
+    eebus_limit_w = limit_w;
+
+    if (config.get("source")->getTag<P14aEnwgSource>() == P14aEnwgSource::EEBus) {
+        this->update();
+    }
+}
+
+// Currently heating always gets blocked when §14a is active.
+// Later on we will integrate this into the load management,
+// then it may stay active if the power limit allows it.
+bool P14aEnwg::is_heating_active()
+{
+    return is_enabled() && config.get("limit_heating")->asBool() && state.get("active")->asBool();
+}
+
+uint32_t P14aEnwg::get_managed_chargers_limit()
+{
+    if (!is_enabled() || !config.get("limit_charge_manager")->asBool() || !state.get("active")->asBool()) {
+        return 0;
+    }
+
+    return state.get("limit_w")->asUint();
+}
+
+#if MODULE_AUTOMATION_AVAILABLE()
+bool P14aEnwg::has_triggered(const Config *conf, void *data)
+{
+    const Config *cfg = static_cast<const Config *>(conf->get());
+
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wswitch-enum"
+
+    switch (conf->getTag<AutomationTriggerID>()) {
+        case AutomationTriggerID::P14aEnwg:
+            return *static_cast<bool *>(data) == cfg->get("active")->asBool();
+
+        default:
+            break;
+    }
+
+#pragma GCC diagnostic pop
+
+    return false;
+}
+#endif

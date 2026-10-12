@@ -1,0 +1,96 @@
+/** @jsxImportSource preact */
+import { h } from "preact";
+import * as options from "../../options";
+import { __ } from "../../ts/translation";
+let x = {
+    "system": {
+        "status": {
+            "system": "System",
+            "last_reset": /*FFN*/(reason: number, version: string) => {
+                let reason_table = [
+                    "due to unknown cause",
+                    "due to power-on",
+                    "by external pin",
+                    "by software reset",
+                    "due to software crash",
+                    "due to interrupt watchdog",
+                    "due to task watchdog",
+                    "due to other watchdog",
+                    "after exiting deep sleep mode",
+                    "due to brownout",
+                    "by SDIO",
+                    "by USB peripheral",
+                    "by JTAG",
+                    "due to eFuse error",
+                    "due to power glitch detection",
+                    "due to CPU lock up",
+                ];
+
+                let reason_str = reason_table[reason];
+
+                if (reason_str === undefined) {
+                    reason_str = reason_table[0];
+                }
+
+                let result = [<>__("The_device") was rebooted unexpectedly {reason_str}.</>];
+
+                if (options.SUPPORT_EMAIL.length > 0) {
+                    result.push(<> Please download a <a href="#event_log">debug report</a> and send it to <a href={`mailto:${options.SUPPORT_EMAIL}?subject=${options.PRODUCT_NAME} with firmware ${version} was rebooted unexpectedly`}>{options.SUPPORT_EMAIL}</a>.</>);
+                }
+
+                return <>{result}</>;
+            }/*NF*/,
+            "hide_last_reset_warning_failed": "Clearing the warning failed"
+        },
+        "navbar": {
+            "system": "Settings"
+        },
+        "content": {
+            "system": "System",
+
+            "factory_reset_desc": null,
+            "factory_reset": "Factory reset",
+            "factory_reset_modal_text": null,
+
+            "config_reset_desc": null,
+            "config_reset": "Reset configuration",
+
+            "config_reset_modal_text": null,
+            "confirm_config_reset": "Reset configuration",
+
+            "abort_reset": "Abort",
+            "confirm_factory_reset": "Reset to factory defaults",
+            "reboot": "Reboot",
+
+            "system_language": "System language",
+            "system_language_help": "Sets the system language to the specified language. If \"Auto-detect browser language\" is disabled, the browser's language settings are ignored and the specified system language is also used for the web interface.",
+            "system_language_warning": /*SFN*/(browser_locale: string, browser_language_name: string, web_interface_language: string, web_interface_language_name: string) =>
+                `The browser user interface is set to ${browser_language_name} [${browser_locale}], so numbers, times and dates will be displayed in ${browser_language_name}. The web interface is set to ${web_interface_language_name} [${web_interface_language}], so texts will be displayed in ${web_interface_language_name}.`/*NF*/,
+            "german": "German",
+            "english": "English",
+            "detect_browser_language": "Auto-detect browser language",
+
+            "color_scheme": "Color scheme",
+            "color_scheme_browser": "Use browser color scheme",
+            "color_scheme_light": "Light",
+            "color_scheme_dark": "Dark",
+
+            "country": "Country",
+            "country_help": <>Selects the country __("the_device") is installed in. This enables country-specific features and regulations.</>,
+            "country_other": "Other country",
+            "country_germany": "Germany",
+            "country_austria": "Austria",
+            "country_switzerland": "Switzerland",
+            "country_luxembourg": "Luxembourg"
+        },
+        "script": {
+            "factory_reset_init": "Formatting configuration partition and rebooting...",
+            "factory_reset_error": "Initiating factory reset failed",
+
+            "config_reset_init": "Resetting configuration and rebooting...",
+            "config_reset_error": "Failed to reset configuration",
+
+            "save_failed": "Failed to save the system settings"
+        }
+    }
+}

@@ -1,0 +1,347 @@
+/* esp32-firmware
+ * Copyright (C) 2020-2023 Erik Fleckstein <erik@tinkerforge.com>
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, write to the
+ * Free Software Foundation, Inc., 59 Temple Place - Suite 330,
+ * Boston, MA 02111-1307, USA.
+ */
+
+#include <stdio.h>
+#include <string.h>
+#include <esp_task.h>
+
+#include "event_log_prefix.h"
+#include "main_dependencies.h"
+#include "modules.h"
+#include "language.h"
+#include "index_html.embedded.h"
+#include "bindings/hal_common.h"
+#include "build.h"
+#include "tools.h"
+#include "tools/freertos.h"
+#include "tools/fs.h"
+#include "tools/memory.h"
+#include "tools/bricklets.h"
+
+#include "gcc_warnings.h"
+
+BootStage boot_stage = BootStage::STATIC_INITIALIZATION;
+Language default_language = Language::German;
+
+static imodule_info *loop_array = nullptr;
+static size_t loop_array_size = 0;
+static size_t loop_array_position = 0;
+
+static bool is_module_loop_overridden(const IModule *imodule) {
+#if defined(__GNUC__)
+    #pragma GCC diagnostic push
+    #pragma GCC diagnostic ignored "-Wold-style-cast"
+    #pragma GCC diagnostic ignored "-Wpedantic"
+    #pragma GCC diagnostic ignored "-Wpmf-conversions"
+    // GCC pointer to member function magic
+    // http://www.cs.fsu.edu/~baker/ada/gnat/html/gcc_6.html#SEC151
+    // https://stackoverflow.com/questions/3068144/print-address-of-virtual-member-function
+    void (IModule::*loop_ptr)() = &IModule::loop;
+    if ((void*)(imodule->*loop_ptr) != (void*)(&IModule::loop)) { // Get pointer to member function and compare with pointer to base class function.
+        return true;
+    } else {
+        return false;
+    }
+    #pragma GCC diagnostic pop
+#else
+    (void*)imodule;
+    return true;
+#endif
+}
+
+// declared and initialized by board module
+extern TF_HAL hal;
+
+// initialized by board module
+int8_t blue_led_pin = -1;
+int8_t green_led_pin = -1;
+int8_t button_pin = -1;
+
+ConfigRoot modules;
+
+static bool is_safari(const String &user_agent) {
+    // Firefox on iOS uses WebKit, not Gecko, but reports FxiOS/* instead of Version/*
+    // The same is true for Chrome on iOS, but with CriOS/* instead of Version/*
+    // For good measure also treat Edge on iOS the same way, even while reporting Version/* right now
+    // https://github.com/Tinkerforge/esp32-firmware/issues/342#issuecomment-2855741681
+    // https://github.com/mozilla-mobile/firefox-ios/issues/15938
+    // https://issues.chromium.org/issues/40233511
+    return user_agent.indexOf("Safari/") >= 0 &&
+          (user_agent.indexOf("Version/") >= 0 || user_agent.indexOf("FxiOS/") >= 0 || user_agent.indexOf("CriOS/") >= 0 || user_agent.indexOf("EdgiOS/") >= 0) &&
+           user_agent.indexOf("Chrome/") == -1 &&
+           user_agent.indexOf("Chromium/") == -1;
+}
+
+static WebServerRequestReturnProtect send_index_html(WebServerRequest &request) {
+    request.addResponseHeader("Content-Encoding", "gzip");
+    request.addResponseHeader("ETag", build_timestamp_hex_str());
+    request.addResponseHeader("X-Clacks-Overhead", "GNU Terry Pratchett");
+
+    if (request.header("If-None-Match") == build_timestamp_hex_str()) {
+        return request.send_plain(304);
+    }
+
+    return request.send_html(200, index_html_data, index_html_length);
+}
+
+static constexpr minutes_t PRE_REBOOT_MAX_DURATION = 5_min;
+
+static const char *pre_reboot_message = "Pre-reboot stage lasted longer than five minutes";
+
+#if !MODULE_WATCHDOG_AVAILABLE()
+
+[[gnu::noinline]]
+[[gnu::noreturn]]
+static void pre_reboot_task(void *arg)
+{
+    vTaskDelay_ms(static_cast<millis_t>(PRE_REBOOT_MAX_DURATION).as<uint32_t>());
+    esp_system_abort(pre_reboot_message);
+}
+
+[[gnu::noinline]]
+[[gnu::noreturn]]
+static void task_creation_failed(int error_code)
+{
+    esp_system_abortf<48>("Failed to create pre-reboot task: %i", error_code);
+}
+
+#endif
+
+[[gnu::noinline]]
+static void pre_reboot_helper()
+{
+    for (size_t i = imodules_count; i > 0;) {
+        i--;
+        (*imodules[i].imodule)->pre_reboot();
+    }
+
+    delay(1500);
+}
+
+static void pre_reboot()
+{
+    boot_stage = BootStage::PRE_REBOOT;
+
+    if (running_in_main_task()) {
+#if MODULE_WATCHDOG_AVAILABLE()
+        watchdog.add("pre_reboot", pre_reboot_message, PRE_REBOOT_MAX_DURATION, 0_ms, true);
+#else
+        auto err = xTaskCreatePinnedToCore(
+            pre_reboot_task,
+            "pre_reboot_task",
+            640,
+            nullptr,
+            configMAX_PRIORITIES - 1U, // Cannot use ESP_TASK_PRIO_MAX because it is incorrectly defined.
+            nullptr,
+            1);
+
+        if (err != pdPASS_nowarn) {
+            task_creation_failed(err);
+        }
+#endif
+
+        pre_reboot_helper();
+    }
+    else {
+        if (!task_scheduler.await(pre_reboot_helper, PRE_REBOOT_MAX_DURATION)) {
+            esp_system_abort(pre_reboot_message);
+        }
+    }
+}
+
+static void register_default_urls() {
+    server.on_HTTPThread("/", HTTP_GET, [](WebServerRequest request) {
+        return send_index_html(request);
+    });
+
+    api.addCommand("reboot", Config::Null(), {}, [](Language /*language*/, String &/*errmsg*/) {
+        trigger_reboot("API", 1_s);
+    }, true);
+
+    api.addCommand("bricklet_reboot", Config::Null(), {}, [](Language /*language*/, String &/*errmsg*/) {
+        reboot_all_bricklets();
+    }, true);
+
+    api.addState("info/modules", &modules);
+
+    server.on_HTTPThread("/force_reboot", HTTP_GET, [](WebServerRequest request) {
+        esp_unregister_shutdown_handler(pre_reboot);
+#if MODULE_FIRMWARE_UPDATE_AVAILABLE()
+        // Normally the firmware update pre_reboot hook would do this
+        firmware_update.change_running_partition_from_pending_verify_to_new("forcing reboot", true);
+#endif
+        esp_restart();
+        return request.send_plain(200, "Forced reboot.");
+    });
+
+    server.onNotAuthorized_HTTPThread([](WebServerRequest request) {
+        if (request.uri() == "/") {
+            return send_index_html(request);
+        } else if (request.uri() == "/login_state") {
+            // Force Safari to send credentials proactively.
+            // This still is broken for the ws:// handler,
+            // however there seems to be no way to force safari to proactively send credentials for it.
+            // See https://bugs.webkit.org/show_bug.cgi?id=80362
+            // Pressing cancel instead of logging in works at least on macOS.
+            if (is_safari(request.header("User-Agent"))) {
+                return request.requestAuthentication();
+            }
+
+            return request.send_plain(200, "Not logged in");
+        } else {
+            return request.requestAuthentication();
+        }
+    });
+
+    server.on_HTTPThread("/credential_check", HTTP_GET, [](WebServerRequest request) {
+        return request.send_plain(200, "Credentials okay");
+    });
+
+    server.on_HTTPThread("/login_state", HTTP_GET, [](WebServerRequest request) {
+        return request.send_plain(200, "Logged in");
+    });
+}
+
+void setup()
+{
+    set_main_task_handle();
+
+    boot_stage = BootStage::PRE_INIT;
+
+    // Technically the serial console is already active, because the ESP's ROM bootloader prints some messages.
+    // However if BUILD_MONITOR_SPEED is not the ROM bootloader's preferred speed, this call will change the speed.
+    Serial.begin(BUILD_MONITOR_SPEED);
+
+    tools_malloc_pre_setup();
+
+    for (size_t i = 0; i < imodules_count; i++) {
+        (*imodules[i].imodule)->pre_init();
+    }
+
+    if (!mount_or_format_data_partition()) {
+        logger.printfln("Failed to mount data partition");
+    }
+
+    check_memory_assumptions();
+
+    boot_stage = BootStage::PRE_SETUP;
+
+    for (size_t i = 0; i < imodules_count; i++) {
+        (*imodules[i].imodule)->pre_setup();
+    }
+
+    boot_stage = BootStage::SETUP;
+
+    for (size_t i = 0; i < imodules_count; i++) {
+        (*imodules[i].imodule)->setup();
+    }
+
+    modules = modules_get_init_config();
+
+    logger.post_setup();
+    config_post_setup();
+    server.post_setup();
+
+    boot_stage = BootStage::REGISTER_URLS;
+
+    register_default_urls();
+
+    for (size_t i = 0; i < imodules_count; i++) {
+        (*imodules[i].imodule)->register_urls();
+    }
+
+    boot_stage = BootStage::REGISTER_EVENTS;
+
+    for (size_t i = 0; i < imodules_count; i++) {
+        (*imodules[i].imodule)->register_events();
+    }
+
+    // Ignore non-overridden empty loop functions.
+    for (size_t i = 0; i < imodules_count; i++) {
+        if (is_module_loop_overridden(*imodules[i].imodule)) {
+            loop_array_size++;
+        }
+    }
+
+    // Add all overridden loop functions to an array for round-robin execution.
+    if (loop_array_size > 0) {
+        loop_array = static_cast<imodule_info *>(perm_alloc(sizeof(imodule_info) * loop_array_size, DRAM));
+
+        size_t loop_array_used = 0;
+        for (size_t i = 0; i < imodules_count; i++) {
+            if (is_module_loop_overridden(*imodules[i].imodule)) {
+                loop_array[loop_array_used] = imodules[i];
+                loop_array_used++;
+            }
+        }
+    }
+
+#if MODULE_WATCHDOG_AVAILABLE()
+    const int watchdog_handle = watchdog.add("main_loop", "Main thread or task scheduler blocked", 30_s, 0_ms, true);
+
+    task_scheduler.scheduleUncancelable([watchdog_handle]() {
+        watchdog.reset(watchdog_handle);
+    }, 0_ms, 2_s);
+
+#endif
+
+    if (esp_register_shutdown_handler(pre_reboot) != ESP_OK) {
+        logger.printfln("Failed to register reboot handler");
+    }
+
+#if MODULE_IO_SCHEDULER_AVAILABLE()
+    // Hand over HAL ownership from the main task to the IO task.
+    io_scheduler.start_task();
+#endif
+
+    logger.printfln("Initialization done");
+
+    boot_stage = BootStage::LOOP;
+}
+
+void loop() {
+#if !MODULE_IO_SCHEDULER_AVAILABLE()
+    tf_hal_tick(&hal, 0);
+#endif
+    task_scheduler.custom_loop();
+
+#if MODULE_DEBUG_AVAILABLE()
+    debug.custom_loop();
+#endif
+
+    // Round-robin for modules' loop functions, to prioritize HAL ticks and scheduler.
+    if (loop_array != nullptr) {
+#if MODULE_DEBUG_AVAILABLE()
+        const micros_t t_start = now_us();
+#endif
+
+        imodule_info *module = loop_array + loop_array_position;
+        (*module->imodule)->loop();
+
+#if MODULE_DEBUG_AVAILABLE()
+        const micros_t t_runtime = now_us() - t_start;
+        debug.task_scheduler_task_accounting_call(module->name, 0, t_runtime);
+#endif
+
+        loop_array_position++;
+        if (loop_array_position >= loop_array_size) {
+            loop_array_position = 0;
+        }
+    }
+}

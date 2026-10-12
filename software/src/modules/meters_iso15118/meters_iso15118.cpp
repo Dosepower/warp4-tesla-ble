@@ -1,0 +1,108 @@
+/* esp32-firmware
+ * Copyright (C) 2026 Olaf Lüke <olaf@tinkerforge.com>
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, write to the
+ * Free Software Foundation, Inc., 59 Temple Place - Suite 330,
+ * Boston, MA 02111-1307, USA.
+ */
+
+#include "meters_iso15118.h"
+
+#include "event_log_prefix.h"
+#include "generated/module_dependencies.h"
+#include "modules/meters/generated/meter_location.enum.h"
+
+#include "gcc_warnings.h"
+
+void MetersISO15118::pre_setup()
+{
+    config_prototype = Config::Object({
+        {"display_name", Config::Str("Vehicle", 0, 32)},
+        {"location", Config::Enum(MeterLocation::Vehicle)},
+        {"excluded", Config::Bool(false)},
+    });
+
+    state_prototype = Config::Object({
+        {"source", Config::Enum(EVDataSource::None)}
+    });
+
+    errors_prototype = Config::Object({
+        // No error tracking for now
+    });
+
+    meters.register_meter_generator(get_class(), this);
+}
+
+[[gnu::const]]
+MeterClassID MetersISO15118::get_class() const
+{
+    return MeterClassID::ISO15118;
+}
+
+IMeter *MetersISO15118::new_meter(uint32_t slot, Config *state, Config *errors)
+{
+    if (meter_instance) {
+        logger.printfln_meter("Cannot create more than one meter of class ISO15118");
+        return nullptr;
+    }
+    meter_instance = new MeterISO15118(slot, state, errors);
+    return meter_instance;
+}
+
+[[gnu::const]]
+const Config *MetersISO15118::get_config_prototype()
+{
+    return &config_prototype;
+}
+
+[[gnu::const]]
+const Config *MetersISO15118::get_state_prototype()
+{
+    return &state_prototype;
+}
+
+[[gnu::const]]
+const Config *MetersISO15118::get_errors_prototype()
+{
+    return &errors_prototype;
+}
+
+void MetersISO15118::update_values(float soc, float capacity, float power, EVDataSource source)
+{
+    if (!meter_instance) {
+        return;
+    }
+
+    if (source == EVDataSource::None) {
+        meter_instance->clear_all_values();
+        return;
+    }
+
+    meter_instance->update_all_values(soc, capacity, power);
+    meter_instance->set_source(source);
+}
+
+void MetersISO15118::update_soc(float soc)
+{
+    if (meter_instance) {
+        meter_instance->update_soc(soc);
+    }
+}
+
+void MetersISO15118::clear_values()
+{
+    if (meter_instance) {
+        meter_instance->clear_all_values();
+    }
+}

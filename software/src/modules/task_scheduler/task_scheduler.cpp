@@ -1,0 +1,583 @@
+/* esp32-firmware
+ * Copyright (C) 2020-2021 Erik Fleckstein <erik@tinkerforge.com>
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, write to the
+ * Free Software Foundation, Inc., 59 Temple Place - Suite 330,
+ * Boston, MA 02111-1307, USA.
+ */
+
+#include "task_scheduler.h"
+
+#include <algorithm>
+
+#ifdef DEBUG_FS_ENABLE
+#include <lwipopts.h>
+#endif
+
+#include "event_log_prefix.h"
+#include "generated/module_dependencies.h"
+#include "options.h"
+
+// Shared between all TaskScheduler instances so that task IDs stay globally unique.
+static std::atomic<uint64_t> last_task_id = 0;
+
+Task::Task(std::function<void(void)> &&fn, uint64_t task_id, micros_t first_run_delay, micros_t delay, const char *file, uint_least32_t line, bool once) :
+        fn(std::move(fn)),
+        task_id(task_id),
+        next_deadline(now_us() + first_run_delay),
+        delay(delay),
+        awaited_by(nullptr),
+        file(file),
+        line(line),
+        once(once),
+        cancelled(false),
+        immediate_reschedule(false) {
+}
+
+WallClockTask::WallClockTask(std::unique_ptr<Task> &&runner_task, uint64_t task_id, minutes_t interval_minutes, bool run_on_first_sync) :
+        runner_task(std::move(runner_task)),
+        task_id(task_id),
+        interval_minutes(interval_minutes),
+        run_on_first_sync(run_on_first_sync) {
+
+}
+
+/*
+A Compare type providing a strict weak ordering.
+
+Note that the Compare parameter is defined such that it returns true
+if its first argument comes before its second argument in a weak ordering.
+But because the priority queue outputs largest elements first,
+the elements that "come before" are actually output last.
+That is, the front of the queue contains the "last" element
+according to the weak ordering imposed by Compare.
+(https://en.cppreference.com/w/cpp/container/priority_queue)
+*/
+bool compare(const std::unique_ptr<Task> &a, const std::unique_ptr<Task> &b)
+{
+    return a->next_deadline >= b->next_deadline;
+}
+
+// https://stackoverflow.com/a/36711682
+std::unique_ptr<Task> TaskQueue::removeByTaskID(uint64_t task_id)
+{
+    // The queue is locked if this function is called.
+
+    if (task_id == 0)
+        return nullptr;
+
+    auto it = std::find_if(this->c.begin(), this->c.end(), [task_id](const std::unique_ptr<Task> &t){return t->task_id == task_id;});
+
+    if (it == this->c.end()) {
+        // not found
+        return nullptr;
+    }
+
+    if (it == this->c.begin()) {
+        return this->top_and_pop();
+    }
+
+    // extract payload from element to be removed
+    std::unique_ptr<Task> result = nullptr;
+    it->swap(result);
+
+    // remove element and re-heap
+    this->c.erase(it);
+    std::make_heap(this->c.begin(), this->c.end(), this->comp);
+
+    return result;
+}
+
+Task *TaskQueue::findByTaskID(uint64_t task_id)
+{
+    if (task_id == 0)
+        return nullptr;
+
+    auto it = std::find_if(this->c.begin(), this->c.end(), [task_id](const std::unique_ptr<Task> &t){return t->task_id == task_id;});
+
+    if (it == this->c.end()) {
+        // not found
+        return nullptr;
+    }
+
+    return it->get();
+}
+
+void TaskQueue::restoreHeap() {
+    std::make_heap(this->c.begin(), this->c.end(), this->comp);
+}
+
+void TaskScheduler::pre_reboot()
+{
+    rebooting = true;
+}
+
+// Coredump hints: Which task function was running last. One pair for the
+// scheduler owned by the main task, one pair shared by all secondary instances.
+COREDUMP_RTC_DATA_ATTR const char *task_fn_file;
+COREDUMP_RTC_DATA_ATTR uint_least32_t task_fn_line;
+COREDUMP_RTC_DATA_ATTR const char *task_fn_file_secondary;
+COREDUMP_RTC_DATA_ATTR uint_least32_t task_fn_line_secondary;
+
+void TaskScheduler::custom_loop()
+{
+    // We can't use defer to clean up currentTask on function level,
+    // because we have to make sure currentTask is only written
+    // while the task_mutex is locked.
+
+    {
+        std::lock_guard<std::mutex> lock{this->task_mutex};
+        if (!tasks.empty() && deadline_elapsed(tasks.top()->next_deadline)) {
+            this->currentTask = tasks.top_and_pop();
+
+            if (this->currentTask->cancelled) {
+                if (this->currentTask->awaited_by != nullptr) {
+                    xTaskNotifyGive(this->currentTask->awaited_by);
+                    this->currentTask->awaited_by = nullptr;
+                }
+
+                this->currentTask = nullptr;
+                return;
+            }
+        }
+    }
+
+    const bool main_instance = this->isOwnedByMainTask();
+
+    if (!this->currentTask) {
+        if (main_instance) {
+#if MODULE_DEBUG_AVAILABLE()
+            debug.task_scheduler_idle_call();
+#elif OPTIONS_TASK_SCHEDULER_CPU_IDLE()
+            // Allow the CPU to sleep when there's nothing to do.
+            vTaskDelay(1);
+#endif
+        } else {
+            // Secondary instances always yield when idle to not starve main task.
+            vTaskDelay(1);
+        }
+        return;
+    }
+
+    if (main_instance) {
+        task_fn_file = this->currentTask->file;
+        task_fn_line = this->currentTask->line;
+    } else {
+        task_fn_file_secondary = this->currentTask->file;
+        task_fn_line_secondary = this->currentTask->line;
+    }
+
+    if (!this->rebooting) {
+        // Run task without holding the lock.
+        // This allows a task to schedule tasks (could also be done with a recursive mutex)
+        // but also allows other threads to schedule tasks while one is executed.
+        if (!this->currentTask->fn) {
+            logger.printfln("Invalid task");
+        } else {
+#if MODULE_DEBUG_AVAILABLE()
+            const micros_t t_start = now_us();
+#endif
+
+            this->currentTask->fn();
+
+#if MODULE_DEBUG_AVAILABLE()
+            if (main_instance) {
+                const micros_t t_runtime = now_us() - t_start;
+                debug.task_scheduler_task_accounting_call(this->currentTask->file, this->currentTask->line, t_runtime);
+            }
+#endif
+        }
+    }
+
+    {
+        std::lock_guard<std::mutex> lock{this->task_mutex};
+
+        // Copy awaited_by to be able to call xTaskNotifyGive after clearing currentTask.
+        auto *awaited_by = this->currentTask->awaited_by;
+        this->currentTask->awaited_by = nullptr;
+
+        defer {
+            this->currentTask = nullptr;
+            // Notify waiting thread when everything else is done.
+            // This allows stack-allocating tasks that are awaited.
+            if (awaited_by != nullptr) {
+                xTaskNotifyGive(awaited_by);
+            }
+        };
+
+        if (this->currentTask->once) {
+            if (!IS_WALL_CLOCK_TASK_ID(this->currentTask->task_id))
+                return;
+
+            for (auto &wall_clock_task : this->wall_clock_tasks) {
+                if (wall_clock_task.task_id != this->currentTask->task_id)
+                    continue;
+                wall_clock_task.runner_task = std::move(this->currentTask);
+                return;
+            }
+            return;
+        }
+
+        // Check whether a repeated task was cancelled while it was being executed.
+        if (this->currentTask->cancelled) {
+            return;
+        }
+
+        this->currentTask->next_deadline = this->currentTask->immediate_reschedule ? 0_us : (now_us() + this->currentTask->delay);
+        this->currentTask->immediate_reschedule = false;
+
+        tasks.push(std::move(this->currentTask));
+    }
+}
+
+bool TaskScheduler::nextTaskReady()
+{
+    std::lock_guard<std::mutex> lock{this->task_mutex};
+
+    if (tasks.empty()) {
+        return false;
+    }
+
+    const micros_t next_deadline = tasks.top()->next_deadline;
+    const micros_t now = now_us();
+
+    return next_deadline <= now;
+}
+
+uint64_t TaskScheduler::scheduleOnceNoAlloc(aligned_storage<Task> *task_buffer, bool transfer_task_ownership, std::function<void(void)> &&fn, millis_t delay_ms, const std::source_location &src_location)
+{
+    std::lock_guard<std::mutex> lock{this->task_mutex};
+    uint64_t task_id = ++last_task_id;
+    Task *ptr = new(task_buffer) Task(std::move(fn), task_id, delay_ms, 0_us, src_location.file_name(), src_location.line(), true);
+    ptr->owned = transfer_task_ownership;
+    //if (!ptr->owned)
+        //printf("no alloc %s:%lu %s\n", src_location.file_name(), src_location.line(), src_location.function_name());
+    tasks.emplace(ptr);
+    return task_id;
+}
+
+uint64_t TaskScheduler::scheduleOnce(std::function<void(void)> &&fn, millis_t delay_ms, const std::source_location &src_location)
+{
+    //printf("alloc %s:%lu %s\n", src_location.file_name(), src_location.line(), src_location.function_name());
+    return this->scheduleOnceNoAlloc(new aligned_storage<Task>, true, std::move(fn), delay_ms, src_location);
+}
+
+uint64_t TaskScheduler::scheduleWithFixedDelay(std::function<void(void)> &&fn, millis_t first_delay_ms, millis_t delay_ms, const std::source_location &src_location)
+{
+    std::lock_guard<std::mutex> lock{this->task_mutex};
+    uint64_t task_id = ++last_task_id;
+    tasks.emplace(new Task(std::move(fn), task_id, first_delay_ms, delay_ms, src_location.file_name(), src_location.line(), false));
+    return task_id;
+}
+
+uint64_t TaskScheduler::scheduleUncancelable(std::function<void(void)> &&fn, millis_t first_delay_ms, millis_t delay_ms, const std::source_location &src_location)
+{
+    std::lock_guard<std::mutex> lock{this->task_mutex};
+    uint64_t task_id = ++last_task_id | (1ull << 62ull);
+    auto *task = perm_new<Task>(DRAM, std::move(fn), task_id, first_delay_ms, delay_ms, src_location.file_name(), src_location.line(), false);
+    task->owned = false;
+    tasks.emplace(task);
+    return task_id;
+}
+
+uint64_t TaskScheduler::scheduleWhenClockSynced(std::function<void(void)> &&fn, const std::source_location &src_location)
+{
+    // Check if the clock is already synced and avoid the sync check task.
+    // Turn the callback into a one-shot task to preserve start-up sequencing
+    // and to avoid executing it in the context of the calling task.
+    struct timeval tv;
+    if (rtc.clock_synced(&tv)) {
+        return scheduleOnce(std::move(fn), 0_ms, src_location);
+    }
+
+    // Check once per second if clock is synced,
+    // cancel task if it is and then call
+    // the user supplied function
+    return this->scheduleWithFixedDelay([this, fn]() {
+        struct timeval tv_now;
+        if (rtc.clock_synced(&tv_now)) {
+            this->cancel(this->currentTaskId());
+            fn();
+        }
+    }, 0_ms, 1_s, src_location);
+}
+
+uint64_t TaskScheduler::scheduleWallClock(std::function<void(void)> &&fn, minutes_t interval_minutes, millis_t execution_delay_ms, bool run_on_first_sync, const std::source_location &src_location)
+{
+    uint64_t task_id;
+    {
+        std::lock_guard<std::mutex> lock{this->task_mutex};
+        task_id = ++last_task_id | (1ull << 63ull);
+        auto runner_task = std::unique_ptr<Task>(new Task(std::move(fn), task_id, 0_us, execution_delay_ms, src_location.file_name(), src_location.line(), true));
+
+        wall_clock_tasks.emplace_back(std::move(runner_task), task_id, interval_minutes, run_on_first_sync);
+    }
+
+    if (!wall_clock_worker_started) {
+        wall_clock_worker_started = true;
+        this->scheduleUncancelable([this](){this->wall_clock_worker();}, 0_ms, 1_s /* Don't forward src_location. */); // The delay will be modified after time sync.
+    }
+
+    return task_id;
+}
+
+TaskScheduler::CancelResult TaskScheduler::cancel(uint64_t task_id)
+{
+    if (task_id == 0)
+        return TaskScheduler::CancelResult::NotFound;
+
+    if (IS_UNCANCELABLE_TASK_ID(task_id))
+        esp_system_abort("Attempted to cancel an uncancelable task!");
+
+    std::lock_guard<std::mutex> lock{this->task_mutex};
+    if (IS_WALL_CLOCK_TASK_ID(task_id)) {
+        size_t i = 0;
+        bool task_scheduled = false;
+        for (; i < wall_clock_tasks.size(); ++i) {
+            if (wall_clock_tasks[i].task_id != task_id)
+                continue;
+            task_scheduled = !(bool)(wall_clock_tasks[i].runner_task);
+            break;
+        }
+        wall_clock_tasks.erase(wall_clock_tasks.begin() + i);
+        if (!task_scheduled)
+            return TaskScheduler::CancelResult::Cancelled;
+    }
+
+    if (this->currentTask && this->currentTask->task_id == task_id) {
+        this->currentTask->cancelled = true;
+        return TaskScheduler::CancelResult::WillBeCancelled;
+    }
+    else {
+        return tasks.removeByTaskID(task_id) != nullptr
+            ? TaskScheduler::CancelResult::Cancelled
+            : TaskScheduler::CancelResult::NotFound;
+    }
+}
+
+uint64_t TaskScheduler::currentTaskId()
+{
+    // currentTaskId is intended to write a self-canceling task.
+    // Don't allow other threads to cancel tasks without knowing their ID.
+    if (xTaskGetCurrentTaskHandle() != this->ownerTask()) {
+        logger.printfln("Calling TaskScheduler::currentTaskId is only allowed in the thread owning this scheduler!");
+        return 0;
+    }
+
+    if (this->currentTask != nullptr) {
+        if (this->currentTask->task_id != 0) {
+            return this->currentTask->task_id;
+        }
+        esp_system_abort("Calling currentTaskId is not allowed in an uncancelable task!"); // Error message might be obsolete, but the zero-check should stay.
+    } else {
+        esp_system_abort("Calling currentTaskId is not allowed outside of task code!");
+    }
+
+    return 0;
+}
+
+bool TaskScheduler::await(std::function<void(void)> &&fn, millis_t millis_to_wait, const std::source_location &src_location)
+{
+    if (this->rebooting) {
+        return false;
+    }
+
+    DEBUG_ASSERT_OR_RETURN(
+        millis_to_wait > 0_us,
+        "Calling TaskScheduler::await with millis_to_wait == 0_us is not allowed. This is not scheduleOnce!",
+        false
+    );
+
+    TaskHandle_t this_thread = xTaskGetCurrentTaskHandle();
+
+    DEBUG_ASSERT_OR_RETURN(
+        this_thread != this->ownerTask(),
+        "Calling TaskScheduler::await is not allowed in the thread owning this scheduler!",
+        false
+    );
+
+    if (tcp_ip_thread == nullptr)
+        tcp_ip_thread = xTaskGetHandle(TCPIP_THREAD_NAME);
+
+    DEBUG_ASSERT_OR_RETURN(
+        this_thread != tcp_ip_thread,
+        "Calling TaskScheduler::await is not allowed in the TCP/IP thread!",
+        false);
+
+#if MODULE_IO_SCHEDULER_AVAILABLE()
+    if (io_scheduler_thread == nullptr)
+        io_scheduler_thread = io_scheduler.get_task_handle();
+
+    DEBUG_ASSERT_OR_RETURN(
+        this_thread != io_scheduler_thread,
+        "Calling TaskScheduler::await is not allowed in the Io Scheduler thread!",
+        false);
+#endif
+
+    uint64_t task_id = 0;
+    aligned_storage<Task> task_buffer;
+
+    {
+        std::lock_guard<std::mutex> lock{this->task_mutex};
+
+        task_id = ++last_task_id;
+        Task *ptr = new(&task_buffer) Task(std::move(fn), task_id, 0_us, 0_us, src_location.file_name(), src_location.line(), true);
+        ptr->owned = false;
+        ptr->awaited_by = this_thread;
+        tasks.emplace(ptr);
+
+        // Clear notify flags before taking in case the last take timed out.
+        xTaskNotifyStateClear(this_thread);
+    }
+
+    if (ulTaskNotifyTake(true, pdMS_TO_TICKS(millis_to_wait.as<uint32_t>())) == 0) {
+        switch (this->cancel(task_id)) {
+            case TaskScheduler::CancelResult::WillBeCancelled:
+                esp_system_abort("Awaited task timed out and can't be cancelled. Giving up.");
+            case TaskScheduler::CancelResult::Cancelled:
+                return false;
+            case TaskScheduler::CancelResult::NotFound:
+                return !this->rebooting;
+        }
+    }
+
+    return !this->rebooting;
+}
+
+void TaskScheduler::wall_clock_worker() {
+    timeval tv;
+    if (!rtc.clock_synced(&tv))
+        return;
+
+    tm time_struct;
+    gmtime_r(&tv.tv_sec, &time_struct);
+
+    if (time_struct.tm_min == this->wall_clock_last_minute) {
+        // If we somehow managed to hit the same minute or this is a leap second, check again in one second.
+        this->currentTask->delay = 1_s;
+        return;
+    }
+
+    // Blatantly abuse the fact that we're running in the context of the task scheduler and can modify our own delay.
+    // Schedule the next wall clock worker run right on the next minute.
+    // This ignores the worker's run-time, but as it's in the 1ms range, it should be negligible, considering the system's 1000Hz system timer.
+    // Don't subtract a millisecond as compensation, to avoid accidentally running again before the minute changes.
+    // Sleep at least 524ms, to protect against leap seconds or unexpected underflows.
+    this->currentTask->delay = micros_t{std::max((60l - time_struct.tm_sec) * 1000000l - tv.tv_usec, 524288l)};
+
+    auto minutes_since_midnight = minutes_t{time_struct.tm_hour * 60 + time_struct.tm_min};
+
+    std::lock_guard<std::mutex> lock{this->task_mutex};
+    auto now = now_us();
+
+    for (auto &task : wall_clock_tasks) {
+        if (this->wall_clock_last_minute == -1 && !task.run_on_first_sync)
+            continue;
+
+        if (this->wall_clock_last_minute != -1 && (minutes_since_midnight % task.interval_minutes) != 0_min)
+            continue;
+
+        if(!task.runner_task) {
+            logger.printfln("Attempted to schedule WallClockTask execution but runner_task is invalid. Is this task still enqueued?");
+            logger.printfln("    task_id=%llu interval_minutes=%lu run_on_first_sync=%d", task.task_id, task.interval_minutes.as<uint32_t>(), task.run_on_first_sync);
+            continue;
+        }
+
+        task.runner_task->next_deadline = now + task.runner_task->delay;
+        tasks.emplace(std::move(task.runner_task));
+    }
+
+    this->wall_clock_last_minute = time_struct.tm_min;
+}
+
+bool TaskScheduler::rescheduleNow(uint64_t task_id) {
+    if (task_id == 0)
+        return false;
+
+    if (IS_WALL_CLOCK_TASK_ID(task_id)) {
+        esp_system_abort("Not implemented yet. Tell Erik why you want to do this!");
+    }
+
+    std::lock_guard<std::mutex> lock{this->task_mutex};
+
+    if (this->currentTask && this->currentTask->task_id == task_id) {
+        this->currentTask->immediate_reschedule = true;
+        return true;
+    }
+
+    // TODO: could this be faster by implementing the decrease-key operation?
+    Task *task = this->tasks.findByTaskID(task_id);
+
+    if (task == nullptr)
+        return false;
+
+    // Set this task's deadline to 1 less than the one of the next task to be executed if the next task is ready.
+    // This allows calling rescheduleNow multiple times with a defined result (reverse execution).
+    // We can't simply un-reverse this because it is not known whether the next task is one that was already rescheduled.
+    // Note that the defined result only works as expected if rescheduleNow is also called in a task and for other tasks.
+    // If this is called from another thread, it could be that one of the rescheduled tasks is this->currentTask
+    // In that case, it will always win against "concurrent" reschedule calls of other tasks.
+    task->next_deadline = std::min(now_us(), this->tasks.top()->next_deadline - 1_us);
+
+    this->tasks.restoreHeap();
+
+    return true;
+}
+
+bool TaskScheduler::updateDelay(uint64_t task_id, micros_t new_delay) {
+    if (task_id == 0)
+        return false;
+
+    if (IS_WALL_CLOCK_TASK_ID(task_id)) {
+        esp_system_abort("Not implemented yet. Tell Erik why you want to do this!");
+    }
+
+    std::lock_guard<std::mutex> lock{this->task_mutex};
+
+    if (this->currentTask && this->currentTask->task_id == task_id) {
+        this->currentTask->delay = new_delay;
+        return true;
+    }
+
+    // TODO: could this be faster by implementing the decrease-key operation?
+    Task *task = this->tasks.findByTaskID(task_id);
+
+    if (task == nullptr)
+        return false;
+
+    task->delay = new_delay;
+    task->next_deadline = task->next_deadline - task->delay + new_delay;
+
+    this->tasks.restoreHeap();
+
+    return true;
+}
+
+bool TaskScheduler::updateCurrentTaskDelay(micros_t new_delay)
+{
+    // Don't allow other threads to modify tasks without knowing their ID.
+    if (!running_in_main_task()) {
+        logger.printfln("Calling TaskScheduler::updateCurrentTaskDelay is only allowed in the main thread!");
+        return false;
+    }
+
+    // If we're the main task, accesses to currentTask don't need to lock task_mutex.
+
+    if (currentTask == nullptr) {
+        esp_system_abort("Calling updateCurrentTaskDelay is not allowed outside of task code!");
+    }
+
+    currentTask->delay = new_delay;
+    return true;
+}

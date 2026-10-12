@@ -1,0 +1,154 @@
+// SPDX-License-Identifier: Apache-2.0
+// Protocol: official dispatcher/session.go:113-129, signer.go:96-129.
+// Ownership/retry/transport-staging are independently authored local policy.
+#include <tesla_clean/authentication.hpp>
+#include <mbedtls/platform_util.h>
+extern "C" {
+#include <mbedtls/constant_time.h>
+}
+#include <algorithm>
+#include <cstring>
+namespace tesla_clean {
+DomainAuthentication::DomainAuthentication(Domain domain,Bytes vin) : domain_(domain)
+{
+    valid_=(domain==Domain::Vcsec || domain==Domain::Infotainment) && vin.valid() && vin.size==vin_.size();
+    if(valid_) { std::memcpy(vin_.data(),vin.data,vin_.size()); }
+}
+bool DomainAuthentication::advance()
+{
+    if(serial_==UINT64_MAX) { return false; }
+    ++serial_; return true;
+}
+void DomainAuthentication::reset()
+{
+    advance(); pending_=Pending{}; established_.reset(); info_={}; ready_=session_=false;
+    budget_={}; attempts_=0; last_attempt_=0; retired_epochs_={}; retired_count_=0;
+    // Reconstruct the owned crypto member to erase its secret and readiness.
+    crypto_.~SessionCrypto(); new(&crypto_) SessionCrypto();
+    // UUID reuse history and nonwrapping local serial intentionally survive reset.
+}
+ChallengeResult DomainAuthentication::begin(IdentityStore &keys,const OperationTime &owner,uint32_t now,Random random,ChallengeTransport transport)
+{
+    if(!valid_ || !random.fill || !transport.send || owner.context==0 || owner.total_ms==0 || owner.response_ms==0 ||
+       owner.total_ms>INT32_MAX || owner.response_ms>INT32_MAX) { return ChallengeResult::Invalid; }
+    if(now-owner.started>=owner.total_ms) { return ChallengeResult::Expired; }
+    if(budget_.context!=owner.context || budget_.generation!=owner.generation) {
+        budget_=owner; attempts_=0;
+    } else if(budget_.started!=owner.started || budget_.total_ms!=owner.total_ms || budget_.response_ms!=owner.response_ms) {
+        return ChallengeResult::Invalid; // caller cannot restart a running operation's total deadline
+    }
+    if(attempts_>=3) { return ChallengeResult::Exhausted; }
+    if(attempts_ && now-last_attempt_<100) { return ChallengeResult::Backoff; }
+    ++attempts_; last_attempt_=now;
+    Pending proposal; proposal.owner=owner; proposal.transmitted=now;
+    proposal.view.domain=domain_; proposal.view.context=owner.context; proposal.view.generation=owner.generation;
+    if(!(session_?established_.clone(proposal.identity):keys.acquire(proposal.identity)) ||
+       !proposal.identity.public_point(proposal.view.public_point) ||
+       random.fill(random.context,proposal.view.uuid.data(),proposal.view.uuid.size())!=0 ||
+       (used_uuid_ && proposal.view.uuid==last_uuid_) ||
+       (pending_.active && proposal.view.uuid==pending_.view.uuid) || !advance()) { return ChallengeResult::Refused; }
+    proposal.serial=serial_; proposal.active=proposal.sending=true;
+    const uint64_t serial=proposal.serial;
+    // Detached predecessor allows rollback on refusal without clobbering a nested successor.
+    Pending previous=std::move(pending_); pending_=std::move(proposal);
+    const ChallengeView view=pending_.view;
+    last_uuid_=view.uuid; used_uuid_=true;
+    const bool accepted=transport.send(transport.context,view);
+    if(serial_!=serial || !pending_.active || pending_.serial!=serial) { return ChallengeResult::Superseded; }
+    if(!accepted) { pending_=std::move(previous); return ChallengeResult::Refused; }
+    pending_.sending=false;
+    if(pending_.staged) {
+        // Move staged bytes out before receive clears pending ownership.
+        const uint32_t received_at=pending_.staged_at;
+        auto bytes=pending_.encoded; auto tag=pending_.tag; const size_t length=pending_.length;
+        SessionReply reply{domain_,owner.generation,view.uuid,{bytes.data(),length},{tag.data(),tag.size()}};
+        pending_.staged=false;
+        const auto result=receive(reply,received_at,random);
+        if(result==SessionAdmission::Established || result==SessionAdmission::Updated) { return ChallengeResult::Established; }
+        if(result==SessionAdmission::KeyDenied) { return ChallengeResult::KeyDenied; }
+    }
+    return ChallengeResult::Sent;
+}
+SessionAdmission DomainAuthentication::receive(const SessionReply &reply,uint32_t now,Random random)
+{
+    if(!valid_ || !pending_.active || reply.domain!=domain_ ||
+       reply.generation!=pending_.owner.generation || reply.uuid!=pending_.view.uuid ||
+       now-pending_.owner.started>=pending_.owner.total_ms || now-pending_.transmitted>=pending_.owner.response_ms ||
+       !reply.encoded.valid() || reply.encoded.size==0 || reply.encoded.size>pending_.encoded.size() ||
+       !reply.tag.valid() || reply.tag.size!=pending_.tag.size()) { return SessionAdmission::Rejected; }
+    if(pending_.sending) {
+        if(pending_.staged) { return SessionAdmission::Rejected; }
+        std::memcpy(pending_.encoded.data(),reply.encoded.data,reply.encoded.size);
+        std::memcpy(pending_.tag.data(),reply.tag.data,reply.tag.size);
+        pending_.length=reply.encoded.size; pending_.staged_at=now; pending_.staged=true;
+        return SessionAdmission::Deferred;
+    }
+    SessionInfo candidate; std::array<uint8_t,16> secret{};
+    const bool update=session_ && pending_.identity.same(established_);
+    SessionInfoResult result=SessionInfoResult::Rejected;
+    if(update) {
+        // Resynchronization and denial must be vouched for by the established peer,
+        // not by a new public key carried by an otherwise untrusted response.
+        if(verify_update(reply,candidate) && fresh_epoch(candidate)) {
+            result=candidate.status==0?SessionInfoResult::Established:SessionInfoResult::KeyDenied;
+        }
+    } else {
+        result=authenticate_session_info(*pending_.identity.key(),random,{vin_.data(),vin_.size()},
+            {reply.uuid.data(),reply.uuid.size()},reply.encoded,reply.tag,candidate,secret);
+    }
+    if(result==SessionInfoResult::Rejected) { return SessionAdmission::Rejected; }
+    if(result==SessionInfoResult::KeyDenied) {
+        pending_=Pending{}; ready_=false; return SessionAdmission::KeyDenied;
+    }
+    if(update) {
+        // Tesla update semantics never roll the outgoing counter backwards.
+        if(candidate.epoch!=info_.epoch || candidate.clock>=info_.clock) {
+            apply_update(candidate);
+        }
+    } else {
+        crypto_.set_key({secret.data(),secret.size()});
+        info_=candidate; established_=std::move(pending_.identity); session_=true;
+    }
+    mbedtls_platform_zeroize(secret.data(),secret.size());
+    pending_=Pending{}; ready_=true;
+    return update?SessionAdmission::Updated:SessionAdmission::Established;
+}
+bool DomainAuthentication::verify_update(const SessionReply &reply,SessionInfo &candidate) const
+{
+    std::array<uint8_t,32> expected{};
+    const bool authentic=reply.encoded.valid() && reply.encoded.size && reply.encoded.size<=512 &&
+        reply.tag.valid() && reply.tag.size==expected.size() &&
+        crypto_.session_info_tag({vin_.data(),vin_.size()},{reply.uuid.data(),reply.uuid.size()},reply.encoded,expected) &&
+        mbedtls_ct_memcmp(expected.data(),reply.tag.data,expected.size())==0;
+    mbedtls_platform_zeroize(expected.data(),expected.size());
+    return authentic && decode_session_info(reply.encoded,candidate) && candidate.remote_public==info_.remote_public;
+}
+bool DomainAuthentication::fresh_epoch(const SessionInfo &candidate) const
+{
+    if(candidate.epoch==info_.epoch) { return true; }
+    if(retired_count_==retired_epochs_.size()) { return false; }
+    for(size_t i=0;i<retired_count_;++i) { if(candidate.epoch==retired_epochs_[i]) { return false; } }
+    return true;
+}
+void DomainAuthentication::apply_update(SessionInfo candidate)
+{
+    if(candidate.epoch!=info_.epoch) { retired_epochs_[retired_count_++]=info_.epoch; }
+    // The official signer preserves its counter even on epoch changes. The
+    // Vehicle separately preserves every potentially exposed outgoing counter.
+    candidate.counter=std::max(candidate.counter,info_.counter); info_=candidate;
+}
+SessionAdmission DomainAuthentication::receive_update(const SessionReply &reply,const Request &request,uint32_t now)
+{
+    if(!valid_ || !ready_ || !session_ || pending_.active || request.context==0 ||
+       reply.domain!=domain_ || reply.generation!=request.generation || reply.uuid!=request.uuid ||
+       !request.total_ms || !request.response_ms || request.total_ms>INT32_MAX || request.response_ms>INT32_MAX ||
+       request.transmitted-request.started>=request.total_ms || now-request.started>=request.total_ms ||
+       now-request.transmitted>=request.response_ms || now-request.transmitted>=5000) { return SessionAdmission::Rejected; }
+    SessionInfo candidate;
+    if(!verify_update(reply,candidate) || !fresh_epoch(candidate) ||
+       (candidate.epoch==info_.epoch && candidate.clock<info_.clock)) { return SessionAdmission::Rejected; }
+    if(candidate.status!=0) { ready_=false; return SessionAdmission::KeyDenied; }
+    // All admission and fallible work precedes the allocation-free publication.
+    apply_update(candidate); return SessionAdmission::Updated;
+}
+}

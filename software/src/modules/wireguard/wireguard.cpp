@@ -1,0 +1,355 @@
+/* esp32-firmware
+ * Copyright (C) 2020-2021 Erik Fleckstein <erik@tinkerforge.com>
+ * Copyright (C) 2026 Olaf Lüke <olaf@tinkerforge.com>
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, write to the
+ * Free Software Foundation, Inc., 59 Temple Place - Suite 330,
+ * Boston, MA 02111-1307, USA.
+ */
+#include "wireguard.h"
+
+#include <mbedtls/base64.h>
+
+#include "event_log_prefix.h"
+#include "generated/module_dependencies.h"
+#include "tools/dns.h"
+
+static String check_key(const String &key, bool enable)
+{
+    if (key.length() > 0) {
+        if (key.length() != 44)
+            return " had unexpected length. Expecting a base64 encoded string of length 44.";
+
+        size_t written;
+        if (mbedtls_base64_decode(nullptr, 0, &written, (const unsigned char *)key.c_str(), key.length()) == MBEDTLS_ERR_BASE64_INVALID_CHARACTER)
+            return " contained unexpected character. Expecting a base64 encoded string.";
+        if (written != 32)
+            return " decodes to a key of unexpected length. Expecting a base64 encoded string that decodes to a 32 byte long key.";
+    } else if (enable) {
+        return " is empty, but Wireguard shall be enabed. Set this key to be able to enable Wireguard.";
+    }
+    return "";
+}
+
+void Wireguard::pre_setup()
+{
+    config = ConfigRoot{Config::Object({
+        {"enable", Config::Bool(false)},
+        {"make_default_interface", Config::Bool(true)},
+
+        {"internal_ip",      Config::Str("0.0.0.0", 7, 15)},
+        {"internal_subnet",  Config::Str("0.0.0.0", 7, 15)},
+        {"internal_gateway", Config::Str("0.0.0.0", 7, 15)},
+
+        {"remote_host", Config::Str("", 0, 64)},
+        {"remote_port", Config::Uint16(51820)},
+
+        {"local_port", Config::Uint16(51820)},
+
+        {"private_key",       Config::Str("", 0, 44)},
+        {"remote_public_key", Config::Str("", 0, 44)},
+        {"preshared_key",     Config::Str("", 0, 44)},
+
+        {"allowed_ip",     Config::Str("0.0.0.0", 7, 15)},
+        {"allowed_subnet", Config::Str("0.0.0.0", 7, 15)},
+
+        {"mtu", Config::Uint16(1420)}
+    }), [this](Config &cfg, ConfigSource source) -> String {
+        IPAddress unused;
+
+        if (!unused.fromString(cfg.get("internal_ip")->asUnsafeCStr()))
+            return "Failed to parse \"internal_ip\": Expected format is dotted decimal, i.e. 10.0.0.1";
+
+        if (!unused.fromString(cfg.get("internal_subnet")->asUnsafeCStr()))
+            return "Failed to parse \"internal_subnet\": Expected format is dotted decimal, i.e. 10.0.0.1";
+
+        if (!unused.fromString(cfg.get("internal_gateway")->asUnsafeCStr()))
+            return "Failed to parse \"internal_gateway\": Expected format is dotted decimal, i.e. 10.0.0.1";
+
+        if (!unused.fromString(cfg.get("allowed_ip")->asUnsafeCStr()))
+            return "Failed to parse \"allowed_ip\": Expected format is dotted decimal, i.e. 10.0.0.1";
+
+        if (!unused.fromString(cfg.get("allowed_subnet")->asUnsafeCStr()))
+            return "Failed to parse \"allowed_subnet\": Expected format is dotted decimal, i.e. 10.0.0.1";
+
+
+        bool enable = cfg.get("enable")->asBool();
+        const String &private_key = cfg.get("private_key")->asString();
+        String result = check_key(private_key, enable);
+        if (!result.isEmpty())
+            return "\"private_key\"" + result;
+
+        const String &remote_public_key = cfg.get("remote_public_key")->asString();
+        result = check_key(remote_public_key, enable);
+        if (!result.isEmpty())
+            return "\"remote_public_key\"" + result;
+
+        const String &preshared_key = cfg.get("preshared_key")->asString();
+
+        // pass false because an empty preshared_key is always allowed.
+        result = check_key(preshared_key, false);
+        if (!result.isEmpty())
+            return "\"preshared_key\"" + result;
+
+        if (source != ConfigSource::File) {
+            task_scheduler.scheduleOnce([this]() {
+                this->apply_config();
+            });
+        }
+
+        return "";
+    }};
+
+    state = Config::Object({
+        {"connection_start", Config::Uptime()},
+        {"connection_end", Config::Uptime()},
+        {"public_key", Config::Str("", 0, 44)},
+        {"state", Config::Uint8(0)} // 0 not configured, 1 waiting for time sync 2 not connected 3 connected
+    });
+}
+
+void Wireguard::start_wireguard()
+{
+    uint32_t generation = this->config_generation;
+
+    // Check if hostname exists and place address in DNS cache. This avoids blocking for a long time in wg.begin().
+    dns_gethostbyname_addrtype_lwip_ctx_async(wg_data->remote_host.c_str(), [this, generation](dns_gethostbyname_addrtype_lwip_ctx_async_data *data) {
+        if (generation != this->config_generation) {
+            return;
+        }
+
+        if (data->err != ERR_OK) {
+            const char *host = this->wg_data->remote_host.c_str();
+
+            if (data->err == ERR_CONN || data->addr.type != IPADDR_TYPE_V4) {
+                logger.printfln("Failed to resolve '%s': Unknown host", host);
+            } else {
+                const int eno = err_to_errno(data->err);
+                logger.printfln("Failed to resolve '%s': %s (%i|%hhi)", host, strerror(eno), eno, data->err);
+            }
+
+            task_scheduler.scheduleOnce([this, generation]() {
+                if (generation != this->config_generation) {
+                    return;
+                }
+                this->start_wireguard();
+            }, 1_min);
+            return;
+        }
+
+        connect_wireguard();
+    }, LWIP_DNS_ADDRTYPE_IPV4);
+}
+
+void Wireguard::connect_wireguard()
+{
+    const uint16_t remote_port = config.get("remote_port"  )->asUint();
+    const String   &psk        = config.get("preshared_key")->asString();
+
+    logger.printfln("Connecting to WireGuard peer %s:%hu", wg_data->remote_host.c_str(), remote_port);
+    // TODO: RE: ipv6 support for wireguard: The Wireguard ESP32 library does NOT yet support ipv6. While it accepts IPAddress types, these types are cast into uin32_t internally which does not work with ipv6
+    // Performs blocking hostname lookup. Hostname should be cached first.
+    const bool success = wg_data->wg.begin(
+        {config.get("internal_ip"           )->asUnsafeCStr()},
+        {config.get("internal_subnet"       )->asUnsafeCStr()},
+         config.get("local_port"            )->asUint(),
+        {config.get("internal_gateway"      )->asUnsafeCStr()},
+         wg_data->private_key.c_str(),
+         wg_data->remote_host.c_str(),
+         config.get("remote_public_key"     )->asUnsafeCStr(),
+         remote_port,
+        {config.get("allowed_ip"            )->asUnsafeCStr()},
+         config.get("allowed_subnet"        )->asUnsafeCStr(),
+         config.get("make_default_interface")->asBool(),
+         psk.isEmpty() ? nullptr : psk.c_str(),
+         nullptr,
+         nullptr,
+         [](uint8_t peer_index, bool up, const ip_addr_t *addr, uint16_t port, void *user_data) {
+            // Currently only one peer is supported.
+            if (peer_index != 0)
+                return;
+
+            task_scheduler.scheduleOnce([peer_index, up, addr_cpy=*addr, port]() {
+                wireguard.update_peer_info(peer_index, up, &addr_cpy, port);
+            });
+         },
+         nullptr,
+         config.get("mtu"                   )->asUint16()
+    );
+
+    if (!success) {
+        logger.printfln("Failed to connect to WireGuard peer. Likely unresolved host.");
+
+        task_scheduler.scheduleOnce([this, gen = this->config_generation]() {
+            if (gen != this->config_generation) {
+                return;
+            }
+            this->start_wireguard();
+        }, 1_min);
+
+        return;
+    }
+
+    state.get("state")->updateUint(2);
+}
+
+void Wireguard::update_peer_info(uint8_t peer_index, bool up, const ip_addr_t *addr, uint16_t port) {
+    if (!wg_data) {
+        return;
+    }
+
+    if(state.get("state")->updateUint(up ? 3 : 2))
+    {
+        if (up) {
+            logger.printfln("Wireguard connection established");
+            this->wg_data->last_connected = now_us();
+            state.get("connection_start")->updateUptime(this->wg_data->last_connected);
+        } else {
+            auto now = now_us();
+            state.get("connection_end")->updateUptime(now);
+
+            auto connected_for = now - this->wg_data->last_connected;
+            logger.printfln("Wireguard connection lost. Was connected for %llu seconds.", connected_for.to<millis_t>().as<uint64_t>());
+        }
+    }
+}
+
+void Wireguard::apply_config()
+{
+    // Tear down existing tunnel if running.
+    config_generation++;
+
+    if (wg_data) {
+        logger.printfln("Shutting down WireGuard tunnel.");
+        wg_data->wg.end();
+        delete wg_data;
+        wg_data = nullptr;
+    }
+
+    // Reset state.
+    state.get("state")->updateUint(0);
+    state.get("connection_start")->updateUptime(0_us);
+    state.get("connection_end")->updateUptime(0_us);
+
+    // Derive and update public key.
+    const String &private_key_b64 = config.get("private_key")->asString();
+    char public_key_b64[45] = {0};
+
+    if (private_key_b64.length() == 44) {
+        uint8_t public_key[32];
+        uint8_t private_key[32];
+        size_t olen;
+        if (mbedtls_base64_decode(private_key, sizeof(private_key), &olen, (const unsigned char *)private_key_b64.c_str(), private_key_b64.length()) != 0) {
+            logger.printfln("Failed to decode WireGuard private key");
+        }
+        WireGuard::derive_public_key(public_key, private_key);
+        if (mbedtls_base64_encode((unsigned char *)public_key_b64, sizeof(public_key_b64), &olen, public_key, sizeof(public_key)) != 0) {
+            logger.printfln("Failed to encode WireGuard public key");
+        }
+    }
+
+    state.get("public_key")->updateString(public_key_b64);
+
+    if (!config.get("enable")->asBool()) {
+        return;
+    }
+
+    wg_data = new wg_data_t;
+    wg_data->private_key = private_key_b64; // Local copy of unsafe conf String. The network interface created by WG might hold a reference to the C string.
+    wg_data->remote_host = config.get("remote_host")->asString(); // Local copy of unsafe conf String. lwip_getaddrinfo() might hold a reference to the C string.
+
+    logger.printfln("WireGuard enabled. Waiting for network and time sync.");
+
+    state.get("state")->updateUint(1);
+
+#if MODULE_NETWORK_AVAILABLE()
+    // During initial boot, the network is not yet connected.
+    // register_events() will start WireGuard when the network first connects.
+    // For runtime reconfiguration, start immediately if the network is already up.
+    if (network.is_connected()) {
+        task_scheduler.scheduleWhenClockSynced([this, gen = this->config_generation]() {
+            if (gen != this->config_generation) {
+                return;
+            }
+            start_wireguard();
+        });
+    }
+#else
+    task_scheduler.scheduleWhenClockSynced([this, gen = this->config_generation]() {
+        if (gen != this->config_generation) {
+            return;
+        }
+        start_wireguard();
+    });
+#endif
+}
+
+void Wireguard::setup()
+{
+    api.restorePersistentConfig("wireguard/config", &config);
+
+    apply_config();
+
+    initialized = true;
+}
+
+void Wireguard::register_events()
+{
+    if (!wg_data) {
+        return;
+    }
+
+#if MODULE_NETWORK_AVAILABLE()
+    network.on_network_connected([this](const Config *connected) {
+        if (!connected->asBool()) {
+            return EventResult::OK;
+        }
+        if (!wg_data) {
+            return EventResult::OK;
+        }
+
+        task_scheduler.scheduleWhenClockSynced([this, gen = this->config_generation]() {
+            if (gen != this->config_generation) {
+                return;
+            }
+            start_wireguard();
+        });
+
+        return EventResult::Deregister;
+    });
+#else
+    task_scheduler.scheduleWhenClockSynced([this, gen = this->config_generation]() {
+        if (gen != this->config_generation) {
+            return;
+        }
+        start_wireguard();
+    });
+#endif
+}
+
+void Wireguard::register_urls()
+{
+    api.addPersistentConfig("wireguard/config", &config, {
+        "private_key",
+        "remote_public_key",
+        "preshared_key"
+    });
+
+    api.addState("wireguard/state", &state);
+}
+
+bool Wireguard::port_used(uint32_t port) {
+    uint32_t self_port = config.get("local_port")->asUint();
+    return port == self_port;
+}

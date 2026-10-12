@@ -1,0 +1,544 @@
+/* esp32-firmware
+ * Copyright (C) 2023 Matthias Bolte <matthias@tinkerforge.com>
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, write to the
+ * Free Software Foundation, Inc., 59 Temple Place - Suite 330,
+ * Boston, MA 02111-1307, USA.
+ */
+
+//#include "../../options.inc"
+//#include "generated/module_available.inc"
+
+import * as options from "../../options";
+import * as util from "../../ts/util";
+import { h, Fragment, Component, ComponentChildren } from "preact";
+import { __ } from "../../ts/translation";
+import { MeterClassID } from "../meters/generated/meter_class_id.enum";
+import { MeterLocation } from "../meters/generated/meter_location.enum";
+import { get_meter_location_items, translate_meter_location } from "../meters/meter_location";
+import { MeterConfig } from "../meters/types";
+import { MeterValueIDSelector, get_meter_value_id_name } from "../meters_api/plugin_meters_config";
+import { MeterModbusTCPTableID } from "./generated/meter_modbus_tcp_table_id.enum";
+import { TableConfig, TableConfigCustom, Register, get_default_device_address, new_table_config, get_virtual_meter_items, get_fixed_location } from "./generated/meter_modbus_tcp_specs";
+import { ModbusRegisterType } from "../modbus_tcp_client/generated/modbus_register_type.enum";
+import { ModbusRegisterAddressMode } from "../modbus_tcp_client/generated/modbus_register_address_mode.enum";
+import { ModbusValueType } from "../modbus_tcp_client/generated/modbus_value_type.enum";
+import { ShellyPro3EMDeviceProfile } from "./generated/shelly_pro_3em_device_profile.enum";
+import { ShellyEMMonophaseChannel } from "./generated/shelly_em_monophase_channel.enum";
+import { ShellyEMMonophaseMapping } from "./generated/shelly_em_monophase_mapping.enum";
+import { CarloGavazziPhase } from "./generated/carlo_gavazzi_phase.enum";
+import { InputText } from "../../ts/components/input_text";
+import { InputHost } from "../../ts/components/input_host";
+import { InputNumber } from "../../ts/components/input_number";
+import { InputAnyFloat } from "../../ts/components/input_any_float";
+import { InputSelect } from "../../ts/components/input_select";
+import { FormRow } from "../../ts/components/form_row";
+import { Switch } from "../../ts/components/switch";
+import { Table, TableRow } from "../../ts/components/table";
+
+export type ModbusTCPMetersConfig = [
+    MeterClassID.ModbusTCP,
+    {
+        display_name: string;
+        location: number;
+        excluded: boolean;
+        host: string;
+        port: number;
+        table: TableConfig;
+    },
+];
+
+interface RegisterEditorProps {
+    table: TableConfigCustom;
+    on_table: (table: TableConfigCustom) => void;
+}
+
+interface RegisterEditorState {
+    register: Register,
+}
+
+class RegisterEditor extends Component<RegisterEditorProps, RegisterEditorState> {
+    constructor(props: RegisterEditorProps) {
+        super(props);
+
+        this.state = {
+            register: {
+                rtype: null,
+                addr: 0,
+                vtype: null,
+                off: 0.0,
+                scale: 1.0,
+                id: null,
+            },
+        } as RegisterEditorState;
+    }
+
+    get_children() {
+        let start_address_offset = this.props.table[1].register_address_mode == ModbusRegisterAddressMode.Address ? 0 : 1;
+
+        return [
+            <FormRow label={__("meters_modbus_tcp.content.registers_register_type")}>
+                <InputSelect
+                    required
+                    items={[
+                        [ModbusRegisterType.HoldingRegister.toString(), __("meters_modbus_tcp.content.registers_register_type_holding_register")],
+                        [ModbusRegisterType.InputRegister.toString(), __("meters_modbus_tcp.content.registers_register_type_input_register")],
+                    ]}
+                    placeholder={__("select")}
+                    value={util.hasValue(this.state.register.rtype) ? this.state.register.rtype.toString() : undefined}
+                    onValue={(v) => {
+                        this.setState({register: {...this.state.register, rtype: parseInt(v)}});
+                    }} />
+            </FormRow>,
+            <FormRow
+                label={
+                    this.props.table[1].register_address_mode == ModbusRegisterAddressMode.Address
+                    ? __("meters_modbus_tcp.content.registers_start_address")
+                    : __("meters_modbus_tcp.content.registers_start_number")
+                }
+                label_muted={
+                    this.props.table[1].register_address_mode == ModbusRegisterAddressMode.Address
+                    ? __("meters_modbus_tcp.content.registers_start_address_muted")
+                    : __("meters_modbus_tcp.content.registers_start_number_muted")
+                }>
+                <InputNumber
+                    required
+                    min={start_address_offset}
+                    max={start_address_offset + 65535}
+                    value={this.state.register.addr + start_address_offset}
+                    onValue={(v) => {
+                        this.setState({register: {...this.state.register, addr: v - start_address_offset}});
+                    }} />
+            </FormRow>,
+            <FormRow label={__("meters_modbus_tcp.content.registers_value_type")}>
+                <InputSelect
+                    required
+                    items={[
+                        [ModbusValueType.U16.toString(), __("meters_modbus_tcp.content.registers_value_type_u16")],
+                        [ModbusValueType.S16.toString(), __("meters_modbus_tcp.content.registers_value_type_s16")],
+                        [ModbusValueType.U32BE.toString(), __("meters_modbus_tcp.content.registers_value_type_u32be")],
+                        [ModbusValueType.U32LE.toString(), __("meters_modbus_tcp.content.registers_value_type_u32le")],
+                        [ModbusValueType.S32BE.toString(), __("meters_modbus_tcp.content.registers_value_type_s32be")],
+                        [ModbusValueType.S32LE.toString(), __("meters_modbus_tcp.content.registers_value_type_s32le")],
+                        [ModbusValueType.F32BE.toString(), __("meters_modbus_tcp.content.registers_value_type_f32be")],
+                        [ModbusValueType.F32LE.toString(), __("meters_modbus_tcp.content.registers_value_type_f32le")],
+                        [ModbusValueType.U64BE.toString(), __("meters_modbus_tcp.content.registers_value_type_u64be")],
+                        [ModbusValueType.U64LE.toString(), __("meters_modbus_tcp.content.registers_value_type_u64le")],
+                        [ModbusValueType.S64BE.toString(), __("meters_modbus_tcp.content.registers_value_type_s64be")],
+                        [ModbusValueType.S64LE.toString(), __("meters_modbus_tcp.content.registers_value_type_s64le")],
+                        [ModbusValueType.F64BE.toString(), __("meters_modbus_tcp.content.registers_value_type_f64be")],
+                        [ModbusValueType.F64LE.toString(), __("meters_modbus_tcp.content.registers_value_type_f64le")],
+                    ]}
+                    placeholder={__("select")}
+                    value={util.hasValue(this.state.register.vtype) ? this.state.register.vtype.toString() : undefined}
+                    onValue={(v) => {
+                        this.setState({register: {...this.state.register, vtype: parseInt(v)}});
+                    }} />
+            </FormRow>,
+            <FormRow label={__("meters_modbus_tcp.content.registers_offset")}>
+                <InputAnyFloat
+                    required
+                    value={this.state.register.off}
+                    onValue={(v) => {
+                        this.setState({register: {...this.state.register, off: v}});
+                    }} />
+            </FormRow>,
+            <FormRow label={__("meters_modbus_tcp.content.registers_scale_factor")}>
+                <InputAnyFloat
+                    required
+                    value={this.state.register.scale}
+                    onValue={(v) => {
+                        this.setState({register: {...this.state.register, scale: v}});
+                    }} />
+            </FormRow>,
+            <FormRow label={__("meters_modbus_tcp.content.registers_value_id")}>
+                <MeterValueIDSelector value_id={this.state.register.id} value_ids={[]} on_value_id={
+                    (v) => this.setState({register: {...this.state.register, id: v}})
+                } />
+            </FormRow>,
+        ];
+    }
+
+    render() {
+        let start_address_offset = this.props.table[1].register_address_mode == ModbusRegisterAddressMode.Address ? 0 : 1;
+
+        return <Table
+            nestingDepth={1}
+            rows={this.props.table[1].registers.map((register, i) => {
+                let register_type = "<unknown>";
+
+                switch (register.rtype) {
+                case ModbusRegisterType.HoldingRegister:
+                    register_type = __("meters_modbus_tcp.content.registers_register_type_holding_register");
+                    break;
+
+                case ModbusRegisterType.InputRegister:
+                    register_type = __("meters_modbus_tcp.content.registers_register_type_input_register");
+                    break;
+                }
+
+                const row: TableRow = {
+                    columnValues: [__("meters_modbus_tcp.content.registers_register")(register_type, register.addr + start_address_offset, get_meter_value_id_name(register.id))],
+                    onRemoveClick: async () => {
+                        this.props.on_table(util.get_updated_union(this.props.table, {registers: this.props.table[1].registers.filter((r, k) => k !== i)}));
+                        return true;
+                    },
+                    onEditShow: async () => {
+                        this.setState({
+                            register: register,
+                        });
+                    },
+                    onEditSubmit: async () => {
+                        this.props.on_table(util.get_updated_union(this.props.table, {registers: this.props.table[1].registers.map((r, k) => k === i ? this.state.register : r)}));
+                    },
+                    onEditGetChildren: () => this.get_children(),
+                    editTitle: __("meters_modbus_tcp.content.registers_edit_title"),
+                }
+                return row
+            })}
+            columnNames={[""]}
+            addEnabled={util.hasValue(this.props.table[1].register_address_mode) && this.props.table[1].registers.length < options.METERS_MODBUS_TCP_MAX_CUSTOM_REGISTERS}
+            addMessage={
+                util.hasValue(this.props.table[1].register_address_mode)
+                    ? __("meters_modbus_tcp.content.registers_add_message")(this.props.table[1].registers.length, options.METERS_MODBUS_TCP_MAX_CUSTOM_REGISTERS)
+                    : __("meters_modbus_tcp.content.registers_add_select_address_mode")
+            }
+            addTitle={__("meters_modbus_tcp.content.registers_add_title")}
+            onAddShow={async () => {
+                this.setState({
+                    register: {
+                        rtype: null,
+                        addr: 0,
+                        vtype: null,
+                        off: 0.0,
+                        scale: 1.0,
+                        id: null,
+                    },
+                });
+            }}
+            onAddGetChildren={() => this.get_children()}
+            onAddSubmit={async () => {
+                this.props.on_table(util.get_updated_union(this.props.table, {registers: this.props.table[1].registers.concat([this.state.register])}));
+            }}/>;
+    }
+}
+
+export function pre_init() {
+    return {
+        [MeterClassID.ModbusTCP]: {
+            name: () => __("meters_modbus_tcp.content.meter_class"),
+            new_config: () => [MeterClassID.ModbusTCP, {display_name: "", location: MeterLocation.Unknown, excluded: false, host: "", port: 502, table: null}] as MeterConfig,
+            clone_config: (config: MeterConfig) => [config[0], {...config[1]}] as MeterConfig,
+            get_edit_children: (config: ModbusTCPMetersConfig, on_config: (config: ModbusTCPMetersConfig) => void): ComponentChildren => {
+                let table_items: [string, string][] = [
+//#replace "generated/meter_modbus_tcp_specific_table_ids_items.rpl"
+                ];
+
+                for (let i = 0; i < table_items.length; ++i) {
+                    let table_id = parseInt(table_items[i][0]);
+                    let virtual_meter_items: [string, string][] = get_virtual_meter_items(table_id);
+
+                    if (virtual_meter_items.length == 1) {
+                        table_items[i][1] += ` – ${virtual_meter_items[0][1]}`;
+                    }
+                }
+
+                table_items.sort((a, b) => a[1].localeCompare(b[1]));
+                table_items.push([MeterModbusTCPTableID.Custom.toString(), __("meters_modbus_tcp.content.table_custom")]);
+
+                let edit_children = [
+                    <FormRow label={__("meters_modbus_tcp.content.display_name")}>
+                        <InputText
+                            required
+                            maxLength={32}
+                            value={config[1].display_name}
+                            onValue={(v) => {
+                                on_config(util.get_updated_union(config, {display_name: v}));
+                            }} />
+                    </FormRow>,
+                    <FormRow label={__("meters_modbus_tcp.content.host")}>
+                        <InputHost
+                            required
+                            maxLength={64}
+                            value={config[1].host}
+                            onValue={(v) => on_config(util.get_updated_union(config, {host: v}))} />
+                    </FormRow>,
+                    <FormRow label={__("meters_modbus_tcp.content.port")} label_muted={__("meters_modbus_tcp.content.port_muted")}>
+                        <InputNumber
+                            required
+                            min={1}
+                            max={65535}
+                            value={config[1].port}
+                            onValue={(v) => {
+                                on_config(util.get_updated_union(config, {port: v}));
+                            }} />
+                    </FormRow>,
+                    <FormRow label={__("meters_modbus_tcp.content.table")}>
+                        <InputSelect
+                            required
+                            items={table_items}
+                            placeholder={__("select")}
+                            value={util.hasValue(config[1].table) ? config[1].table[0].toString() : undefined}
+                            onValue={(v) => {
+                                let location = MeterLocation.Unknown;
+                                let table_id = parseInt(v);
+                                let table = new_table_config(table_id);
+
+                                if (table_id == MeterModbusTCPTableID.TinkerforgeWARPCharger) {
+                                    location = MeterLocation.Load;
+                                }
+                                else {
+                                    let virtual_meter_items: [string, string][] = get_virtual_meter_items(table_id);
+
+                                    if (virtual_meter_items.length == 1) {
+                                        let virtual_meter = parseInt(virtual_meter_items[0][0]);
+
+                                        table = util.get_updated_union(table, {virtual_meter: virtual_meter});
+                                        location = get_fixed_location(table_id, virtual_meter);
+                                    }
+                                }
+
+                                on_config(util.get_updated_union(config, {location: location, table: table}));
+                            }} />
+                    </FormRow>,
+                ];
+
+                if (util.hasValue(config[1].table)
+                 && (
+//#replace "generated/meter_modbus_tcp_specific_table_ids_condition.rpl"
+                    )) {
+                    let default_device_address = get_default_device_address(config[1].table[0]);
+
+                    if (config[1].table[0] != MeterModbusTCPTableID.TinkerforgeWARPCharger) {
+                        edit_children.push(
+                            <FormRow label={__("meters_modbus_tcp.content.device_address")} label_muted={default_device_address !== undefined ? __("meters_modbus_tcp.content.device_address_muted")(default_device_address) : undefined}>
+                                <InputNumber
+                                    required
+                                    min={0}
+                                    max={255}
+                                    value={config[1].table[1].device_address}
+                                    onValue={(v) => {
+                                        on_config(util.get_updated_union(config, {table: util.get_updated_union(config[1].table, {device_address: v})}));
+                                    }} />
+                            </FormRow>);
+                    }
+
+                    let virtual_meter_items: [string, string][] = get_virtual_meter_items(config[1].table[0]);
+                    let virtual_meter: number = undefined; // undefined: there are no virtual meters, null: virtual meter is not known yet
+                    let fixed_location = MeterLocation.Unknown; // MeterLocation.Unknown: there is no fixed location, null: fixed location is not known yet
+
+                    if (virtual_meter_items.length > 0) {
+                        virtual_meter = util.hasValue(config[1].table[1]) && util.hasValue((config[1].table[1] as any).virtual_meter) ? (config[1].table[1] as any).virtual_meter : null;
+
+                        edit_children.push(
+                            <FormRow label={__("meters_modbus_tcp.content.virtual_meter")}>
+                                <InputSelect
+                                    required
+                                    items={virtual_meter_items}
+                                    placeholder={__("select")}
+                                    value={virtual_meter !== null ? virtual_meter.toString() : null}
+                                    onValue={(v) => {
+                                        let location = get_fixed_location(config[1].table[0], parseInt(v));
+
+                                        on_config(util.get_updated_union(config, {location: location, table: util.get_updated_union(config[1].table, {virtual_meter: parseInt(v)})}));
+                                    }} />
+                            </FormRow>);
+                    }
+
+                    if (config[1].table[0] == MeterModbusTCPTableID.TinkerforgeWARPCharger) {
+                        fixed_location = MeterLocation.Load;
+                    }
+                    else if (virtual_meter === null) {
+                        // check if location depends on virtual meter. for example, for Carlo Gavazzi EM270 and EM280 this is not the case
+                        for (let item of virtual_meter_items) {
+                            if (get_fixed_location(config[1].table[0], parseInt(item[0])) != MeterLocation.Unknown) {
+                                fixed_location = null;
+                                break;
+                            }
+                        }
+                    }
+                    else if (virtual_meter !== undefined) {
+                        fixed_location = get_fixed_location(config[1].table[0], virtual_meter);
+                    }
+
+                    edit_children.push(
+                        <FormRow label={__("meters_modbus_tcp.content.location")}>
+                            {fixed_location === null ?
+                                <InputText value={__("meters_modbus_tcp.content.location_depends_virtual_meter")} /> :
+                                (fixed_location == MeterLocation.Unknown ?
+                                    <InputSelect
+                                        required
+                                        items={get_meter_location_items()}
+                                        placeholder={__("select")}
+                                        value={config[1].location.toString()}
+                                        onValue={(v) => {
+                                            on_config(util.get_updated_union(config, {location: parseInt(v)}));
+                                        }} /> :
+                                    <InputText value={translate_meter_location(fixed_location)} />)}
+                        </FormRow>,
+//#if MODULE_EM_ENERGY_ANALYSIS_AVAILABLE
+                        <FormRow label={__("meters.content.config_excluded")} help={__("meters.content.config_excluded_help")}>
+                            <Switch
+                                desc={__("meters.content.config_excluded_desc")}
+                                checked={config[1].excluded}
+                                onClick={() => on_config(util.get_updated_union(config, {excluded: !config[1].excluded}))}/>
+                        </FormRow>
+//#endif
+                    );
+
+                    if (config[1].table[0] == MeterModbusTCPTableID.ShellyPro3EM) {
+                        edit_children.push(
+                            <FormRow label={__("meters_modbus_tcp.content.shelly_pro_3em_device_profile")}>
+                                <InputSelect
+                                    required
+                                    items={[
+                                        [ShellyPro3EMDeviceProfile.Triphase.toString(), __("meters_modbus_tcp.content.shelly_pro_3em_device_profile_triphase")],
+                                        [ShellyPro3EMDeviceProfile.Monophase.toString(), __("meters_modbus_tcp.content.shelly_pro_3em_device_profile_monophase")],
+                                    ]}
+                                    placeholder={__("select")}
+                                    value={util.hasValue(config[1].table[1]) && util.hasValue((config[1].table[1] as any).device_profile) ? (config[1].table[1] as any).device_profile.toString() : undefined}
+                                    onValue={(v) => {
+                                        let device_profile = parseInt(v);
+                                        let monophase_channel = (config[1].table[1] as any).monophase_channel;
+                                        let monophase_mapping = (config[1].table[1] as any).monophase_mapping;
+
+                                        if (device_profile == ShellyPro3EMDeviceProfile.Triphase) {
+                                            monophase_channel = ShellyEMMonophaseChannel.None;
+                                            monophase_mapping = ShellyEMMonophaseMapping.None;
+                                        }
+
+                                        on_config(util.get_updated_union(config, {table: util.get_updated_union(config[1].table, {device_profile: device_profile, monophase_channel: monophase_channel, monophase_mapping: monophase_mapping})}));
+                                    }} />
+                            </FormRow>);
+                    }
+
+                    if (config[1].table[0] == MeterModbusTCPTableID.ShellyProEM
+                     || (config[1].table[0] == MeterModbusTCPTableID.ShellyPro3EM
+                      && (config[1].table[1] as any).device_profile == ShellyPro3EMDeviceProfile.Monophase)) {
+                        let monophase_channel_items: [string, string][] = [
+                            [ShellyEMMonophaseChannel.First.toString(), __("meters_modbus_tcp.content.shelly_em_monophase_channel_1")],
+                            [ShellyEMMonophaseChannel.Second.toString(), __("meters_modbus_tcp.content.shelly_em_monophase_channel_2")],
+                        ];
+
+                        if (config[1].table[0] == MeterModbusTCPTableID.ShellyPro3EM) {
+                            monophase_channel_items.push([ShellyEMMonophaseChannel.Third.toString(), __("meters_modbus_tcp.content.shelly_em_monophase_channel_3")]);
+                        }
+
+                        edit_children.push(
+                            <FormRow label={__("meters_modbus_tcp.content.shelly_em_monophase_channel")}>
+                                <InputSelect
+                                    required
+                                    items={monophase_channel_items}
+                                    placeholder={__("select")}
+                                    value={util.hasValue(config[1].table[1]) && util.hasValue((config[1].table[1] as any).monophase_channel) ? (config[1].table[1] as any).monophase_channel.toString() : undefined}
+                                    onValue={(v) => {
+                                        on_config(util.get_updated_union(config, {table: util.get_updated_union(config[1].table, {monophase_channel: parseInt(v)})}));
+                                    }} />
+                            </FormRow>,
+                            <FormRow label={__("meters_modbus_tcp.content.shelly_em_monophase_mapping")}>
+                                <InputSelect
+                                    required
+                                    items={[
+                                        [ShellyEMMonophaseMapping.L1.toString(), __("meters_modbus_tcp.content.shelly_em_monophase_mapping_l1")],
+                                        [ShellyEMMonophaseMapping.L2.toString(), __("meters_modbus_tcp.content.shelly_em_monophase_mapping_l2")],
+                                        [ShellyEMMonophaseMapping.L3.toString(), __("meters_modbus_tcp.content.shelly_em_monophase_mapping_l3")],
+                                    ]}
+                                    placeholder={__("select")}
+                                    value={util.hasValue(config[1].table[1]) && util.hasValue((config[1].table[1] as any).monophase_mapping) ? (config[1].table[1] as any).monophase_mapping.toString() : undefined}
+                                    onValue={(v) => {
+                                        on_config(util.get_updated_union(config, {table: util.get_updated_union(config[1].table, {monophase_mapping: parseInt(v)})}));
+                                    }} />
+                            </FormRow>);
+                    }
+
+                    if (config[1].table[0] == MeterModbusTCPTableID.CarloGavazziEM100
+                     || config[1].table[0] == MeterModbusTCPTableID.CarloGavazziET100
+                     || config[1].table[0] == MeterModbusTCPTableID.CarloGavazziEM510) {
+                        edit_children.push(
+                            <FormRow label={__("meters_modbus_tcp.content.carlo_gavazzi_phase")}>
+                                <InputSelect
+                                    required
+                                    items={[
+                                        [CarloGavazziPhase.L1.toString(), __("meters_modbus_tcp.content.carlo_gavazzi_phase_l1")],
+                                        [CarloGavazziPhase.L2.toString(), __("meters_modbus_tcp.content.carlo_gavazzi_phase_l2")],
+                                        [CarloGavazziPhase.L3.toString(), __("meters_modbus_tcp.content.carlo_gavazzi_phase_l3")],
+                                    ]}
+                                    placeholder={__("select")}
+                                    value={util.hasValue(config[1].table[1]) && util.hasValue((config[1].table[1] as any).phase) ? (config[1].table[1] as any).phase.toString() : undefined}
+                                    onValue={(v) => {
+                                        on_config(util.get_updated_union(config, {table: util.get_updated_union(config[1].table, {phase: parseInt(v)})}));
+                                    }} />
+                            </FormRow>);
+                    }
+                }
+                else if (util.hasValue(config[1].table)
+                      && config[1].table[0] == MeterModbusTCPTableID.Custom) {
+                    edit_children.push(
+                        <FormRow label={__("meters_modbus_tcp.content.device_address")}>
+                            <InputNumber
+                                required
+                                min={0}
+                                max={255}
+                                value={config[1].table[1].device_address}
+                                onValue={(v) => {
+                                    on_config(util.get_updated_union(config, {table: util.get_updated_union(config[1].table, {device_address: v})}));
+                                }} />
+                        </FormRow>,
+                        <FormRow label={__("meters_modbus_tcp.content.location")}>
+                            <InputSelect
+                                required
+                                items={get_meter_location_items()}
+                                placeholder={__("select")}
+                                value={config[1].location.toString()}
+                                onValue={(v) => {
+                                    on_config(util.get_updated_union(config, {location: parseInt(v)}));
+                                }} />
+                        </FormRow>,
+//#if MODULE_EM_ENERGY_ANALYSIS_AVAILABLE
+                        <FormRow label={__("meters.content.config_excluded")} help={__("meters.content.config_excluded_help")}>
+                            <Switch
+                                desc={__("meters.content.config_excluded_desc")}
+                                checked={config[1].excluded}
+                                onClick={() => on_config(util.get_updated_union(config, {excluded: !config[1].excluded}))}/>
+                        </FormRow>,
+//#endif
+                        <FormRow label={__("meters_modbus_tcp.content.register_address_mode")}>
+                            <InputSelect
+                                required
+                                items={[
+                                    [ModbusRegisterAddressMode.Address.toString(), __("meters_modbus_tcp.content.register_address_mode_address")],
+                                    [ModbusRegisterAddressMode.Number.toString(), __("meters_modbus_tcp.content.register_address_mode_number")]
+                                ]}
+                                placeholder={__("select")}
+                                value={util.hasValue(config[1].table[1].register_address_mode) ? config[1].table[1].register_address_mode.toString() : undefined}
+                                onValue={(v) => {
+                                    on_config(util.get_updated_union(config, {table: util.get_updated_union(config[1].table, {register_address_mode: parseInt(v)})}));
+                                }} />
+                        </FormRow>,
+                        <FormRow label={__("meters_modbus_tcp.content.registers")}>
+                            <RegisterEditor
+                                table={config[1].table}
+                                on_table={(table: TableConfigCustom) => on_config(util.get_updated_union(config, {table: table}))} />
+                        </FormRow>
+                    );
+                }
+
+                return edit_children;
+            },
+        },
+    };
+}
+
+export function init() {
+}

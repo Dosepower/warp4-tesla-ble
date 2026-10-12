@@ -1,0 +1,13 @@
+// WARNING: Edit only modules.h.template. Do not edit modules.h.
+
+#pragma once
+
+#include <vector>
+
+#include "config.h"
+#include "module.h"
+
+{{{module_defines}}}
+
+void       modules_get_imodules(std::vector<IModule*> *imodules);
+ConfigRoot modules_get_init_config();

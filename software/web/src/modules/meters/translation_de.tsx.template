@@ -1,0 +1,160 @@
+/** @jsxImportSource preact */
+import { h } from "preact";
+import { Comparator } from "modules/meters/generated/comparator.enum";
+let x = {
+    "meters": {
+        "status": {
+            "power_history": null,
+            "current_power": "Leistung",
+            "power_sums": "Leistungen",
+            "meters_without_location": /*FFN*/(meter_names: string[]) => <p>Für {meter_names.length > 1 ? <>die</> : <>den</>} folgenden Stromzähler ist kein Messort konfiguriert. Bitte einen Messort für {meter_names.length > 1 ? <>diese</> : <>diesen</>} <a href="#meters">Stromzähler</a> wählen, um {meter_names.length > 1 ? <>diese</> : <>diesen</>} in die Leistungen und den Leistungsverlauf miteinzubeziehen:</p>/*NF*/,
+            "voltage_alert_label": "Stromzähler",
+            "voltage_alert_message": /*FFN*/(voltages_out_of_range: [string, string][]) => {
+                let result = [];
+
+                for (let voltage of voltages_out_of_range.slice(0, -1)) {
+                    if (result.length > 0) {
+                        result.push(<>, </>);
+                    }
+
+                    result.push(<><strong>{voltage[0]}</strong> ({voltage[1]} V)</>);
+                }
+
+                if (result.length > 0) {
+                    result.push(<> und </>);
+                }
+
+                let last_voltage = voltages_out_of_range.slice(-1)[0];
+
+                result.push(<><strong>{last_voltage[0]}</strong> ({last_voltage[1]} V)</>);
+
+                return <>Die {result.length > 1 ? <>Spannungen</> : <>Spannung</>} für {result} {result.length > 1 ? <>liegen</> : <>liegt</>} außerhalb des zulässigen Bereichs. {__("The_device")} wird <strong>nicht</strong> korrekt funktionieren. Bitte den Anschluss der Zuleitung, insbesondere des Neutralleiters, kontrollieren!</>;
+            }/*NF*/
+        },
+        "navbar": {
+            "meters": "Stromzähler"
+        },
+        "content": {
+            "meters": "Stromzähler",
+            "history_48": "Verlauf (48 h)",
+            "history_24": "Verlauf (24 h)",
+            "history_12": "Verlauf (12 h)",
+            "history_6": "Verlauf (6 h)",
+            "history_3": "Verlauf (3 h)",
+            "live": "Live (6 min)",
+            "no_data": "Keine Daten vorhanden",
+            "loading": "Lade Daten...",
+            "detailed_values": "Details",
+            "detailed_values_none": "Es sind bisher keine Werte vorhanden.",
+
+            {{{values}}},
+
+            {{{groups}}},
+
+            {{{fragments}}},
+
+            "table_display_name": "Anzeigename",
+            "table_power": "Leistung",
+            "table_state_of_charge": "Ladestand",
+            "table_energy_import": "Energiebezug",
+            "table_energy_export": "Energieeinspeisung",
+            "table_phases": "Phasen",
+
+            "add_meter_title": "Stromzähler hinzufügen",
+            "add_meter_message": /*SFN*/(have: number, max: number) => `${have} von ${max} Stromzählern konfiguriert`/*NF*/,
+            "add_meter_slot": "Nummer",
+            "add_meter_slot_reserved_charger": "Reserviert für Wallbox-Zähler",
+            "add_meter_class": "Klasse",
+            "invalid_slot_for_charger_internal_meter": /*SFN*/(slot: number) => `Der Wallbox-interne Zähler kann nur für Stromzählernummer ${slot} konfiguriert werden.`/*NF*/,
+
+            "edit_meter_title": "Stromzähler bearbeiten",
+            "edit_meter_slot": "Nummer",
+            "unknown_slot": /*SFN*/ (slot: number) => `Unbekannte Stromzählernummer ${slot}`/*NF*/,
+            "edit_meter_class": "Klasse",
+
+            "last_reset": "Stromzähler zuletzt zurückgesetzt",
+            "last_reset_unknown": "Unbekannt",
+            "last_reset_counter": /*SFN*/ (n: number) => `${n} mal zurückgesetzt`/*NF*/,
+            "reset": "Zurücksetzen",
+            "never": "Nie",
+
+            "reset_modal": "Zählerwerte zurücksetzen?",
+            "reset_modal_body": /*SFN*/(meter_name: string) => `Zurücksetzbare Werte von ${meter_name} wirklich zurücksetzen?`/*NF*/,
+            "reset_modal_abort": "Abbrechen",
+            "reset_modal_confirm": "Zurücksetzen",
+            "reset_failed": "Zurücksetzen des Zählerwerte fehlgeschlagen",
+
+            "meter_type": "Stromzählertyp",
+
+            "location_other": "Anderer",
+            "location_charger": "Wallbox",
+            "location_inverter": "Wechselrichter",
+            "location_grid": "Netzanschluss",
+            "location_battery": "Speicher",
+            "location_load": "Last",
+            "location_pv": "PV",
+            "location_vehicle": "Fahrzeug",
+
+            "config_excluded": "Ausgenommen von Zusammenfassungen",
+            "config_excluded_desc": "Zähler von Messort-basierten Zusammenfassungen, z.B. der Leistungsübersicht auf der Statusseite, ausnehmen.",
+            "config_excluded_help": "Es kann aus verschiedenen Gründen notwendig sein, gewisse Zählerwerte mehrfach zu erfassen. Dadurch werden diese Zählerwerte aber auch fälschlicherweise mehrfach in Messort-basierten Zusammenfassungen eingerechnet, wodurch die Zusammenfassung verfälscht wird. In diesem Fall können die Zähler, die Zählerwerte ein weiteres Mal erfassen, von der Messort-basierten Zusammenfassungen ausgenommen werden."
+        },
+        "automation": {
+            "meter_reset": "Stromzähler zurücksetzen",
+            "automation_action_text": /*FFN*/(meter_name: string) => <><b>setze</b> den Zähler <b>{meter_name}</b> zurück.</> /*NF*/,
+            "meter_slot": "Stromzähler",
+            "meter_value": "Zählerwert",
+            "automation_trigger_text": /*FFN*/(meter_name: string, value_name: string, comparator: Comparator, threshold_value: string, hyst: string, unit: string) => <>Wenn <b>{value_name}</b> des Zählers <b>{meter_name}</b> {__("meters.automation.comparator_string")(comparator, threshold_value + " " + unit)}</>/*NF*/,
+            "value_id": "Wert",
+            "comparator": "Bedingung",
+            "comparator_select_entry": /*SFN*/(c: Comparator) => {
+                switch (c) {
+                    case Comparator.Greater:        return "Größer als (>)";
+                    case Comparator.Less:           return "Kleiner als (<)";
+                    case Comparator.GreaterOrEqual: return "Größer oder gleich (\u2265)";
+                    case Comparator.LessOrEqual:    return "Kleiner oder gleich (\u2264)";
+                    case Comparator.Equal:          return "Gleich (=)";
+                    case Comparator.NotEqual:       return "Ungleich (\u2260)";
+                    default: return "?"
+                }}/*NF*/,
+            "comparator_string": /*FFN*/(c: Comparator, threshold_value: string) => {
+                switch (c) {
+                    case Comparator.Greater:        return <>über <b>{threshold_value} steigt</b></>;
+                    case Comparator.Less:           return <>unter <b>{threshold_value} fällt</b></>;
+                    case Comparator.GreaterOrEqual: return <>auf mindestens <b>{threshold_value} steigt</b></>;
+                    case Comparator.LessOrEqual:    return <>auf höchstens <b>{threshold_value} fällt</b></>;
+                    case Comparator.Equal:          return <><b>gleich {threshold_value}</b> wird</>;
+                    case Comparator.NotEqual:       return <><b>ungleich {threshold_value}</b> wird</>;
+                    default: return <>?</>;
+                }}/*NF*/,
+            "threshold": "Schwellwert",
+            "hysteresis": "Hysterese",
+            "hysteresis_muted": "verhindert wiederholtes Auslösen"
+        },
+        "script": {
+            "time": "Uhrzeit",
+            "power": "Leistung",
+            "save_failed": "Speichern der Stromzähler-Einstellungen fehlgeschlagen.",
+            "reboot_content_changed": "Stromzähler-Einstellungen",
+            "meter": /*SFN*/(slot: number|"?") => "Zähler #" + slot/*NF*/,
+
+            "meter_type_0": "Kein Stromzähler angeschlossen",
+            "meter_type_1": "Eastron SDM72",
+            "meter_type_2": "Eastron SDM630",
+            "meter_type_3": "Eastron SDM72V2",
+            "meter_type_4": "Eastron SDM72CTM",
+            "meter_type_5": "Eastron SDM630MCT",
+            "meter_type_6": "Eltako DSZ15DZMOD",
+            "meter_type_7": "YTL DEM4A",
+            "meter_type_8": "Lovato DMED341MID7ER",
+            "meter_type_9": "Eltako DSZ16D[ZE]",
+            "meter_type_10": "Iskra WM3M4C",
+            "meter_type_11": "Iskra WM3M4",
+            "meter_type_200": "Unbekannt/Benutzerdefiniert (einfach)",
+            "meter_type_201": "Unbekannt/Benutzerdefiniert (Extrawerte)",
+            "meter_type_254": "Intern",
+            "meter_type_255": "Automatische Erkennung",
+            "reboot_required": "Neustart erforderlich"
+        }
+    }
+}

@@ -1,0 +1,321 @@
+display_names = [
+    ('Sungrow Hybrid Inverter', {
+        'en': 'Sungrow hybrid inverter (SH series)',
+        'de': 'Sungrow Hybrid-Wechselrichter (SH-Serie)',
+    }),
+]
+
+table_prototypes = [
+    ('Sungrow Hybrid Inverter', [
+        'device_address',
+        {
+            'name': 'max_normal_charge_power',
+            'type': 'Uint16',  # FIXME: add range limit to [1..65535]
+            'default': 500,  # 0.01 kW
+        },
+        {
+            'name': 'max_normal_discharge_power',
+            'type': 'Uint16',  # FIXME: add range limit to [1..65535]
+            'default': 500,  # 0.01 kW
+        },
+        {
+            'name': 'force_charge_power',
+            'type': 'Uint16',
+            'default': 2000,  # W
+        },
+        {
+            'name': 'force_discharge_power',
+            'type': 'Uint16',
+            'default': 2000,  # W
+        },
+    ]),
+]
+
+default_device_addresses = [
+    ('Sungrow Hybrid Inverter', 1),
+]
+
+repeat_intervals = [
+    ('Sungrow Hybrid Inverter', 60),  # Sungrow has no watchdog, but the repeat is for the robustness of the battery control
+]
+
+variants = []
+
+specs = [
+    {
+        'group': 'Sungrow Hybrid Inverter',
+        'mode': 'Block',
+        'register_blocks': [
+            {
+                'description': 'EMS mode selection',
+                'function_code': 'IfDifferentWriteMultipleRegisters',
+                'start_number': 13050,  # U16
+                'values': [
+                    2,  # forced
+                ],
+            },
+            {
+                'description': 'Charge/discharge command',
+                'function_code': 'IfDifferentWriteMultipleRegisters',
+                'start_number': 13051,  # U16
+                'values': [
+                    0xCC,  # stop
+                ],
+            },
+            {
+                'description': 'Charge/discharge power [W]',
+                'function_code': 'IfDifferentWriteMultipleRegisters',
+                'start_number': 13052,  # U16
+                'values': [
+                    0,
+                ],
+            },
+            {
+                'description': 'Maximum charge power [0.01 kW]',
+                'function_code': 'WriteMultipleRegisters',  # the actual limit cannot be read back from this register, it seems to always report the absolute maximum limit
+                'start_number': 33047,  # U16
+                'values': [
+                    1,  # minimum
+                ],
+            },
+            {
+                'description': 'Maximum discharge power [0.01 kW]',
+                'function_code': 'WriteMultipleRegisters',  # the actual limit cannot be read back from this register, it seems to always report the absolute maximum limit
+                'start_number': 33048,  # U16
+                'values': [
+                    1,  # minimum
+                ],
+            },
+        ],
+    },
+    {
+        'group': 'Sungrow Hybrid Inverter',
+        'mode': 'Normal',
+        'register_blocks': [
+            {
+                'description': 'EMS mode selection',
+                'function_code': 'IfDifferentWriteMultipleRegisters',
+                'start_number': 13050,  # U16
+                'values': [
+                    0,  # self
+                ],
+            },
+            {
+                'description': 'Charge/discharge command',
+                'function_code': 'IfDifferentWriteMultipleRegisters',
+                'start_number': 13051,  # U16
+                'values': [
+                    0xCC,  # stop
+                ],
+            },
+            {
+                'description': 'Charge/discharge power [W]',
+                'function_code': 'IfDifferentWriteMultipleRegisters',
+                'start_number': 13052,  # U16
+                'values': [
+                    0,
+                ],
+            },
+            {
+                'description': 'Maximum charge power [0.01 kW]',
+                'function_code': 'WriteMultipleRegisters',  # the actual limit cannot be read back from this register, it seems to always report the absolute maximum limit
+                'start_number': 33047,  # U16
+                'values': [
+                    'max_normal_charge_power',
+                ],
+            },
+            {
+                'description': 'Maximum discharge power [0.01 kW]',
+                'function_code': 'WriteMultipleRegisters',  # the actual limit cannot be read back from this register, it seems to always report the absolute maximum limit
+                'start_number': 33048,  # U16
+                'values': [
+                    'max_normal_discharge_power',
+                ],
+            },
+        ],
+    },
+    {
+        'group': 'Sungrow Hybrid Inverter',
+        'mode': 'Block Discharge',
+        'register_blocks': [
+            {
+                'description': 'EMS mode selection',
+                'function_code': 'IfDifferentWriteMultipleRegisters',
+                'start_number': 13050,  # U16
+                'values': [
+                    0,  # self
+                ],
+            },
+            {
+                'description': 'Charge/discharge command',
+                'function_code': 'IfDifferentWriteMultipleRegisters',
+                'start_number': 13051,  # U16
+                'values': [
+                    0xCC,  # stop
+                ],
+            },
+            {
+                'description': 'Charge/discharge power [W]',
+                'function_code': 'IfDifferentWriteMultipleRegisters',
+                'start_number': 13052,  # U16
+                'values': [
+                    0,
+                ],
+            },
+            {
+                'description': 'Maximum charge power [0.01 kW]',
+                'function_code': 'WriteMultipleRegisters',  # the actual limit cannot be read back from this register, it seems to always report the absolute maximum limit
+                'start_number': 33047,  # U16
+                'values': [
+                    'max_normal_charge_power',
+                ],
+            },
+            {
+                'description': 'Maximum discharge power [0.01 kW]',
+                'function_code': 'WriteMultipleRegisters',  # the actual limit cannot be read back from this register, it seems to always report the absolute maximum limit
+                'start_number': 33048,  # U16
+                'values': [
+                    1,  # minimum
+                ],
+            },
+        ],
+    },
+    {
+        'group': 'Sungrow Hybrid Inverter',
+        'mode': 'Force Charge',
+        'register_blocks': [
+            {
+                'description': 'EMS mode selection',
+                'function_code': 'IfDifferentWriteMultipleRegisters',
+                'start_number': 13050,  # U16
+                'values': [
+                    2,  # forced
+                ],
+            },
+            {
+                'description': 'Charge/discharge command',
+                'function_code': 'IfDifferentWriteMultipleRegisters',
+                'start_number': 13051,  # U16
+                'values': [
+                    0xAA,  # charge
+                ],
+            },
+            {
+                'description': 'Charge/discharge power [W]',
+                'function_code': 'IfDifferentWriteMultipleRegisters',
+                'start_number': 13052,  # U16
+                'values': [
+                    'force_charge_power',
+                ],
+            },
+            {
+                'description': 'Maximum charge power [0.01 kW]',
+                'function_code': 'WriteMultipleRegisters',  # the actual limit cannot be read back from this register, it seems to always report the absolute maximum limit
+                'start_number': 33047,  # U16
+                'values': [
+                    'std::max(max_normal_charge_power, static_cast<uint16_t>(force_charge_power / 10))',
+                ],
+            },
+            {
+                'description': 'Maximum discharge power [0.01 kW]',
+                'function_code': 'WriteMultipleRegisters',  # the actual limit cannot be read back from this register, it seems to always report the absolute maximum limit
+                'start_number': 33048,  # U16
+                'values': [
+                    1,  # minimum
+                ],
+            },
+        ],
+    },
+    {
+        'group': 'Sungrow Hybrid Inverter',
+        'mode': 'Block Charge',
+        'register_blocks': [
+            {
+                'description': 'EMS mode selection',
+                'function_code': 'IfDifferentWriteMultipleRegisters',
+                'start_number': 13050,  # U16
+                'values': [
+                    0,  # self
+                ],
+            },
+            {
+                'description': 'Charge/discharge command',
+                'function_code': 'IfDifferentWriteMultipleRegisters',
+                'start_number': 13051,  # U16
+                'values': [
+                    0xCC,  # stop
+                ],
+            },
+            {
+                'description': 'Charge/discharge power [W]',
+                'function_code': 'IfDifferentWriteMultipleRegisters',
+                'start_number': 13052,  # U16
+                'values': [
+                    0,
+                ],
+            },
+            {
+                'description': 'Maximum charge power [0.01 kW]',
+                'function_code': 'WriteMultipleRegisters',  # the actual limit cannot be read back from this register, it seems to always report the absolute maximum limit
+                'start_number': 33047,  # U16
+                'values': [
+                    1,  # minimum
+                ],
+            },
+            {
+                'description': 'Maximum discharge power [0.01 kW]',
+                'function_code': 'WriteMultipleRegisters',  # the actual limit cannot be read back from this register, it seems to always report the absolute maximum limit
+                'start_number': 33048,  # U16
+                'values': [
+                    'max_normal_discharge_power',
+                ],
+            },
+        ],
+    },
+    {
+        'group': 'Sungrow Hybrid Inverter',
+        'mode': 'Force Discharge',
+        'register_blocks': [
+            {
+                'description': 'EMS mode selection',
+                'function_code': 'IfDifferentWriteMultipleRegisters',
+                'start_number': 13050,  # U16
+                'values': [
+                    2,  # forced
+                ],
+            },
+            {
+                'description': 'Charge/discharge command',
+                'function_code': 'IfDifferentWriteMultipleRegisters',
+                'start_number': 13051,  # U16
+                'values': [
+                    0xBB,  # discharge
+                ],
+            },
+            {
+                'description': 'Charge/discharge power [W]',
+                'function_code': 'IfDifferentWriteMultipleRegisters',
+                'start_number': 13052,  # U16
+                'values': [
+                    'force_discharge_power',
+                ],
+            },
+            {
+                'description': 'Maximum charge power [0.01 kW]',
+                'function_code': 'WriteMultipleRegisters',  # the actual limit cannot be read back from this register, it seems to always report the absolute maximum limit
+                'start_number': 33047,  # U16
+                'values': [
+                    1,  # minimum
+                ],
+            },
+            {
+                'description': 'Maximum discharge power [0.01 kW]',
+                'function_code': 'WriteMultipleRegisters',  # the actual limit cannot be read back from this register, it seems to always report the absolute maximum limit
+                'start_number': 33048,  # U16
+                'values': [
+                    'std::max(max_normal_discharge_power, static_cast<uint16_t>(force_discharge_power / 10))',
+                ],
+            },
+        ],
+    },
+]

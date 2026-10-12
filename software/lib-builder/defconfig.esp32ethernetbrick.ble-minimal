@@ -1,0 +1,21 @@
+# Overlay on the existing Bluetooth-enabled ESP32 Ethernet sdkconfig.
+# Diagnostic candidate only: not an upstream/default framework configuration.
+CONFIG_BT_ENABLED=y
+CONFIG_BT_BLUEDROID_ENABLED=y
+CONFIG_BT_BLE_ENABLED=y
+# CONFIG_BT_CLASSIC_ENABLED is not set
+CONFIG_BTDM_CTRL_MODE_BLE_ONLY=y
+CONFIG_BT_ACL_CONNECTIONS=1
+CONFIG_BTDM_CTRL_BLE_MAX_CONN=1
+# CONFIG_BT_MULTI_CONNECTION_ENBALE is not set
+CONFIG_BT_GATTC_ENABLE=y
+# No local GATT server, provisioning or BLE mesh in the Tesla application path.
+# CONFIG_BT_GATTS_ENABLE is not set
+# CONFIG_BT_BLE_BLUFI_ENABLE is not set
+# CONFIG_BLE_MESH is not set
+# The descriptor and characteristic writes use ESP_GATT_AUTH_REQ_NONE.
+# Application-layer Tesla authentication remains unchanged; peer behavior needs hardware.
+# CONFIG_BT_BLE_SMP_ENABLE is not set
+# CONFIG_BT_SMP_ENABLE is not set
+# Keep task stacks, GATT client cache/notification limits and controller features.
+CONFIG_BT_BLE_DYNAMIC_ENV_MEMORY=y

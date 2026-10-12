@@ -1,0 +1,115 @@
+/* esp32-firmware
+ * Copyright (C) 2023 Mattias Schäffersmann <mattias@tinkerforge.com>
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, write to the
+ * Free Software Foundation, Inc., 59 Temple Place - Suite 330,
+ * Boston, MA 02111-1307, USA.
+ */
+
+#include "meter_evse_v2.h"
+
+#include "event_log_prefix.h"
+#include "generated/module_dependencies.h"
+#include "modules/meters/generated/meter_value_id.h"
+#include "modules/meters/rs485_helpers.h"
+#include "tools.h"
+
+#include "gcc_warnings.h"
+
+[[gnu::const]]
+MeterClassID MeterEVSEV2::get_class() const
+{
+    return MeterClassID::EVSEV2;
+}
+
+void MeterEVSEV2::setup(Config *ephemeral_config)
+{
+    ephemeral_config->get("location")->updateEnum(MeterLocation::Charger);
+
+    // Trigger meter value update, in case other modules expect meter values during setup.
+    evse_v2.update_all_data();
+}
+
+void MeterEVSEV2::update_from_evse_v2_all_data(const EVSEV2MeterData *meter_data)
+{
+    // Always update error counters, even if no meter could be detected.
+    errors->get("local_timeout"       )->updateUint(meter_data->error_count[0]);
+    errors->get("global_timeout"      )->updateUint(meter_data->error_count[1]);
+    errors->get("illegal_function"    )->updateUint(meter_data->error_count[2]);
+    errors->get("illegal_data_access" )->updateUint(meter_data->error_count[3]);
+    errors->get("illegal_data_value"  )->updateUint(meter_data->error_count[4]);
+    errors->get("slave_device_failure")->updateUint(meter_data->error_count[5]);
+
+    if (meter_type != meter_data->meter_type) {
+        if (meter_type != METER_TYPE_NONE) {
+            // Don't print warning if this is a not-none -> none transition.
+            // This happens when the EVSE is flashed while the ESP is running.
+            // The meter will be detected again in a few seconds.
+            if (!meter_change_warning_printed && meter_data->meter_type != METER_TYPE_NONE) {
+                logger.printfln_meter("Meter change detected. This is not supported");
+                meter_change_warning_printed = true;
+            }
+            return;
+        }
+
+        const MeterValueID *ids = nullptr;
+        size_t id_count = 0;
+        rs485_helper_get_value_ids(meter_data->meter_type, &ids, &id_count);
+        if (ids == nullptr || id_count == 0) {
+            return;
+        }
+
+        // Place max count array on the stack. The stack is large enough so that any unused space at the end doesn't matter.
+        // No need to initialize the array because either all values are written or it is rejected entirely.
+        float all_values[METER_ALL_VALUES_RESETTABLE_MAX_COUNT];
+        if (evse_v2.get_all_energy_meter_values(all_values) != id_count) {
+            return;
+        }
+
+        meter_type = meter_data->meter_type;
+        state->get("type")->updateUint(meter_type);
+
+        meters.declare_value_ids(slot, ids, id_count);
+
+        value_indices[0] = meters_find_id_index(ids, id_count, MeterValueID::PowerActiveLSumImExDiff);
+        value_indices[1] = meters_find_id_index(ids, id_count, MeterValueID::CurrentL1ImExSum);
+        value_indices[2] = meters_find_id_index(ids, id_count, MeterValueID::CurrentL2ImExSum);
+        value_indices[3] = meters_find_id_index(ids, id_count, MeterValueID::CurrentL3ImExSum);
+
+        meters.update_all_values(slot, all_values);
+
+        evse_v2.start_polling_all_energy_meter_values(id_count);
+
+        return;
+    }
+}
+
+void MeterEVSEV2::energy_meter_values_callback(const float values[4])
+{
+    if (value_indices[0] == UINT32_MAX) {
+        return;
+    }
+
+    meters.update_batch_values(slot, std::size(value_indices), value_indices, values);
+}
+
+void MeterEVSEV2::energy_meter_all_values_callback(const float *all_values)
+{
+    meters.update_all_values(slot, all_values);
+}
+
+bool MeterEVSEV2::reset()
+{
+    return evse_v2.reset_energy_meter_relative_energy();
+}

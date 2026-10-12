@@ -1,0 +1,197 @@
+#pragma once
+
+#include <stdint.h>
+#include <memory>
+
+#include "current_limits.h"
+
+#include "config.h"
+#include "tools.h"
+
+#define DISTRIBUTION_LOG_LEN 2048
+
+#include "generated/cas_state.enum.h"
+#include "generated/cas_error.enum.h"
+
+#include "generated/zero_phase_decision.union.h"
+#include "generated/one_phase_decision.union.h"
+#include "generated/three_phase_decision.union.h"
+#include "generated/current_decision.union.h"
+
+#include "modules/cm_networking/cm_networking_defs.h"
+
+constexpr micros_t RE_RESOLVE_TIMEOUT = 6_s; // Must be less than CHARGER_UNREACHABLE_TIMEOUT.
+constexpr micros_t CHARGER_UNREACHABLE_TIMEOUT = 32_s;
+
+struct ChargerDecision {
+    ZeroPhaseDecision zero;
+    OnePhaseDecision one;
+    ThreePhaseDecision three;
+    CurrentDecision current;
+};
+
+static_assert(sizeof(ChargerDecision) == (sizeof(ZeroPhaseDecision)
+                                        + sizeof(OnePhaseDecision)
+                                        + sizeof(ThreePhaseDecision)
+                                        + sizeof(CurrentDecision)), "ChargerDecision should have no padding (costs x64!)");
+
+// Initialized by charge_manager.cpp; never changed
+struct CurrentAllocatorConfig {
+    // How often to run the allocation algorithm
+    micros_t allocation_interval;
+
+    // Only switch phases, start or stop chargers if this is elapsed.
+    // Don't reset hysteresis when stopping chargers:
+    // Stopping and immediately starting again is fine, as is done when switching phases.
+    micros_t global_hysteresis;
+
+    // Allow charging for this time to attempt to wake-up a "full" vehicle,
+    // i.e. one that triggered a C -> B2 transition and/or waited in B2 for too long
+    micros_t wakeup_time;
+
+    // Require a charger to be active this long before clearing just_plugged_in_timestamp.
+    micros_t plug_in_time;
+
+    seconds_t rotation_interval;
+
+    int minimum_current_3p;
+    int minimum_current_1p;
+    float enable_current_factor;
+    std::unique_ptr<char[]> distribution_log;
+    size_t distribution_log_len;
+    size_t charger_count;
+    uint16_t requested_current_margin;
+    uint16_t requested_current_threshold;
+    bool enable_central_management;
+};
+
+// R+W _only_ by current_allocator.cpp
+struct CurrentAllocatorState {
+    bool last_print_local_log_was_error = false;
+
+    bool global_hysteresis_elapsed = false;
+    micros_t last_hysteresis_reset = 0_us;
+
+    micros_t next_rotation = 0_us;
+
+    Cost control_window_min = {0, 0, 0, 0};
+    Cost control_window_max = {0, 0, 0, 0};
+};
+
+// Check alignment/padding when adding stuff.
+struct ChargerState {
+    micros_t last_update;
+    uint32_t uid;
+    uint32_t uptime;
+    uint32_t power_total_count;
+    float power_total_sum;
+    float energy_abs;
+
+    // maximum current supported by the charger
+    uint16_t supported_current;
+
+    // last current limit reported by the charger
+    uint16_t allowed_current;
+
+    // requested current calculated with the line currents reported by the charger
+    uint16_t requested_current;
+
+    // maximum current allowed for this user
+    uint16_t user_current;
+
+    uint8_t charger_state;
+    bool wants_to_charge;
+    bool wants_to_charge_low_priority;
+    bool is_charging;
+
+    // last CP disconnect support reported by the charger: false - CP disconnect not supported, true - CP disconnect supported
+    bool cp_disconnect_supported;
+
+    // last CP disconnect state reported by the charger: false - automatic, true - disconnected
+    bool cp_disconnect_state;
+
+    bool meter_supported;
+
+    bool phase_switch_supported;
+    bool currently_switching_phases;
+
+    // Don't accept two consecutive urgent packets.
+    bool last_send_was_urgent = false;
+
+    // TODO move everything below into charger allocation state.
+
+    // Phases that are currently used or will be used if current is allocated.
+    uint8_t phases;
+
+    PhaseRotation phase_rotation;
+
+    float allocated_energy;
+    float allocated_average_power;
+
+    // The last time we've allocated more than 0 phases to this charger.
+    micros_t last_switch_on;
+
+    // This is the last time that either
+    // - we've changed the phase allocation of this charger
+    // - the contactor is switched on
+    // In both cases, we block another phase switch
+    // (i.e. change of the phase allocation except to/from 0)
+    // for one hysteresis, to make sure the vehicle does not
+    // observe a phase switch directly after the contactor is switched on.
+    micros_t last_phase_switch;
+
+    // The last time a vehicle was plugged in.
+    // If this is not 0, this charger has to be allocated current to as fast as possible,
+    // or else the vehicle could power down its charge controller.
+    // Is set to 0 the first time a charger gets current allocated.
+    micros_t just_plugged_in_timestamp;
+
+    // The last time a vehicle was plugged in or 0 if no car is currently plugged in.
+    micros_t last_plug_in;
+
+    // The last time a vehicle was plugged out
+    micros_t last_plug_out;
+
+    micros_t last_wakeup;
+
+    // If set, the last allocation was less than the requested current.
+    // Ignore phase currents in this case for a faster ramp up.
+    micros_t use_supported_current;
+
+    // Incremented every iteration the connected vehicle was in state C.
+    micros_t time_in_state_c;
+
+    uint8_t charge_mode;
+
+    // Those are translated from the charge_mode before allocate_current.
+    // We should not overwrite charge_mode (for example for the Eco -> Fast/Off decision)
+    bool off;
+    bool observe_pv_limit;
+    bool eco_fast;
+    int guaranteed_pv_current;
+
+    // Authorization state: user_id of the authenticated user (-1 if not authenticated, -2 if wrong authentication)
+    int16_t authenticated_user_id;
+
+    micros_t last_auth_success_timestamp;
+    micros_t last_auth_fail_timestamp;
+
+    // Last NFC tags seen on this charger (from cm_state_v5)
+    cm_auth_info auth_info[3];
+};
+
+struct ChargerAllocationState {
+    micros_t last_sent_config;
+
+    // last current limit send to the charger
+    uint16_t allocated_current;
+
+    int8_t allocated_phases;
+
+    // last CP disconnect request sent to charger: false - automatic/don't care, true - disconnect
+    bool cp_disconnect;
+
+    CASError error;
+
+    CASState state;
+};

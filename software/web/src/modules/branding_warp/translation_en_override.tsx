@@ -1,0 +1,35 @@
+/** @jsxImportSource preact */
+import { h } from "preact";
+let x = {
+    "charge_manager": {
+        "status": {
+            "charge_manager": "Charge Manager"
+        }
+    },
+    "system": {
+        "content": {
+            "factory_reset_modal_text": <>A factory reset will reset all configuration to their default values. All tracked charges are lost. <b>This action cannot be undone!</b> The WARP Charger will re-open the WiFi access point with the default SSID and passphrase from the manual. Continue?</>,
+            "config_reset_modal_text": <>Resets only the configuration to default values. Tracked charges will be preserved. <b>This action cannot be undone!</b> The WARP Charger will re-open the WiFi access point with the default SSID and passphrase from the manual. Continue?</>,
+            "factory_reset_desc": "removes the configuration and all tracked charges",
+            "config_reset_desc": "tracked charges will be preserved"
+        }
+    },
+    "firmware_update": {
+        "script": {
+            "install_state_19": "Firmware info missing in firmware file or firmware file is for WARP1 Charger"
+        }
+    },
+    "meters": {
+        "status": {
+            "power_history": "Charge history"
+        }
+    },
+    "modbus_tcp": {
+        "content": {
+            "warp": "WARP Charger"
+        }
+    },
+    "branding": {
+        "device": "WARP Charger"
+    }
+}

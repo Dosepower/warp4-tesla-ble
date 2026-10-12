@@ -1,0 +1,18 @@
+//APIPath:batteries/{{{battery_id}}}/
+export type config___{{{battery_id}}} = BatteryConfig;
+
+// FIXME: this state is specific to the batteries_modbus_tcp module
+export interface state___{{{battery_id}}} {
+    active_mode: number,
+    effective_mode: number,
+    discovering: boolean,
+    checking: boolean,
+    testing: boolean,
+}
+
+// FIXME: this state is specific to the batteries_sun_spec module
+//export interface state___{{{battery_id}}} {
+//    mode: number,
+//    resolving: boolean,
+//    testing: boolean,
+//}

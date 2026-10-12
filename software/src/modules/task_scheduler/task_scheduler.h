@@ -1,0 +1,197 @@
+/* esp32-firmware
+ * Copyright (C) 2020-2021 Erik Fleckstein <erik@tinkerforge.com>
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, write to the
+ * Free Software Foundation, Inc., 59 Temple Place - Suite 330,
+ * Boston, MA 02111-1307, USA.
+ */
+
+#pragma once
+
+#include <vector>
+#include <queue>
+#include <functional>
+#include <mutex>
+#include <atomic>
+#include <source_location>
+#include <time.h>
+#include <iostream>
+
+#include "module.h"
+#include "tools.h"
+
+#include "generated/module_available.h"
+
+struct Task {
+    std::function<void(void)> fn;
+    uint64_t task_id;
+    micros_t next_deadline;
+    micros_t delay;
+    TaskHandle_t awaited_by;
+    const char *file;
+    uint_least32_t line;
+    bool once;
+    // Task is currently running while another thread (or fn itself) called cancel with this task's ID.
+    // Will be cancelled (i.e. not rescheduled) after completion of fn.
+    bool cancelled;
+    // Task is currently running while another thread (or fn itself) called rescheduleNow with this task's ID.
+    // Will be executed as next task again.
+    bool immediate_reschedule;
+    // If true, this task was allocated by the task scheduler with new.
+    //   -> The task must be deleted.
+    //
+    // If false, this task was constructed via placement-new into a buffer that was passed to the task scheduler.
+    //   -> The task must not be deleted, but the destructor must be called.
+    bool owned = true;
+
+    Task(std::function<void(void)> &&fn, uint64_t task_id, micros_t first_run_delay, micros_t delay, const char *file, uint_least32_t line, bool once);
+};
+
+// https://stackoverflow.com/a/50957671
+// This specializes the default deleter used by std::unique_ptr to only delete a Task if it is owned.
+template <>
+struct std::default_delete<Task> {
+    default_delete() = default;
+    template <class U>
+    constexpr default_delete(default_delete<U>) noexcept {}
+    void operator()(Task* p) const noexcept
+    {
+        if (p->owned)
+            delete p;
+        else
+            p->~Task();
+    }
+};
+
+#define IS_WALL_CLOCK_TASK_ID(task_id) (task_id & (1ull << 63))
+#define IS_UNCANCELABLE_TASK_ID(task_id) (task_id & (1ull << 62))
+
+struct WallClockTask {
+    // Is moved into the task queue to execute the WallClockTask.
+    std::unique_ptr<Task> runner_task;
+    // This is the runner_task's ID; duplicated to match currentTask against the WallClockTask IDs when moving the task back.
+    // All WallClockTask IDs have the highest bit set.
+    uint64_t task_id;
+
+    // A WallClockTask is executed at midnight (UTC) and then once every interval_minutes.
+    minutes_t interval_minutes;
+
+    // Additionally run this task when the system clock is synced for the first time.
+    bool run_on_first_sync;
+
+    WallClockTask(std::unique_ptr<Task> &&runner_task, uint64_t task_id, minutes_t interval_minutes, bool run_on_first_sync);
+};
+
+bool compare(const std::unique_ptr<Task> &a, const std::unique_ptr<Task> &b);
+
+class TaskQueue final : public std::priority_queue<std::unique_ptr<Task>, std::vector<std::unique_ptr<Task>>, decltype(&compare)>
+{
+    using std::priority_queue<std::unique_ptr<Task>, std::vector<std::unique_ptr<Task>>, decltype(&compare)>::priority_queue;
+
+public:
+    std::unique_ptr<Task> removeByTaskID(uint64_t task_id);
+    Task *findByTaskID(uint64_t task_id);
+
+    std::unique_ptr<Task> top_and_pop()
+    {
+        std::pop_heap(c.begin(), c.end(), comp);
+        std::unique_ptr<Task> value = std::move(c.back());
+        c.pop_back();
+        return value;
+    }
+
+    void restoreHeap();
+};
+
+class TaskScheduler final : public IModule
+{
+public:
+    TaskScheduler() : tasks(&compare) {}
+
+    void pre_reboot() override;
+
+    void custom_loop();
+    uint64_t currentTaskId();
+
+    void setOwnerTask(TaskHandle_t handle) { this->owner_task = handle; }
+    TaskHandle_t ownerTask() const { return (this->owner_task != nullptr) ? this->owner_task : mainTaskHandle; }
+    bool isOwnedByMainTask() const { return this->ownerTask() == mainTaskHandle; }
+
+    enum class CancelResult {
+        // Task not found in task queue
+        NotFound,
+        // Task found in and removed from task queue
+        Cancelled,
+        // Task is currently being executed. Flagged to cancel
+        // before being inserted into task queue again.
+        // Don't remove task resources yet!
+        // A well-written single shot task will remove its resources
+        // To remove a repeated task's resources, schedule a task
+        // (that will be executed after the currently executed task in any case)
+        WillBeCancelled
+    };
+
+    CancelResult cancel(uint64_t task_id);
+
+    bool nextTaskReady();
+
+    uint64_t scheduleOnce(std::function<void(void)> &&fn, millis_t delay_ms = 0_ms, const std::source_location &src_location = std::source_location::current());
+    uint64_t scheduleOnceNoAlloc(aligned_storage<Task> *task_buffer, bool transfer_task_ownership, std::function<void(void)> &&fn, millis_t delay_ms = 0_ms, const std::source_location &src_location = std::source_location::current());
+
+    [[nodiscard("Use scheduleUncancelable if you don't need the returned task ID to cancel this task later. Cast to void if you intend to write a self-canceling task that will use task_scheduler.currentTaskId()")]]
+    inline uint64_t scheduleWithFixedDelay(std::function<void(void)> &&fn, millis_t delay_ms, const std::source_location &src_location = std::source_location::current()) {return this->scheduleWithFixedDelay(std::move(fn), 0_ms, delay_ms, src_location);}
+    [[nodiscard("Use scheduleUncancelable if you don't need the returned task ID to cancel this task later. Cast to void if you intend to write a self-canceling task that will use task_scheduler.currentTaskId()")]]
+    uint64_t scheduleWithFixedDelay(std::function<void(void)> &&fn, millis_t first_delay_ms, millis_t delay_ms, const std::source_location &src_location = std::source_location::current());
+
+    inline uint64_t scheduleUncancelable(std::function<void(void)> &&fn, millis_t delay_ms, const std::source_location &src_location = std::source_location::current()) {return this->scheduleUncancelable(std::move(fn), 0_ms, delay_ms, src_location);}
+    uint64_t scheduleUncancelable(std::function<void(void)> &&fn, millis_t first_delay_ms, millis_t delay_ms, const std::source_location &src_location = std::source_location::current());
+
+    uint64_t scheduleWhenClockSynced(std::function<void(void)> &&fn, const std::source_location &src_location = std::source_location::current());
+
+    uint64_t scheduleWallClock(std::function<void(void)> &&fn, minutes_t interval_minutes, millis_t execution_delay_ms, bool run_on_first_sync, const std::source_location &src_location = std::source_location::current());
+
+    // Returns true if the passed function was executed in the main thread.
+    // Returns false if not, or when a reboot was requested while awaiting.
+    // It is guaranteed that fn will not continue to be executed once await returns.
+    // When the timeout is exceeded and fn is still being executed, esp_system_abort is called.
+    [[nodiscard("If this returns false, the passed function was potentially not executed!")]]
+    bool await(std::function<void(void)> &&fn, millis_t millis_to_wait = 10_s, const std::source_location &src_location = std::source_location::current());
+
+    bool rescheduleNow(uint64_t task_id);
+    bool updateDelay(uint64_t task_id, micros_t new_delay);
+    bool updateCurrentTaskDelay(micros_t new_delay);
+
+private:
+    std::mutex task_mutex;
+    TaskQueue tasks;
+    std::unique_ptr<Task> currentTask = nullptr;
+
+    TaskHandle_t owner_task = nullptr;
+
+    std::vector<WallClockTask> wall_clock_tasks;
+    bool wall_clock_worker_started = false;
+    int wall_clock_last_minute = -1;
+
+    std::atomic<bool> rebooting = false;
+
+    void wall_clock_worker();
+    void run_wall_clock_task(uint64_t task_id);
+
+    TaskHandle_t tcp_ip_thread = nullptr;
+#if MODULE_IO_SCHEDULER_AVAILABLE()
+    TaskHandle_t io_scheduler_thread = nullptr;
+#endif
+};
+
+#include "generated/module_available_end.h"

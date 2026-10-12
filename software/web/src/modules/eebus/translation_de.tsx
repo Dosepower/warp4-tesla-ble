@@ -1,0 +1,96 @@
+/** @jsxImportSource preact */
+import { h } from "preact";
+let x = {
+    "eebus": {
+        "content": {
+            "enable_eebus": "EEBUS aktiviert",
+            "enable_eebus_desc": "Erlaubt die Kommunikation mit EEBUS Geräten",
+            "enable_eebus_help_intro": <>
+                <p>EEBUS ist ein Kommunikationsstandard für intelligentes Energiemanagement. Er ermöglicht die Kommunikation
+                zwischen Energiegeräten wie Wallboxen, Wärmepumpen, PV-Anlagen und Energiemanagementsystemen (HEMS).</p>
+            </>,
+            "enable_eebus_help_usecases_intro": <>
+                <p>Vom Standard werden Use Cases definiert, die zur Abbildung verschiedener Funktionen von Geräten und Systemen genutzt werden können.</p>
+                <p>Folgende Use Cases werden unterstützt:</p>
+            </>,
+            "usecase_lpc_desc": <>Begrenzung der Leistungsaufnahme. Wird von Steuerboxen zur <strong>Netzsteuerung gemäß §14a EnWG</strong> verwendet. Ermöglicht dem Netzbetreiber die Leistungsaufnahme von Großverbrauchern (z.b. Wallboxen, Klimageräte) zu begrenzen.</>,
+            "usecase_lpp_desc": "Begrenzung der Leistungsabgabe. Ermöglicht dem Netzbetreiber die Begrenzung der Netzeinspeisung.",
+            "usecase_mpc_desc": "Überwachung des Stromverbrauchs. Überwacht die Leistungsaufnahme oder -abgabe eines Geräts.",
+            "usecase_mgcp_desc": "Netzanschlusspunkt-Überwachung. Überwacht den Leistungsfluss am Netzanschlusspunkt einschließlich Einspeisung und Bezug.",
+            "usecase_cevc_desc": "Koordiniertes Laden. Ermöglicht einem Energiemanager die Steuerung des Ladevorgangs basierend auf Ladeplänen und Anreizen.",
+            "usecase_evcc_desc": "Fahrzeugkonfiguration. Meldet Informationen über das angeschlossene Fahrzeug wie Kommunikationsstandard und Leistungsgrenzen.",
+            "usecase_evcem_desc": "Lademessung. Stellt Messwerte wie Strom, Leistung und geladene Energie bereit.",
+            "usecase_evsecc_desc": "Wallbox-Status. Meldet den Betriebszustand der Ladestation und eventuelle Fehlerzustände.",
+            "usecase_evcs_desc": "Ladeübersicht. Stellt Zusammenfassungen abgeschlossener Ladevorgänge mit Energiemenge und Kosten bereit.",
+            "usecase_opev_desc": "Überlastschutz. Ermöglicht die Begrenzung des Ladestroms.",
+            "usecase_value_writable": "schreibbar",
+            "ski": "SKI",
+            "ski_muted": "Subject Key Identifier dieses Geräts",
+            "ski_help": <>
+                <p>Der Subject Key Identifier (SKI) ist ein eindeutiger kryptographischer Bezeichner für dieses Gerät.</p>
+                <p>Wenn dieses Gerät mit z.B. einer Steuerbox kommunizieren soll, kann es sein, dass der SKI bei der Einrichtung
+                der Steuerbox benötigt wird.</p>
+                <p>Der QR-Code enthält den SKI sowie weitere Geräteinformationen gemäß der EEBUS SHIP Spezifikation. Er kann von Apps kompatibler Geräte eingescannt werden, um die Kopplung zu vereinfachen.</p>
+            </>,
+            "unknown": "Unbekannt",
+            "qr_show": "QR-Code anzeigen",
+            "qr_hide": "QR-Code verstecken",
+            "qr_download": "QR-Code herunterladen",
+            "searching_peers": "Suche im Gange...",
+            "add_peer_title": "EEBUS-Gerät hinzufügen",
+            "add_peer_message": /*SFN*/(have: number, max: number) => `${have} von ${max} EEBUS-Geräten konfiguriert`/*NF*/,
+            "discovered_peers": "Gefundene Geräte",
+            "no_peers_found": "Keine Geräte gefunden. Sind die Geräte im selben Netzwerk?",
+            "add_peer_manual_desc": "Oder Gerätedetails manuell eingeben:",
+            "is_optional": "optional",
+            "peer_info": {
+                "peers_desc": "Damit eine EEBUS Verbindung hergestellt werden kann, muss ein EEBUS Gerät zuerst hinzugefügt werden. Verbindungen von anderen Geräten werden abgelehnt.",
+                "peers": "EEBUS-Geräte",
+                "dns_name": "DNS Adresse",
+                "device_ip": "Adressen",
+                "device_port": "Port",
+                "device_trusted": "Verbindung erlauben",
+                "model_brand": "Hersteller",
+                "model_model": "Gerät",
+                "model_type": "Gerätetyp",
+                "trusted_no": "Nein",
+                "trusted_yes": "Ja",
+                "edit_peer_title": "Bearbeiten",
+                "wss_path": "WSS-Pfad",
+                "state": "Status",
+                "state_connected": "SHIP Aktiv",
+                "state_eebus_connected": "EEBUS Aktiv",
+                "state_disconnected": "Getrennt",
+                "state_discovered": "Entdeckt",
+                "state_loaded_from_config": "Aus Konfiguration geladen",
+                "state_awaiting_approval": "Erwartet Genehmigung",
+                "state_connecting": "Verbindungsaufbau",
+                "state_degraded": "Eingeschränkt",
+                "unknown_device": "Unbekanntes Gerät",
+                "autoregister": "Autoregistrierung aktiv"
+            },
+            "usecase_details": "Details",
+            "yes": "Ja",
+            "no": "Nein",
+            "mdns_disabled_warning": "mDNS ist in den Netzwerkeinstellungen deaktiviert. EEBUS benötigt mDNS für die Geräteerkennung. Bitte mDNS unter Netzwerkeinstellungen aktivieren.",
+            "usecase_inactive": "Dieser Use Case ist inaktiv, da noch nicht alle notwendigen Zählerdaten empfangen wurden.",
+            "usecase_inactive_no_vehicle": "Dieser Use Case ist inaktiv, da kein Fahrzeug angeschlossen ist."
+        },
+        "navbar": {
+            "eebus": "EEBUS"
+        },
+        "status": {
+            "peer_degraded": "Peer Degradiert",
+            "lpc_failsafe": "LPC Failsafe",
+            "evse_failure": "EVSE Fehler",
+            "heartbeat_timeout": "Heartbeat Timeout",
+            "n_devices_connected": "verbunden"
+        },
+        "script": {
+            "save_failed": "Speichern der EEBUS-Einstellungen fehlgeschlagen.",
+            "ski_required": "SKI wird benötigt",
+            "ip_invalid": "IP-Adresse ist ungültig",
+            "add_peer_failed": "Peer konnte nicht hinzugefügt werden"
+        }
+    }
+}

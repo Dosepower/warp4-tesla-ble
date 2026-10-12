@@ -1,0 +1,362 @@
+/* esp32-firmware
+ * Copyright (C) 2023 Frederic Henrichs <frederic@tinkerforge.com>
+ * Copyright (C) 2024 Olaf Lüke <olaf@tinkerforge.com>
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, write to the
+ * Free Software Foundation, Inc., 59 Temple Place - Suite 330,
+ * Boston, MA 02111-1307, USA.
+ */
+
+import * as util from "../../ts/util";
+import * as API from "../../ts/api";
+import * as options from "../../options";
+import { h, Fragment, ComponentChild } from "preact";
+import { ConfigComponent } from "../../ts/components/config_component";
+import { Table, TableRow } from "../../ts/components/table";
+import { ConfigForm } from "../../ts/components/config_form";
+import { InputSelect } from "../../ts/components/input_select";
+import { FormRow } from "../../ts/components/form_row";
+import { __ } from "../../ts/translation";
+import { AutomationTriggerID } from "./generated/automation_trigger_id.enum";
+import { AutomationActionID } from "./generated/automation_action_id.enum";
+import { Task, AutomationTriggerPlugin, AutomationActionPlugin } from "./types";
+import { trigger_plugins_pre_init, trigger_plugins_init, action_plugins_pre_init, action_plugins_init } from "./plugins";
+import { SubPage } from "../../ts/components/sub_page";
+import { NavbarItem } from "../../ts/components/navbar_item";
+import { Tool } from "react-feather";
+import { InputNumber } from "ts/components/input_number";
+
+export function AutomationNavbar() {
+    return <NavbarItem name="automation" module="automation" title={__("automation.navbar.automation")} symbol={<Tool />} />;
+}
+
+type AutomationState = {
+    displayed_trigger: number;
+    displayed_action: number;
+    displayed_delay: number;
+    edit_task: Task;
+    registered_triggers: number[];
+    registered_actions: number[];
+    enabled_triggers: number[];
+    enabled_actions: number[];
+    last_run: number[]
+};
+
+let trigger_plugins: {[trigger_id: number]: AutomationTriggerPlugin} = {};
+let action_plugins: {[action_id: number]: AutomationActionPlugin} = {};
+
+export class Automation extends ConfigComponent<"automation/config", {}, AutomationState> {
+    constructor() {
+        super('automation/config',
+              () => __("automation.script.save_failed"),
+              undefined, {
+                  tasks: [],
+                  displayed_trigger: AutomationTriggerID.None,
+                  displayed_action: AutomationActionID.None,
+                  edit_task: {
+                      trigger: [AutomationTriggerID.None, null],
+                      action: [AutomationActionID.None, null],
+                      delay: 0
+                  }
+             });
+
+        util.addApiEventListener("automation/state", () => {
+            let state = API.get("automation/state");
+
+            this.setState({
+                registered_triggers: state.registered_triggers,
+                registered_actions: state.registered_actions,
+                enabled_triggers: state.enabled_triggers,
+                enabled_actions: state.enabled_actions,
+                last_run: state.last_run,
+            })
+        });
+    }
+
+    createSelectors() {
+        let trigger: [string, string][] = [];
+        for (let i in trigger_plugins) {
+            if (this.state.registered_triggers.indexOf(parseInt(i)) < 0) {
+                continue;
+            }
+
+            let trigger_plugin = trigger_plugins[i];
+            let name = trigger_plugin.name();
+
+            if (this.state.enabled_triggers.indexOf(parseInt(i)) < 0) {
+                name += " [";
+                name += trigger_plugin.get_disabled_reason ? trigger_plugin.get_disabled_reason(this.state.edit_task.trigger) : __("automation.content.trigger_disabled");
+                name += "]";
+            }
+
+            trigger.push([i, name]);
+        }
+
+        let action: [string, string][] = [];
+        for (let i in action_plugins) {
+            if (this.state.registered_actions.indexOf(parseInt(i)) < 0) {
+                continue;
+            }
+
+            let action_plugin = action_plugins[i];
+            let name = action_plugin.name();
+
+            if (this.state.enabled_actions.indexOf(parseInt(i)) < 0) {
+                name += " [";
+                name += action_plugin.get_disabled_reason ? action_plugin.get_disabled_reason(this.state.edit_task.action) : __("automation.content.action_disabled");
+                name += "]";
+            }
+
+            action.push([i, name]);
+        }
+
+        let triggerSelector: ComponentChild[] = [
+            <FormRow key="trigger_row" label={__("automation.content.condition")}>
+                <InputSelect
+                    required
+                    placeholder={__("select")}
+                    items={trigger}
+                    onValue={(v) => {
+                        this.setState({
+                            displayed_trigger: parseInt(v),
+                            edit_task: {...this.state.edit_task, trigger: trigger_plugins[parseInt(v)].new_config()}
+                        });
+                    }}
+                    value={this.state.displayed_trigger.toString()}
+                />
+            </FormRow>,
+        ];
+
+        if (this.state.displayed_trigger != AutomationTriggerID.None) {
+            const trigger_config = trigger_plugins[this.state.displayed_trigger].get_edit_children(this.state.edit_task.trigger, (trigger) => {
+                this.setState({edit_task: {...this.state.edit_task, trigger: trigger}});
+            });
+            triggerSelector = triggerSelector.concat(<div key={`trigger_config_${this.state.displayed_trigger}`}>{trigger_config}</div>);
+        }
+
+        triggerSelector = triggerSelector.concat(<hr key="trigger_action_separator"/>);
+
+        let actionSelector: ComponentChild[] = [
+            <FormRow key="action_row" label={__("automation.content.action")}>
+                <InputSelect
+                    required
+                    placeholder={__("select")}
+                    items={action}
+                    onValue={(v) => {
+                        this.setState({
+                            displayed_action: parseInt(v),
+                            edit_task: {...this.state.edit_task, action: action_plugins[parseInt(v)].new_config()}
+                        });
+                    }}
+                    value={this.state.displayed_action.toString()}
+                />
+            </FormRow>,
+        ];
+
+        if (this.state.displayed_action != AutomationActionID.None) {
+            const action_config = action_plugins[this.state.displayed_action].get_edit_children(this.state.edit_task.action, (action) => {
+                this.setState({edit_task: {...this.state.edit_task, action: action}});
+            });
+            actionSelector = actionSelector.concat(<div key={`action_config_${this.state.displayed_action}`}>{action_config}</div>);
+        }
+
+        const preview = [];
+        const trigger_plugin = trigger_plugins[this.state.displayed_trigger];
+        if (trigger_plugin) {
+            if (this.state.enabled_triggers.indexOf(this.state.displayed_trigger) < 0) {
+                let reason = trigger_plugin.get_disabled_reason ? trigger_plugin.get_disabled_reason(this.state.edit_task.trigger) : __("automation.content.trigger_disabled");
+                preview.push(<span class="text-danger" key={`trigger_disabled_reason_${this.state.displayed_trigger}`}>[{reason}]</span>);
+                preview.push(" ");
+            }
+
+            preview.push(<span key={`trigger_preview_${this.state.displayed_trigger}`}>{trigger_plugin.get_table_children(this.state.edit_task.trigger)}</span>);
+        }
+
+        const action_plugin = action_plugins[this.state.displayed_action];
+        if (action_plugin) {
+            if (preview.length > 0) {
+                preview.push(<br key="preview_trigger_action_separator"/>);
+            }
+
+            if (this.state.enabled_actions.indexOf(this.state.displayed_action) < 0) {
+                let reason = action_plugin.get_disabled_reason ? action_plugin.get_disabled_reason(this.state.edit_task.action) : __("automation.content.action_disabled");
+                preview.push(<span class="text-danger" key={`action_disabled_reason_${this.state.displayed_action}`}>[{reason}]</span>);
+                preview.push(" ");
+            }
+
+            preview.push(<span key={`action_preview_${this.state.displayed_trigger}`}>{action_plugin.get_table_children(this.state.edit_task.action)}</span>);
+        }
+
+        let delaySelector: ComponentChild[] = [
+            <FormRow key="delay_row" label={__("automation.content.delay")}>
+                <InputNumber
+                    min={0}
+                    max={24*60*60}
+                    unit="s"
+                    onValue={(v) => {
+                        this.setState({
+                            displayed_delay: v,
+                            edit_task: {...this.state.edit_task, delay: v}
+                        });
+                    }}
+                    value={this.state.displayed_delay}
+                />
+            </FormRow>,
+        ];
+
+        actionSelector = actionSelector.concat(delaySelector);
+
+        if (preview.length === 0) {
+            return triggerSelector.concat(actionSelector);
+        }
+
+        return triggerSelector
+                .concat(actionSelector)
+                .concat(<hr key="action_preview_separator"/>)
+                .concat(<FormRow label={__("automation.content.preview")}><div class="form-control" style="height: unset;">{preview}</div></FormRow>);
+    }
+
+    assembleTable() {
+        let rows: TableRow[] = [];
+
+        let uptime = API.get("info/keep_alive").uptime;
+        let now = new Date().valueOf();
+
+        this.state.tasks.forEach((task, idx) => {
+            let trigger_id: number = task.trigger[0];
+            let action_id: number = task.action[0];
+            let last_run: number = this.state.last_run[idx];
+
+            const trigger_plugin = trigger_plugins[trigger_id];
+            const action_plugin = action_plugins[action_id];
+
+            const task_copy: Task = {
+                trigger: trigger_plugin.clone_config(task.trigger),
+                action: action_plugin.clone_config(task.action),
+                delay: task.delay,
+            };
+
+            const trigger_children = trigger_plugin.get_table_children(task.trigger);
+            const action_children = action_plugin.get_table_children(task.action);
+
+            const trigger_disabled = this.state.enabled_triggers.indexOf(trigger_id) < 0
+                                     ? (<span class="text-danger">[{trigger_plugin.get_disabled_reason ? trigger_plugin.get_disabled_reason(task.trigger) : __("automation.content.trigger_disabled")}]</span>)
+                                     : undefined;
+            const action_disabled = this.state.enabled_actions.indexOf(action_id) < 0
+                                    ? (<span class="text-danger">[{action_plugin.get_disabled_reason ? action_plugin.get_disabled_reason(task.action) : __("automation.content.action_disabled")}]</span>)
+                                    : undefined;
+
+            let last_run_timestamp;
+            if (last_run === undefined) {
+                last_run_timestamp = __("automation.content.not_yet_triggered");
+            } else if (last_run == 0) {
+                last_run_timestamp = __("automation.content.never")
+            } else if (last_run > uptime) {
+                last_run_timestamp =  util.format_timespan((last_run - uptime) / 1000);
+            } else {
+                last_run_timestamp =  util.timestamp_sec_to_date((now - (uptime - last_run)) / 1000);
+            }
+
+            let row: TableRow = {
+                columnValues: [
+                    [idx + 1],
+                    [<Fragment key={`trigger_${trigger_id}`}>{trigger_disabled}{" "}{trigger_children}</Fragment>],
+                    [<Fragment key={`actionr_${action_id}`}>{action_disabled}{" "}{action_children}</Fragment>],
+                    [last_run_timestamp]
+                ],
+                fieldNames: ["", "", __("automation.content.last_run")],
+                fieldValues: [__("automation.content.rule") + " #" + (idx + 1) as ComponentChild, <div class="pb-3">{trigger_disabled}{" "}{trigger_children}<hr class="my-2"/>{action_disabled}{" "}{action_children}</div>, last_run_timestamp],
+                onEditShow: async () => {
+                    this.setState({
+                        displayed_trigger: task.trigger[0] as number,
+                        displayed_action: task.action[0] as number,
+                        displayed_delay: task.delay,
+                        edit_task: {
+                            trigger: task_copy.trigger,
+                            action: task_copy.action,
+                            delay: task_copy.delay,
+                        },
+                    });
+                },
+                onEditGetChildren: () => this.createSelectors(),
+                onEditSubmit: async () => {
+                    this.setState({tasks: this.state.tasks.map((task, k) => k === idx ? this.state.edit_task : task)});
+                    this.setDirty(true);
+                },
+                onRemoveClick: async () => {
+                    this.setState({tasks: this.state.tasks.filter((_, k) => idx != k)})
+                    this.setDirty(true);
+                    return true;
+                },
+                editTitle: __("automation.content.edit_rule_title"),
+            };
+            rows.push(row);
+        });
+        return rows;
+    }
+
+    render(props: {}, state: AutomationState) {
+        if (!util.render_allowed())
+            return <SubPage name="automation" />;
+
+        return <SubPage name="automation">
+             <ConfigForm
+                id="automation-config-form"
+                title={__("automation.content.automation")}
+                isDirty={this.isDirty()}
+                onSave={this.save}
+                onDirtyChange={this.setDirty}
+                >
+                <Table tableTill="md"
+                    columnNames={[
+                        "#",
+                        __("automation.content.condition"),
+                        __("automation.content.action"),
+                        __("automation.content.last_run")]}
+                    rows={this.assembleTable()}
+                    addEnabled={this.state.tasks.length < options.AUTOMATION_MAX_RULES}
+                    addTitle={__("automation.content.add_rule_title")}
+                    addMessage={__("automation.content.add_rule_message")(this.state.tasks.length, options.AUTOMATION_MAX_RULES)}
+                    onAddShow={async () => {
+                        this.setState({
+                            displayed_trigger: AutomationTriggerID.None,
+                            displayed_action: AutomationActionID.None,
+                            displayed_delay: 0,
+                            edit_task: {
+                                trigger: [AutomationTriggerID.None, null],
+                                action: [AutomationActionID.None, null],
+                                delay: 0
+                            }
+                        });
+                    }}
+                    onAddGetChildren={() => this.createSelectors()}
+                    onAddSubmit={async () => {
+                        this.setState({tasks: this.state.tasks.concat([this.state.edit_task])});
+                        this.setDirty(true);
+                    }}
+                    />
+            </ConfigForm>
+        </SubPage>
+    }
+}
+
+export function pre_init() {
+    trigger_plugins = trigger_plugins_pre_init();
+    action_plugins = action_plugins_pre_init();
+}
+
+export function init() {
+    trigger_plugins_init();
+    action_plugins_init();
+}
