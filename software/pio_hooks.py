@@ -24,6 +24,9 @@ env = None
 
 Import("env")
 
+sys.path.insert(0, str(pathlib.Path(env.subst('$PROJECT_DIR')) / 'tools'))
+from bench_confinement import output_plan
+
 FrontendComponent = namedtuple('FrontendComponent', 'module component mode')
 FrontendStatusComponent = namedtuple('FrontendStatusComponent', 'module component')
 
@@ -405,8 +408,12 @@ def collect_translation(path, override=False):
             try:
                 translation[language] = json.loads(content)
             except:
-                with open("/tmp/out.json", "w", encoding='utf-8') as f:
+                import tempfile
+                output_plan(directories=(pathlib.Path(tempfile.gettempdir()),)).revalidate()
+                with tempfile.NamedTemporaryFile(mode='w', prefix='warp-json-error-', suffix='.json',
+                                                 encoding='utf-8', delete=False) as f:
                     f.write(content)
+                    print('JSON error diagnostic:', f.name)
                 print('JSON error in', translation_path)
                 raise
 
@@ -736,7 +743,8 @@ def build_web(js_source_map, css_source_map, no_minify):
     with tfutil.ChangedDirectory(pathlib.Path('web', 'src_tfpp')):
         js_analyze = False
 
-        build_dir = pathlib.Path('..', 'build')
+        build_dir = pathlib.Path(env.subst('$PROJECT_DIR')) / 'web/build'
+        output_plan(roots=(build_dir,)).revalidate()
 
         html_minifier_terser_options = [
             '--collapse-boolean-attributes',
@@ -968,6 +976,14 @@ def handle_build_cache():
         env.CacheDir(build_cache_dir)
 
 def main():
+    project = pathlib.Path(env.subst('$PROJECT_DIR'))
+    output_plan(roots=tuple(project / p for p in ('src', 'web/src', 'web/src_tfpp', 'web/build'))
+                + (pathlib.Path(env.subst('$BUILD_DIR')),),
+                files=tuple(project / p for p in ('generated_files', 'generated_files_v2', 'compile_commands.json',
+                                                  'web/node_modules/tinkerforge.marker',
+                                                  'web/node_modules.digest', 'src/index_html.digest'))
+                + tuple(pathlib.Path(env.subst('$BUILD_DIR')) / p for p in
+                        ('web,node_modules.digest', 'src,index_html.digest'))).revalidate()
     if env.IsCleanTarget():
         remove_all_generated_files()
         return
@@ -1095,7 +1111,7 @@ def main():
     monitor_speed = env.GetProjectOption("monitor_speed")
     nightly = "-DNIGHTLY" in build_flags
 
-    if build:
+    if build and env.GetProjectOption("custom_bench_only", "false") != "true":
         symlinks_to_remove = [
             f'build/{product_id}_firmware_latest.elf',
             f'build/{product_id}_firmware_latest_merged.bin',
@@ -1762,6 +1778,8 @@ def main():
         'build_timestamp': build_timestamp,
     }, separators=(',', ':'))
 
+    output_plan(roots=(pathlib.Path(env.subst('$BUILD_DIR')),),
+                files=(pathlib.Path(env.subst('$BUILD_DIR')) / 'metadata.json',)).revalidate()
     with open(os.path.join(env.subst('$BUILD_DIR'), 'metadata.json'), 'w', encoding='utf-8') as f:
         f.write(metadata)
 
@@ -2114,6 +2132,7 @@ def main():
 
     if env.GetProjectOption('custom_generate_compiledb', 'false') == 'true' and 'compiledb' not in COMMAND_LINE_TARGETS:
         print("Generating compile_commands.json")
+        output_plan(files=(pathlib.Path('compile_commands.json'),)).revalidate()
         subprocess.run(["uv", "run", "pio", "run", "-s", "-e", env.subst('$PIOENV'), "-t", "compiledb"], check=True)
 
         print("Patching compile_commands.json")
@@ -2316,6 +2335,7 @@ def main():
         html = html.replace('<script src=js/bundle.js></script>', '<script>{0}</script>'.format(js))
         html_bytes = html.encode('utf-8')
 
+        output_plan(roots=(pathlib.Path('web/build'),), files=(pathlib.Path('web/build/index.standalone.html'),)).revalidate()
         with open('web/build/index.standalone.html', 'wb') as f:
             f.write(html_bytes)
 

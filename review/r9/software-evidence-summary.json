@@ -1,0 +1,265 @@
+{
+  "schema": 1,
+  "revision": "R9",
+  "status": "IMPLEMENTED; NEW INDEPENDENT ASTRA REVIEW REQUIRED; NOT PUBLICATION APPROVAL",
+  "R8_review": "BLOCK R8 SOURCE-ONLY HANDOFF; Astra session 20261016_092230_dff350",
+  "R8_report_sha256": "79ab1e1d86eb89e7685580994c6524e49bc53c558faea25b1245fe92b1c2daa4",
+  "R6_lifecycle": "supplied APPROVE unchanged; no expansion",
+  "R7_review": "BLOCK unchanged",
+  "base_revision": "a114447c4582456d123a0832eaa2d3ce5dd29f88",
+  "changed_existing_files": [
+    "TESLA_BLE_HANDOFF.md",
+    "TINKERFORGE_REVIEW.md",
+    "software/tools/bench_review_export.py",
+    "software/tools/rebuild_warp4_bench.sh"
+  ],
+  "new_files": [
+    "R9_PACKAGING_HANDOFF.md",
+    "software/tools/bench_confinement.py",
+    "software/tests/tesla_vehicle/test_r9_driver_confinement.py",
+    "software/tests/tesla_vehicle/test_r9_publication.py",
+    "review/r9/verify_publication.py",
+    "review/r9/software-evidence-summary.json",
+    "review/r9/publication-allowlist.json",
+    "review/r9/evidence-receipt.json"
+  ],
+  "findings": {
+    "R8-1": "shared complete export/SDK/evidence/log/ancestor preflight before first mutation; actual-driver sentinels survive with zero rmtree calls",
+    "R8-2": "exact project SDK root; root/ancestors/build/out preflight before either deletion; root/ancestor aliases rejected",
+    "prior_F2_F3_F4": "unchanged implementation; all regressions retained"
+  },
+  "tests": {
+    "driver": 16,
+    "r7_packaging": 17,
+    "r8_packaging": 21,
+    "existing_image": 42,
+    "r8_publication_index": 8,
+    "r9_publication_index_and_ancestry_plan": 12,
+    "iram": 122,
+    "heap_normal": 10,
+    "heap_diagnostic": 10,
+    "host": {
+      "normal": {
+        "preserved_helpers": 18,
+        "native_entries": 51,
+        "focused_executions": 145,
+        "exit": 0
+      },
+      "sanitize": {
+        "preserved_helpers": 18,
+        "native_entries": 51,
+        "focused_executions": 145,
+        "exit": 0
+      }
+    },
+    "counts_overlap_do_not_sum": true
+  },
+  "builds": {
+    "normal": {
+      "firmware.elf": {
+        "sha256": "5bc28bcd3b3d9babb3bfc59d4c15c66255b999ea4d7f2720374587a8cc0f1340",
+        "bytes": 86982820
+      },
+      "firmware.map": {
+        "sha256": "066ebedebe36340ed906618c126abd01080ce6baa502d293de8025f5db906ff2",
+        "bytes": 40055360
+      },
+      "firmware.bin": {
+        "sha256": "7296276aa6c76ab24149652972af15fab7057b77b30ca29c987cda499b5d8367",
+        "bytes": 4712752
+      },
+      "bootloader.bin": {
+        "sha256": "ad07f6e1d1f8298a3dfa67c14687ee3f8e500b48cdc684d37154d88c6e324e27",
+        "bytes": 25136
+      },
+      "clean_build_compiler_cache_disabled": true,
+      "accounting": [
+        "RAM:   [===       ]  25.7% (used 84324 bytes from 327680 bytes)",
+        "Flash: [=======   ]  72.6% (used 4711049 bytes from 6488064 bytes)"
+      ],
+      "stack_observations": {
+        "roots": {
+          "TeslaVehicle::task_entry(void*)": {
+            "configured_bytes": 12288,
+            "discovered_entry_sum_bytes": 10288
+          },
+          "TeslaVehicle::teardown_entry(void*)": {
+            "configured_bytes": 4096,
+            "discovered_entry_sum_bytes": 2832
+          }
+        },
+        "unresolved_indirect_sites": 1176,
+        "complete_static_bound": false
+      }
+    },
+    "diagnostic": {
+      "firmware.elf": {
+        "sha256": "b8f90de35298233356d2248d8766634defc1530f908756023ea61d43ed5ace44",
+        "bytes": 85693512
+      },
+      "firmware.map": {
+        "sha256": "3e6542b3cf1ec60360bfe72fc31cc1a0f77b10eeafa3133c94883f007c2daf91",
+        "bytes": 41264379
+      },
+      "firmware.bin": {
+        "sha256": "84d31fab34649bb4326c38ea0fe0117b82873e22c0a5404ac2566c9e3d26f8b3",
+        "bytes": 4659552
+      },
+      "bootloader.bin": {
+        "sha256": "d929c5c61cf20ba92e81b9cc018492c34ab5ce9141481edffb86ea9a52925112",
+        "bytes": 25136
+      },
+      "clean_build_compiler_cache_disabled": true,
+      "accounting": [
+        "RAM:   [===       ]  25.9% (used 84908 bytes from 327680 bytes)",
+        "Flash: [=======   ]  71.8% (used 4657841 bytes from 6488064 bytes)"
+      ],
+      "stack_observations": {
+        "roots": {
+          "TeslaBleBenchSmoke::task_entry(void*)": {
+            "configured_bytes": null,
+            "discovered_entry_sum_bytes": 3808
+          },
+          "TeslaBleBenchDiscovery::task_entry(void*)": {
+            "configured_bytes": null,
+            "discovered_entry_sum_bytes": 6688
+          },
+          "TeslaVehicle::teardown_entry(void*)": {
+            "configured_bytes": null,
+            "discovered_entry_sum_bytes": 2800
+          }
+        },
+        "unresolved_indirect_sites": 1027,
+        "complete_static_bound": false
+      }
+    }
+  },
+  "diagnostic_export": {
+    "exact_export_files_verified": 9,
+    "report_names_exact_durable_image": true,
+    "independent_reconstructed_stage_validation": true,
+    "image_sha256": "9abc0be9a12913a01ae1b0b03a78cda15fff8a3e5191c2682e374d349099e9d3",
+    "partition_table_offset": 57344,
+    "actual_bootloader_literal": {
+      "function": 1074240140,
+      "literal_address": 1074233856,
+      "offset": 57344
+    },
+    "installable": false,
+    "production_tesla_runtime_present": false,
+    "scope": "diagnostic bench packaging only; normal production packaging remains rejected"
+  },
+  "build_source_binding": {
+    "fresh_diagnostic_identity_matches_current_source_files": 1969,
+    "per_build_generated_output_exceptions": {
+      "software/src/build.cpp": {
+        "fresh_bound_sha256": "114391c441d23d49615e6fdbda5d67e9771c6e7d1fdccce51b548bd643246e40",
+        "host_worktree_sha256": "018dfb7b2546f626c90a16bae16835da0e0d6da58a7d5f0b03253ffa72347edd",
+        "note": "per-build generated output, not source equality; immutable blob is bound and export validation checks it"
+      },
+      "software/src/index_html.digest": {
+        "fresh_bound_sha256": "720180bc159dfb76b5e70cd182dfd1c51d3deb2d30fd6113353ebed339f93679",
+        "host_worktree_sha256": "d8cbc40489d68224d8ffee4f857bf73237dedf9482484c58fd403cd62f14b6c8",
+        "note": "per-build generated output, not source equality; immutable blob is bound and export validation checks it"
+      },
+      "software/src/index_html.embedded.cpp": {
+        "fresh_bound_sha256": "1dcee8223fe29e95ecb7873e878d8b19ecb4c5b6cb318b7047dae530769faaa6",
+        "host_worktree_sha256": "c99945af1c78fc08f0f3141b99ebd3adfa64361845a742811328357cf9749d2d",
+        "note": "per-build generated output, not source equality; immutable blob is bound and export validation checks it"
+      }
+    },
+    "selected_R9_mutation_code": {
+      "software/tools/bench_confinement.py": "052d7ea01eb1b768a4803a95a78ebcca3a32f850c8b213870e00175bc72088f3",
+      "software/tools/bench_review_export.py": "bdbd6709d448ca53793a2c9507014235f13fb0f807f4f6c68a022b9f1a066c1d",
+      "software/tools/rebuild_warp4_bench.sh": "9916f8c188ecd53d85bb924e39a61ec7084aa3c6fed1795b950c21b0ef82b3ff"
+    },
+    "normal_and_diagnostic_tool_sources_frozen_before_clean_builds": true,
+    "scope": "source-input binding check, not proof of hardware execution; no source changes after capture"
+  },
+  "required_gate_exits": {
+    "sdk-summary": 0,
+    "normal-firmware-final": 0,
+    "bench-firmware-final": 0,
+    "normal-current-elf": 0,
+    "bench-current-elf": 0,
+    "iram-current-bench-final": 0,
+    "post-export-readback": 0,
+    "host-normal-final": 0,
+    "host-sanitize-final": 0,
+    "focused-normal": 0,
+    "focused-sanitize": 0,
+    "test_r9_driver_confinement-final": 0,
+    "test_r9_publication-final": 0,
+    "test_r8_publication-final": 0,
+    "test_r8_review_packaging-final": 0,
+    "test_r7_review_packaging-final": 0,
+    "test_iram_bench_image-final": 0,
+    "web-actions": 0,
+    "web-integration": 0,
+    "clean-safety": 0,
+    "production-binding": 0,
+    "shell-syntax": 0,
+    "diff-check-final": 0,
+    "astra-exact-prefix-red": 0,
+    "astra-driver-green": 0,
+    "astra-prior-f1-f4-green": 0,
+    "build-source-binding": 0
+  },
+  "integrity": {
+    "prior_seals": {
+      "r6": {
+        "manifest_sha256": "464828efe10fc0ee34b49c97c07b6c75ff75f091dda09240c7bb2f41c31b08ab",
+        "files_unchanged": 1227,
+        "exact_inventory_and_readonly": true
+      },
+      "r7": {
+        "manifest_sha256": "78629cbe0e2ac04d15b7625e2b149b3b90528537a8c98eaf973a46b09678b895",
+        "files_unchanged": 2277,
+        "exact_inventory_and_readonly": true
+      },
+      "r8": {
+        "manifest_sha256": "589489531362c1b2d5ea153286e6e6920215dd77767ace00eefee46c9b5c7533",
+        "files_unchanged": 5031,
+        "exact_inventory_and_readonly": true
+      }
+    },
+    "astra_tree_entries_unchanged": {
+      "r7": 931,
+      "r8": 1233
+    },
+    "real_index_staging_unchanged": true,
+    "real_index_byte_preservation_exception": {
+      "initial_real_index_sha256": "a74b7a61fdc4173816ecec27199054e3bad56b431be9bfb0e818fd5e84570218",
+      "current_real_index_sha256": "d24f5513141911e4595445fc75907f82598eba36c0c24a126c6b587ec3c5d3aa",
+      "original_index_bytes_preserved": false,
+      "real_index_staged_delta_empty": true,
+      "initial_index_staged_delta_empty": true,
+      "head_unchanged": "187e00a29fd0f39f47db010cec9f832e9f535158",
+      "current_entries_mode_oid_stage_sha256": "59f663684ffcb2facbf2ab34ff7c3b6977175f65ebfc48b13ab021937dd2a522",
+      "exception": "Unintended real-index byte/cache refresh during SDK preparation, before private-index proposal; staged content/modes unchanged. Exact triggering Git invocation not proven. No restoration or real-index staging performed.",
+      "mitigation": "GIT_OPTIONAL_LOCKS=0 for remaining checks/reproduction; private index/object stores for all proposed changes"
+    },
+    "head_unchanged": "187e00a29fd0f39f47db010cec9f832e9f535158"
+  },
+  "red_evidence": {
+    "new_driver_tests": "pre-fix exit 1: 16 tests, 10 failures and 1 missing-helper error; remaining 5 controls passed",
+    "original_astra": "exact immutable probe + pinned pre-fix source exit 0 means RED reproduced; not rewritten into a post-fix test",
+    "green": "separate stronger sentinel/zero-deletion observations on actual corrected entrypoints; unchanged Astra independent_probes.py GREEN",
+    "publication": "R9 tests RED before new verifier existed, GREEN after; local HEAD parent/candidate rejected",
+    "resolved_verification_attempt": "first source-binding comparison included three per-build generated build/UI outputs; production generator locations inspected and outputs explicitly separated from source equality; initial failure retained"
+  },
+  "normal_production_packaging": "BLOCKED: SDK 0x8000 vs WARP4 split 0xe000; expected validator exit 2",
+  "publication": "exact private proposed index from pinned base; sole parent PLAN pinned to base; no candidate commit created or actual ancestry approval",
+  "limitations": [
+    "Exclusive private workspace assumed; not a hostile concurrent rename/mount race or crash-durability proof",
+    "Unintended real-index byte/cache refresh during SDK preparation: staged delta stayed empty and HEAD unchanged; original bytes not preserved; exact invoking command not proven; no restoration/staging performed",
+    "No hardware/serial/LAN/Proxmox/Tesla/Vaultwarden/GitHub/external service access; network-isolated local verification",
+    "No flash, real-index staging, commit, push, publication or release; no hardware-evidence contents intentionally opened/copied; initial unmasked Git status may have traversed directory metadata, so strict zero metadata access cannot be attested",
+    "Diagnostic package NON_INSTALLABLE, lacks production Tesla task; normal production packaging BLOCKED",
+    "Host/sanitizer tests not FreeRTOS/Xtensa concurrency proof; ASan/UBSan not race detectors; host mbedTLS uninstrumented",
+    "Unresolved stack calls remain; stack observations are not complete bounds",
+    "No hardware/resource/RF/vehicle/power-loss/crypto/licensing/upstream/release approval; B/C and two remaining A cold boots NO-GO",
+    "Unchanged upstream development PEM fixtures remain; no literal private-PEM-free claim",
+    "Before publication separately authorized publisher must verify eventual candidate sole-parent and full-tree equality"
+  ]
+}

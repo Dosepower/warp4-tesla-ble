@@ -1,0 +1,414 @@
+{
+  "schema": 1,
+  "revision": "R11",
+  "review_request": "Independent Astra delta review only, not publication approval",
+  "authoritative_review": {
+    "path": "/home/hermes/.hermes/cache/scratch/r10-independent-review-r7hg7fse/R10-independent-review.txt",
+    "sha256": "2db6adf6d540ed61628a361485b703fcf822126f9de3b5ad230cbdcdd21d32c5",
+    "reviewer_index_sha256": "b81c48e1c450da236c657552466d0ef07e2759a21c494b7ef95e5da6b4a517da",
+    "verdict": "BLOCK R10 SOURCE-ONLY HANDOFF"
+  },
+  "changed_paths": [
+    "software/bench_guard_hook.py",
+    "software/bench_image_hook.py",
+    "software/lib-builder/prepare_warp4_bench.py",
+    "software/pio_hooks.py",
+    "software/tests/tesla_vehicle/cleanroom/astra/run_protocol_confirm.py",
+    "software/tests/tesla_vehicle/cleanroom/make_vectors.py",
+    "software/tests/tesla_vehicle/cleanroom/run_test.sh",
+    "software/tests/tesla_vehicle/cleanroom/wire_vectors.py",
+    "software/tests/tesla_vehicle/host/audit_external_publication.py",
+    "software/tests/tesla_vehicle/host/audit_reachable_stack.py",
+    "software/tests/tesla_vehicle/host/build_littlefs_close_harness.py",
+    "software/tests/tesla_vehicle/host/build_target_oom_harness.py",
+    "software/tests/tesla_vehicle/host/run_protocol_test.sh",
+    "software/tests/tesla_vehicle/run_host_tests.sh",
+    "software/tools/bench_build_identity.py",
+    "software/tools/bench_confinement.py",
+    "software/tools/bench_operation_stack.py",
+    "R11_PACKAGING_HANDOFF.md",
+    "software/tests/tesla_vehicle/test_r11_confinement.py",
+    "software/tests/tesla_vehicle/test_r11_publication.py",
+    "review/r11/verify_publication.py",
+    "review/r11/verify_delta_packet.py",
+    "review/r11/software-evidence-summary.json",
+    "review/r11/delta-review-packet.json",
+    "review/r11/publication-allowlist.json",
+    "review/r11/evidence-receipt.json"
+  ],
+  "source_delta_hashes": [
+    {
+      "path": "software/bench_guard_hook.py",
+      "sha256": "3c1e1e0f09f83169353eea161ee6b90a4472c6476ccf0504dda1df43bc81ac92",
+      "bytes": 639,
+      "mode": "100644"
+    },
+    {
+      "path": "software/bench_image_hook.py",
+      "sha256": "993d9bdff6e62396acdb35324d6422e693bfe9e838d61aa1d9125f8af9cd3811",
+      "bytes": 3914,
+      "mode": "100644"
+    },
+    {
+      "path": "software/lib-builder/prepare_warp4_bench.py",
+      "sha256": "07bf0371c77d774ded13ab109ba621ff8bd5e69bc9c319466fffa630a9a8dc4a",
+      "bytes": 7054,
+      "mode": "100644"
+    },
+    {
+      "path": "software/pio_hooks.py",
+      "sha256": "824360d348762ce6f2f8951903ee00b081558b9ea9d29e5c8e15e7275ed96017",
+      "bytes": 100866,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/cleanroom/astra/run_protocol_confirm.py",
+      "sha256": "b3bcc54f7c18f4f75daa0b51cb1238cd91b57c30bcdfe5ee7d120b3a025ff6e0",
+      "bytes": 1496,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/cleanroom/make_vectors.py",
+      "sha256": "69f15645e4cab43687bdc04421b9b04d79d1557b4420c5d9ce4136c6adbb148b",
+      "bytes": 3092,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/cleanroom/run_test.sh",
+      "sha256": "134e817aff7ba5d70f2d3667e5b33286ddcd5fc0f868b728c30eb5d5171eab7c",
+      "bytes": 5870,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/cleanroom/wire_vectors.py",
+      "sha256": "276563f6af942ae57a714801b4e543db6daafa9c5f002d3237b788d79a533854",
+      "bytes": 3182,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/host/audit_external_publication.py",
+      "sha256": "763c387c13bfa31eb81b3ab99e9afc088f4ae4f15a846080e5c1d410286bc9e9",
+      "bytes": 8823,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/host/audit_reachable_stack.py",
+      "sha256": "48987befd13fda70931d9cbee9e9d6c8ea0cb706b4205ab58bfcaf0c6121fd3e",
+      "bytes": 11183,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/host/build_littlefs_close_harness.py",
+      "sha256": "b31f4f7f95bc6508dcbde2072fdf11a8f5d79d103d9188b4361c2ddd40113cbf",
+      "bytes": 3981,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/host/build_target_oom_harness.py",
+      "sha256": "f1b390528c2f42c8059a196c053f440ae2f31341635156e216b50d4c1fd86231",
+      "bytes": 8668,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/host/run_protocol_test.sh",
+      "sha256": "2a2a25a3201f05c675b1728dabac55fd9c9732be2aa755704003549ca5575ae2",
+      "bytes": 3669,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/run_host_tests.sh",
+      "sha256": "d824cc156d523964d770e79143c6ace7e7dc881be5b86b88d85a8685070ef8d9",
+      "bytes": 2011,
+      "mode": "100755"
+    },
+    {
+      "path": "software/tools/bench_build_identity.py",
+      "sha256": "bd560ebd54c5e4b49c3d03416309bdf9ff22e185226577ae78528dd7fcff444d",
+      "bytes": 16288,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tools/bench_confinement.py",
+      "sha256": "c1c26bea5e58c64297580b6c814027bf904c238cc80a9332893c4ca7cb772a7c",
+      "bytes": 10805,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tools/bench_operation_stack.py",
+      "sha256": "731c29f17f1a7b9d77dcc4f771ce8839536a5a4dbd2e91864f92fdc56e41f11a",
+      "bytes": 28733,
+      "mode": "100644"
+    },
+    {
+      "path": "R11_PACKAGING_HANDOFF.md",
+      "sha256": "29f7e0ffe74bf0c22f7e4486041a74f2dcaed259f05906b1c0f3130fef61fe23",
+      "bytes": 10616,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/test_r11_confinement.py",
+      "sha256": "5603a589396219ad0c3d7aa45973121597bf02c689d6d882f1830ebfeb7c25ea",
+      "bytes": 18736,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/test_r11_publication.py",
+      "sha256": "194fef8365c232a6f71397904fa300cab48f2477a2221496b953f04ed249634f",
+      "bytes": 689,
+      "mode": "100644"
+    },
+    {
+      "path": "review/r11/verify_publication.py",
+      "sha256": "ae90bfcdb8770aa93604ec62c80b89c77d28d4454068f69535cc71ef77de2ab7",
+      "bytes": 1962,
+      "mode": "100644"
+    },
+    {
+      "path": "review/r11/verify_delta_packet.py",
+      "sha256": "6b23bb2b76cb0a0248729b23eecb6e50be69df9f38711c4728af12b82ae5722f",
+      "bytes": 3213,
+      "mode": "100644"
+    }
+  ],
+  "generated_summary_sha256": "f88f0a7a78789f921f926662d7797186f40ee81c05e2d6a7c303dac46759a55d",
+  "protected_inventories": [
+    {
+      "kind": "seal",
+      "stage": "r6",
+      "root": "/home/hermes/warp-tesla-ble/software/.pio/production-ui-evidence-lifecycle-r6",
+      "entries": 1319,
+      "inventory_sha256": "7303f1207d1a18f2c0f64ce3822fd190ba9db3eca121269b2c1a9bd6a3612c0b",
+      "manifest_sha256": "464828efe10fc0ee34b49c97c07b6c75ff75f091dda09240c7bb2f41c31b08ab"
+    },
+    {
+      "kind": "seal",
+      "stage": "r7",
+      "root": "/home/hermes/warp-tesla-ble/software/.pio/production-ui-evidence-lifecycle-r7",
+      "entries": 2802,
+      "inventory_sha256": "ffd3f49307537677117d00f5c5d6cb61e0b6ea2008d5ced128498474ce8110ff",
+      "manifest_sha256": "78629cbe0e2ac04d15b7625e2b149b3b90528537a8c98eaf973a46b09678b895"
+    },
+    {
+      "kind": "seal",
+      "stage": "r8",
+      "root": "/home/hermes/warp-tesla-ble/software/.pio/production-ui-evidence-lifecycle-r8",
+      "entries": 5128,
+      "inventory_sha256": "cb05ab4d1687aa8c32e8be9a0f2c4bdc703c5becd28e99aaaf05af199832441a",
+      "manifest_sha256": "589489531362c1b2d5ea153286e6e6920215dd77767ace00eefee46c9b5c7533"
+    },
+    {
+      "kind": "seal",
+      "stage": "r9",
+      "root": "/home/hermes/warp-tesla-ble/software/.pio/production-ui-evidence-lifecycle-r9",
+      "entries": 5174,
+      "inventory_sha256": "5742a5777442192a7b95e4281cedfc8a9926ede3323156670b79b2dc4fd5e2df",
+      "manifest_sha256": "db3745b39f351f755fc9a78003778c1333c2a6b5e61f2b4eaaa0eeae2e3befbb"
+    },
+    {
+      "kind": "seal",
+      "stage": "r10",
+      "root": "/home/hermes/warp-tesla-ble/software/.pio/production-ui-evidence-lifecycle-r10",
+      "entries": 5240,
+      "inventory_sha256": "75272d2bc7d34b1bbcab4264656f5e36305b2cdfaedef7cfb66907b8e668e3af",
+      "manifest_sha256": "6df884f391dfb3e797a8c6cdb9fcb19301c29e93c01325c054e8898f93c9c786"
+    },
+    {
+      "kind": "reviewer-tree",
+      "stage": "r7",
+      "root": "/home/hermes/.hermes/cache/scratch/r7-independent-review-tuwl8ej1",
+      "entries": 1024,
+      "inventory_sha256": "1cca2bdde3211e29355bd2a83fb0b38a5e1f4c6a5a767d17866147bfd80b5d27"
+    },
+    {
+      "kind": "reviewer-tree",
+      "stage": "r8",
+      "root": "/home/hermes/.hermes/cache/scratch/r8-independent-review-sw_nz0cu",
+      "entries": 1546,
+      "inventory_sha256": "636583cfe7a5bd1bd82660dd5472a694669780464c11b83a9bfcaca065656aa1"
+    },
+    {
+      "kind": "reviewer-tree",
+      "stage": "r9",
+      "root": "/home/hermes/.hermes/cache/scratch/r9-independent-review-i6_icb0t",
+      "entries": 2296,
+      "inventory_sha256": "670239fed32b2657c20adaed056f09a351ae7ffde01806b8fb776ef2cfa7c22e"
+    },
+    {
+      "kind": "reviewer-tree",
+      "stage": "r10",
+      "root": "/home/hermes/.hermes/cache/scratch/r10-independent-review-r7hg7fse",
+      "entries": 3525,
+      "inventory_sha256": "5bb53e69a40268aedd3300d1005601e0cf1ed2fda0d0288cab17ed1ac2e06210"
+    }
+  ],
+  "real_index": {
+    "sha256": "a74b7a61fdc4173816ecec27199054e3bad56b431be9bfb0e818fd5e84570218",
+    "entries_sha256": "59f663684ffcb2facbf2ab34ff7c3b6977175f65ebfc48b13ab021937dd2a522",
+    "head": "187e00a29fd0f39f47db010cec9f832e9f535158",
+    "staged_delta_empty_before_and_after": true
+  },
+  "focused_evidence": [
+    {
+      "path": "/home/hermes/warp-tesla-ble/software/.pio/lifecycle-r11-work/exact-astra-red.json",
+      "sha256": "efa2d0d222f7aeae856c21e282ca7f41bed773ea72ca639d30b81a875f5230aa"
+    },
+    {
+      "path": "/home/hermes/warp-tesla-ble/software/.pio/lifecycle-r11-work/sdk-start-probe.py.red.log",
+      "sha256": "75959cd00df23504982eb83b7f34fef8b10baef6e018984c4a937ddde3b01ee3"
+    },
+    {
+      "path": "/home/hermes/warp-tesla-ble/software/.pio/lifecycle-r11-work/hook-matrix.py.red.log",
+      "sha256": "f9762390de995fdfdf8e6306eea4fa06831bf2e100d7e4c4c6f9cd4050721dee"
+    },
+    {
+      "path": "/home/hermes/warp-tesla-ble/software/.pio/lifecycle-r11-work/additional-findings.py.red.log",
+      "sha256": "ca72839bc686ee8d5b4b46a077ba7e76af6409673388008d32e6bc52d4e68e6c"
+    },
+    {
+      "path": "/home/hermes/warp-tesla-ble/software/.pio/lifecycle-r11-work/focused-prefixed-red.log",
+      "sha256": "0cb09bf5485f02dafcadad72f87d55a6bc1a43b20c712621c15e024beca705db"
+    },
+    {
+      "path": "/home/hermes/warp-tesla-ble/software/.pio/lifecycle-r11-work/expanded-r10-baseline-red.log",
+      "sha256": "d5e29f6f58be13b1cf89154f5ac65cff57e9a59b0a3ec0a2437292824bd64e57"
+    },
+    {
+      "path": "/home/hermes/warp-tesla-ble/software/.pio/lifecycle-r11-work/directory-identity-red.log",
+      "sha256": "96d217d4214e44e9db1b3befdb7989b6b2fa41057b3331bc0db029bf1f2bf39a"
+    },
+    {
+      "path": "/home/hermes/warp-tesla-ble/software/.pio/lifecycle-r11-work/focused-green-final.log",
+      "sha256": "d7e71073133bbd882918a5238775f7f8d0f3910219c0a01b5b4d07a37841556f"
+    },
+    {
+      "path": "/home/hermes/warp-tesla-ble/software/.pio/lifecycle-r11-work/sdk-driver-green.json",
+      "sha256": "20caf813a65cf26dde0ccd5e9d4fd82a95a50cb67ae014524bdd2182bb3d94c7"
+    },
+    {
+      "path": "/home/hermes/warp-tesla-ble/software/.pio/lifecycle-r11-work/output-writer-scan.json",
+      "sha256": "ebb7dc0e5577cea40fa9a5f7893ef4b3a53f3573eee0859862181bee48d77078"
+    },
+    {
+      "path": "/home/hermes/warp-tesla-ble/software/.pio/lifecycle-r11-work/artifact-result.json",
+      "sha256": "913babed38636479cfce9a4775d0e71b2dfc785446950b4a541a25f20b475c15"
+    },
+    {
+      "path": "/home/hermes/warp-tesla-ble/software/.pio/lifecycle-r11-work/full-regressions.log",
+      "sha256": "920c684da9c88ec9d2d229db62ef82459c71349a8a04ba19e56e86d3e410f3f8"
+    },
+    {
+      "path": "/home/hermes/warp-tesla-ble/software/.pio/lifecycle-r11-work/host-normal-final.log",
+      "sha256": "153df9dcb468dd16a7c11d5a7387b7a40abf7da230e3a1e2dc59a97dec4eaeaf"
+    },
+    {
+      "path": "/home/hermes/warp-tesla-ble/software/.pio/lifecycle-r11-work/host-sanitize-final.log",
+      "sha256": "fb3931171e12bf4b2dd191627040d32cc801ac0aa85cc99c1ccdcdc4c0c92445"
+    }
+  ],
+  "focused_tests": 16,
+  "full_regression_exits": {
+    "full-regressions": 0,
+    "focused-green-final": 0,
+    "test_r7_review_packaging": 0,
+    "test_r8_review_packaging": 0,
+    "test_r9_driver_confinement": 0,
+    "test_r10_confinement": 0,
+    "test_iram_bench_image": 0,
+    "test_r8_publication": 0,
+    "test_r9_publication": 0,
+    "test_r10_publication": 0,
+    "test_r11_publication": 0,
+    "iram-retained-elf": 0,
+    "web-actions": 0,
+    "web-integration": 0,
+    "clean-safety": 0,
+    "production-binding": 0,
+    "diff-check": 0,
+    "sdk-driver-green": 0,
+    "retained-artifact-validation": 0,
+    "host-normal-final": 0,
+    "host-sanitize-final": 0,
+    "focused-normal": 0,
+    "focused-sanitize": 0,
+    "writer-scan": 0,
+    "exact-astra-r10-red-replay": 0,
+    "prior-f1f4-green": 0,
+    "final-operation-stack": 0,
+    "shell-syntax": 0
+  },
+  "expected_red_exits": {
+    "focused-prefixed-red": 1,
+    "expanded-r10-baseline-red": 1,
+    "original_astra_probes": {
+      "sdk-start-probe.py": {
+        "sha256": "32767386f34a5d89f4ac204aa28f292186b2c2ec2b2d606226d4c4576e6fdc78",
+        "exit": 0,
+        "meaning": "defect-expecting assertions must reproduce unsafe R10 behavior"
+      },
+      "hook-matrix.py": {
+        "sha256": "fd2e9b3064feb12f050e452d22169991ff12d16ed34a0690125f82063547cf17",
+        "exit": 0,
+        "meaning": "defect-expecting assertions must reproduce unsafe R10 behavior"
+      },
+      "additional-findings.py": {
+        "sha256": "e3de623bdc7c7770d85edaa4c78d0d594f728326a4459c324e86e3fd0a8e9712",
+        "exit": 0,
+        "meaning": "defect-expecting assertions must reproduce unsafe R10 behavior"
+      }
+    }
+  },
+  "publication_boundary": {
+    "result": "PASS",
+    "gate_exit": 0,
+    "scope": "Exact source-only private-index preflight; mandatory final receipt/index readback follows. Candidate ancestry is not certified.",
+    "sole_parent_plan": "a114447c4582456d123a0832eaa2d3ce5dd29f88",
+    "candidate_created": false,
+    "strategy": "clean-snapshot",
+    "binaries_private_raw_evidence_excluded": true,
+    "verification": "verify_publication.py --index <private proposed.index> --proposed-parent a114447c4582456d123a0832eaa2d3ce5dd29f88"
+  },
+  "binding_note": "Manifest/receipt/allowlist have detached bindings to avoid recursive self-hashes. This packet is hashed by the allowlist; final receipt binds allowlist and manifest. Recheck exact proposed index after final receipt.",
+  "declared_limits": [
+    "Exclusive-workspace static/substitution checks; no hostile concurrent filesystem/mount defense, arbitrary I/O rollback or crash/power-loss guarantee",
+    "Retained R10 ELF/BIN/SDK are revalidated with current validator; no new R11 firmware/SDK build or source-to-firmware association claimed",
+    "Actual driver safe control uses labelled configure/build-stop fixtures; it proves real begin identity and preflight, not SDK compilation",
+    "Both bench hooks executed with minimal SCons environment; extra pio_hooks main check executes exact AST with clean-return boundary, not full PlatformIO/frontend execution",
+    "Normal packaging remains expected BLOCKED 0x8000 vs 0xe000 (exit 2); diagnostic is NON_INSTALLABLE and lacks production Tesla task",
+    "Host/ASan/UBSan not target FreeRTOS/Xtensa concurrency proof or race detection; host mbedTLS uninstrumented; unresolved stack calls prevent complete bounds",
+    "No hardware/resource/RF/vehicle/power-loss/crypto/licensing/upstream/release qualification; B/C and two remaining A cold boots remain NO-GO",
+    "Historical R9 index-byte/cache change and possible early hardware metadata traversal remain disclosed; later equal hash does not erase them",
+    "Historical R10 namespace-observation harness failures and early unmeasured RED runs remain disclosed; namespace entry observations are not continuous packet auditing",
+    "No candidate commit created; exact sole parent/full-tree ancestry must be verified for any separately authorized eventual candidate",
+    "Historical review reproduction recipes remain immutable historical controls, not current operational entrypoints or approval",
+    "No hardware/serial/LAN/Proxmox/Tesla/Vaultwarden/GitHub/external services, real-index staging, commit/push/publication/release/flash or hardware-evidence content inspection"
+  ],
+  "process_notes": [
+    "First full regression attempt rejected legitimate project/build fixture by overly strict .pio/build-only policy; changed to any proper project descendant, preserving confinement; failure retained",
+    "Second attempt exposed valid ../build/file direct alias control; replaced reject-all-parent-steps with real-directory component validation; exact chained-alias Astra counterexample still preserved; failure retained",
+    "Final hardening propagates unreadable output-tree errors; a concurrent rerun exposed unrelated ancestor directory link-count churn; deterministic RED retained, directories now bind dev/inode/mode while regular-file link-count checks remain unchanged",
+    "Expanded baseline replay may include missing-new-helper errors; initial pre-edit regression and original exact Astra scripts separately establish actual R10 defects",
+    "One read-only delegated scan used gpt-6.1-sol on openai-codex; delegation interface has no worker-profile selector; no provider fallback",
+    "execute_code helper refused unattended execution; no code ran there; deterministic local scripts used instead"
+  ],
+  "R10_baseline_hashes": {
+    "software/bench_guard_hook.py": "a4df70d063255805a1e8f3377cb5d6e79ee23e5eb6cbc5f2487d05049093d288",
+    "software/bench_image_hook.py": "5c24c8e2428d5f00ff299592d2b35bf8608c4516c9fe96e2a2adba6d4a2a5b94",
+    "software/lib-builder/prepare_warp4_bench.py": "dcfde6c84b3b0d6d46671e43be985e6c070be31ca80e90fda9c3720fdc57956e",
+    "software/pio_hooks.py": "16c21880b16596a0cf0f92528880b4ca4f36fedade33650a76a489bc7987ca48",
+    "software/tests/tesla_vehicle/cleanroom/astra/run_protocol_confirm.py": "1be3d0a3ee0fcefad6c91d4ae37b986c1fed25a37f6e9ceccbb5acf393c7efd5",
+    "software/tests/tesla_vehicle/cleanroom/make_vectors.py": "15cd15d1e19e865369a04743d3a50814b9f2c5393271034b138682483dc50264",
+    "software/tests/tesla_vehicle/cleanroom/run_test.sh": "28288279e778ce914b172973c46f7235a90972c28aab9c9147b41a7418445d45",
+    "software/tests/tesla_vehicle/cleanroom/wire_vectors.py": "e8de676bea91d8008d351e2e169ce5cc0e434badaba060114b1fde18fb186068",
+    "software/tests/tesla_vehicle/host/audit_external_publication.py": "dfb34c5f02ea67601c6e49fa61670c0447240f8d83732cb786e6b1a2de695313",
+    "software/tests/tesla_vehicle/host/audit_reachable_stack.py": "067a1d9daef50a0fb0264526d03347956573006f4a3f7271390c16e3f74e78f2",
+    "software/tests/tesla_vehicle/host/build_littlefs_close_harness.py": "e885f1ef114640b9e6a0255e74b78914c2d1f55ce0f3573616b8936ced315290",
+    "software/tests/tesla_vehicle/host/build_target_oom_harness.py": "3b23ffdc65903876a1ea3f940649aac52abbeea72373789d94f27f2108671ca2",
+    "software/tests/tesla_vehicle/host/run_protocol_test.sh": "59542eedfb57bf957999ecb3d7ecde466c65974eb896cb6d056bf34cc20c2a27",
+    "software/tests/tesla_vehicle/run_host_tests.sh": "a8193a1ed93a2380e8c2e072a348f372a354a51901b30d1d79b1757d3e1c96f1",
+    "software/tools/bench_build_identity.py": "4fd047fa12fd4e14f6d179214624384dfcf913948dd76983f55feac0f35fda69",
+    "software/tools/bench_confinement.py": "342561d063fdd35c55d263ec8c98ef69307133198b09a55e8263903e0eabc1e7",
+    "software/tools/bench_operation_stack.py": "000ad5dba3043dfb1b1f4956f68f08dbf01b8f2d98461f76f82c4786da363ef3"
+  },
+  "R10_baseline_copy_root": "/home/hermes/warp-tesla-ble/software/.pio/lifecycle-r11-work/baseline",
+  "sealed_changed_baseline_root": "/home/hermes/warp-tesla-ble/software/.pio/production-ui-evidence-lifecycle-r11/R10-baseline"
+}

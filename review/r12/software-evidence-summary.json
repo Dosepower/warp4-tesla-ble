@@ -1,0 +1,256 @@
+{
+  "revision": "R12",
+  "status": "READY FOR INDEPENDENT BOUNDED ASTRA R12 DELTA REVIEW ONLY; NOT APPROVAL",
+  "changed_runtime_paths": [
+    "software/pio_hooks.py",
+    "software/util.py"
+  ],
+  "new_paths": [
+    "R12_PACKAGING_HANDOFF.md",
+    "software/tests/tesla_vehicle/test_r12_frontend_digest.py",
+    "review/r12/verify_publication.py",
+    "review/r12/verify_delta_packet.py",
+    "review/r12/software-evidence-summary.json",
+    "review/r12/delta-review-packet.json",
+    "review/r12/publication-allowlist.json",
+    "review/r12/evidence-receipt.json"
+  ],
+  "fresh_test_results": {
+    "R12": {
+      "tests": 10,
+      "exit": 0,
+      "result": "PASS"
+    },
+    "R11": {
+      "tests": 16,
+      "exit": 0,
+      "result": "PASS"
+    }
+  },
+  "fresh_gate_exits": {
+    "initialize": 0,
+    "exact-astra-r11-red": 0,
+    "exact-astra-r11-red-replay": 0,
+    "focused-r12": 0,
+    "r11-focused": 0,
+    "changed-path-writer-scan": 0,
+    "web-actions": 0,
+    "web-integration": 0,
+    "diff-check": 0,
+    "shell-syntax": 0
+  },
+  "RED": {
+    "before_runtime_edits": {
+      "tests": 8,
+      "exit": 1,
+      "result": "failures=9, errors=25"
+    },
+    "expanded_baseline_replay": {
+      "tests": 10,
+      "exit": 1,
+      "result": "failures=11, errors=25"
+    },
+    "exact_Astra_probe_exit": 0,
+    "meaning": "original defect-expecting assertions reproduced symlink referent deletion, with hardlink/ordinary controls; original unchanged"
+  },
+  "reused_R11_results": {
+    "source": "immutable R11 result records; unchanged non-delta source/test inputs checked; not rerun",
+    "recorded_gate_exits": {
+      "test_r7_review_packaging": 0,
+      "test_r8_review_packaging": 0,
+      "test_r9_driver_confinement": 0,
+      "test_r10_confinement": 0,
+      "test_iram_bench_image": 0,
+      "test_r8_publication": 0,
+      "test_r9_publication": 0,
+      "test_r10_publication": 0,
+      "test_r11_publication": 0,
+      "iram-retained-elf": 0,
+      "host-normal-final": 0,
+      "host-sanitize-final": 0,
+      "focused-normal": 0,
+      "focused-sanitize": 0,
+      "prior-f1f4-green": 0,
+      "clean-safety": 0,
+      "production-binding": 0,
+      "retained-artifact-validation": 0
+    },
+    "recorded_test_counts": {
+      "test_r7_review_packaging": 17,
+      "test_r8_review_packaging": 21,
+      "test_r9_driver_confinement": 16,
+      "test_r10_confinement": 23,
+      "test_iram_bench_image": 42,
+      "test_r8_publication": 8,
+      "test_r9_publication": 12,
+      "test_r10_publication": 12,
+      "test_r11_publication": 12,
+      "iram-retained-elf": 122
+    },
+    "host_configurations": {
+      "normal": {
+        "exit": 0,
+        "preserved_helpers": 18,
+        "native_entries": 51,
+        "extra_executions": 145
+      },
+      "sanitize": {
+        "exit": 0,
+        "preserved_helpers": 18,
+        "native_entries": 51,
+        "extra_executions": 145
+      }
+    },
+    "packaging": {
+      "diagnostic_full_validation": "PASS, software packaging only",
+      "export_files": 9,
+      "image_sha256": "87e0cd1009f827b652b5e892dcc6fd78231d36ce25e92a6c5271331e51f85ae4",
+      "installable": false,
+      "normal_production_task_symbols": [
+        "_ZN12TeslaVehicle10task_entryEPv"
+      ],
+      "diagnostic_production_task_symbols": [],
+      "bootloader_partition_literal": {
+        "function": 1074240140,
+        "literal_address": 1074233856,
+        "offset": 57344
+      },
+      "component_ranges": [
+        {
+          "name": "bootloader.bin",
+          "start": "0x1000",
+          "end_exclusive": "0x7230",
+          "size": 25136
+        },
+        {
+          "name": "partitions.bin",
+          "start": "0xe000",
+          "end_exclusive": "0xec00",
+          "size": 3072
+        },
+        {
+          "name": "firmware.bin",
+          "start": "0x10000",
+          "end_exclusive": "0x481960",
+          "size": 4659552
+        },
+        {
+          "name": "boot_app0.bin",
+          "start": "0x640000",
+          "end_exclusive": "0x642000",
+          "size": 8192
+        }
+      ],
+      "normal_gate_exit": 2,
+      "normal_gate_message": "bench image validation failed: SDK partition table offset 0x8000 != merged WARP4 offset 0xe000",
+      "mutations": [
+        {
+          "sealed_stage": "r7",
+          "mutation": "zero_tail_4096",
+          "result": "REJECTED",
+          "reason": "application: ELF/BIN unbacked loadable extent 0x50000348..0x50001348"
+        },
+        {
+          "sealed_stage": "r7",
+          "mutation": "invalid_flash_mode",
+          "result": "REJECTED",
+          "reason": "application: unsupported/unpinned flash mode 0xff; DIO header required"
+        },
+        {
+          "sealed_stage": "r7",
+          "mutation": "invalid_flash_frequency",
+          "result": "REJECTED",
+          "reason": "application: unsupported/unpinned flash frequency 0xe; 80m required"
+        },
+        {
+          "sealed_stage": "r8",
+          "mutation": "zero_tail_4096",
+          "result": "REJECTED",
+          "reason": "application: ELF/BIN unbacked loadable extent 0x50000348..0x50001348"
+        },
+        {
+          "sealed_stage": "r8",
+          "mutation": "invalid_flash_mode",
+          "result": "REJECTED",
+          "reason": "application: unsupported/unpinned flash mode 0xff; DIO header required"
+        },
+        {
+          "sealed_stage": "r8",
+          "mutation": "invalid_flash_frequency",
+          "result": "REJECTED",
+          "reason": "application: unsupported/unpinned flash frequency 0xe; 80m required"
+        },
+        {
+          "sealed_stage": "r9",
+          "mutation": "zero_tail_4096",
+          "result": "REJECTED",
+          "reason": "application: ELF/BIN unbacked loadable extent 0x50000348..0x50001348"
+        },
+        {
+          "sealed_stage": "r9",
+          "mutation": "invalid_flash_mode",
+          "result": "REJECTED",
+          "reason": "application: unsupported/unpinned flash mode 0xff; DIO header required"
+        },
+        {
+          "sealed_stage": "r9",
+          "mutation": "invalid_flash_frequency",
+          "result": "REJECTED",
+          "reason": "application: unsupported/unpinned flash frequency 0xe; 80m required"
+        },
+        {
+          "sealed_stage": "r10",
+          "mutation": "zero_tail_4096",
+          "result": "REJECTED",
+          "reason": "application: ELF/BIN unbacked loadable extent 0x50000348..0x50001348"
+        },
+        {
+          "sealed_stage": "r10",
+          "mutation": "invalid_flash_mode",
+          "result": "REJECTED",
+          "reason": "application: unsupported/unpinned flash mode 0xff; DIO header required"
+        },
+        {
+          "sealed_stage": "r10",
+          "mutation": "invalid_flash_frequency",
+          "result": "REJECTED",
+          "reason": "application: unsupported/unpinned flash frequency 0xe; 80m required"
+        }
+      ],
+      "build_identity": "98ba0e422e03051d7b6378bbbb3b2b2738f1fd508a12d09303f7ef3f4531ee6d",
+      "sdk_manifest_sha256": "6a8237b550f27f31b122e25ae8e91478c9318805ddc4b66ff2cd7fb4ab890ff0"
+    }
+  },
+  "digest_pairs": [
+    "web/node_modules.digest",
+    "$BUILD_DIR/web,node_modules.digest",
+    "src/index_html.digest",
+    "$BUILD_DIR/src,index_html.digest"
+  ],
+  "writer_scan_sha256": "764bc93965883bba27e9db524a9fd16befbc91e7c550e1f8fe60b27c5086bfcb",
+  "prior_inventories_unchanged": true,
+  "limits": [
+    "Exact entry/dependency/index_html AST subprocedures and actual digest helpers, not a full PlatformIO/frontend/package process; store registration/third-party writer bounded by scratch observations",
+    "Symlink/dangling digest leaves and shared-inode regular files are rejected; ordinary lexical pairs retain semantics; unsafe ancestry, traversal and project-external output roots refused",
+    "Exclusive-workspace static/substitution checks, not hostile concurrent filesystem/mount defense, arbitrary-I/O rollback or crash durability",
+    "Prior R7-R11 packaging/publication/host/sanitizer/IRAM/F2-F4/safety/binding and retained-artifact results reused by immutable hashes, not rerun; no firmware/SDK rebuild or new source-to-firmware association",
+    "Normal production packaging remains expected exit 2 (SDK 0x8000 vs WARP4 0xe000); diagnostic NON_INSTALLABLE and lacks production Tesla task; retained normal ELF has task",
+    "R6 lifecycle approval unchanged; historical R7/R8/R9/R10/R11 source-only BLOCK verdicts unchanged; no independent R12 approval",
+    "Historical R9 index/cache and possible early hardware metadata exceptions, R10 observation/early-RED qualifications, and R11 intermediate/private-index-cache qualifications remain disclosed; equal current hashes do not erase them",
+    "Host/ASan/UBSan not FreeRTOS/Xtensa concurrency/race proof; host mbedTLS uninstrumented; unresolved stack calls prevent complete bounds",
+    "No hardware/resource/RF/vehicle/power-loss/crypto/licensing/upstream/release qualification; B/C and two remaining A cold boots NO-GO",
+    "No candidate commit created; eventual separately authorized candidate still requires raw sole-parent/full-tree verification against pinned base",
+    "No prohibited services/devices, hardware-evidence contents, flash, real-index staging, commit, push, publication or release; namespace observations are at gate entry, not continuous audit"
+  ],
+  "process_notes": [
+    "Tiny two-file read-only delegated call-site inventory ran gpt-6.1-sol/openai-codex; no worker-profile selector in delegation API and no provider fallback",
+    "File edit tool older syntax checker flagged pre-existing PEP701 nested f-string after line shift; actual runtime parses both baseline/current util.py successfully",
+    "One packet harness attempt included its own actively opened output log as an input hash, causing self-reference failure; removed that self-dependency, retained failed log/ledger; final packet/receipt/readback binds verification without recursion",
+    "Initial pre-fix focused subcases can report follow-on errors after unsafe baseline deletion; exact unchanged Astra probe separately demonstrates exploit and controls"
+  ],
+  "mechanical_gate_exits": {
+    "exact-private-index-preflight-final": 0,
+    "packet-verifier": 0,
+    "mechanical-negative-controls": 0
+  }
+}

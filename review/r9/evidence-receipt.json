@@ -1,0 +1,50 @@
+{
+  "revision": "R9",
+  "manifest_path": "/home/hermes/warp-tesla-ble/software/.pio/production-ui-evidence-lifecycle-r9/manifest.json",
+  "manifest_sha256": "db3745b39f351f755fc9a78003778c1333c2a6b5e61f2b4eaaa0eeae2e3befbb",
+  "content_files": 5070,
+  "source_snapshot_count": 284,
+  "publication_files": 260,
+  "publication_allowlist_sha256": "193180f65efe38d54ef13a5d9e448ff490040f4a7f33943b50c0bb6c7cbb68f1",
+  "diagnostic_image_sha256": "9abc0be9a12913a01ae1b0b03a78cda15fff8a3e5191c2682e374d349099e9d3",
+  "historical_verdicts": "R6 lifecycle APPROVE unchanged; R7/R8 source-only BLOCK unchanged",
+  "R9_status": "new independent Astra review required; no implementer publication approval",
+  "ancestry": "sole proposed snapshot parent pinned to upstream base; no commit created, actual candidate verification still mandatory",
+  "publication": "source-only; binaries excluded; exact private proposed-index readback required",
+  "prior_integrity": {
+    "prior_seals": {
+      "r6": {
+        "manifest_sha256": "464828efe10fc0ee34b49c97c07b6c75ff75f091dda09240c7bb2f41c31b08ab",
+        "files_unchanged": 1227,
+        "exact_inventory_and_readonly": true
+      },
+      "r7": {
+        "manifest_sha256": "78629cbe0e2ac04d15b7625e2b149b3b90528537a8c98eaf973a46b09678b895",
+        "files_unchanged": 2277,
+        "exact_inventory_and_readonly": true
+      },
+      "r8": {
+        "manifest_sha256": "589489531362c1b2d5ea153286e6e6920215dd77767ace00eefee46c9b5c7533",
+        "files_unchanged": 5031,
+        "exact_inventory_and_readonly": true
+      }
+    },
+    "astra_tree_entries_unchanged": {
+      "r7": 931,
+      "r8": 1233
+    },
+    "real_index_staging_unchanged": true,
+    "real_index_byte_preservation_exception": {
+      "initial_real_index_sha256": "a74b7a61fdc4173816ecec27199054e3bad56b431be9bfb0e818fd5e84570218",
+      "current_real_index_sha256": "d24f5513141911e4595445fc75907f82598eba36c0c24a126c6b587ec3c5d3aa",
+      "original_index_bytes_preserved": false,
+      "real_index_staged_delta_empty": true,
+      "initial_index_staged_delta_empty": true,
+      "head_unchanged": "187e00a29fd0f39f47db010cec9f832e9f535158",
+      "current_entries_mode_oid_stage_sha256": "59f663684ffcb2facbf2ab34ff7c3b6977175f65ebfc48b13ab021937dd2a522",
+      "exception": "Unintended real-index byte/cache refresh during SDK preparation, before private-index proposal; staged content/modes unchanged. Exact triggering Git invocation not proven. No restoration or real-index staging performed.",
+      "mitigation": "GIT_OPTIONAL_LOCKS=0 for remaining checks/reproduction; private index/object stores for all proposed changes"
+    },
+    "head_unchanged": "187e00a29fd0f39f47db010cec9f832e9f535158"
+  }
+}

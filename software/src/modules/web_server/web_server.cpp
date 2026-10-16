@@ -629,6 +629,15 @@ esp_err_t WebServer::low_level_handler(httpd_req_t *req)
         }
     }
 
+#if defined(TESLA_BLE_BENCH_ONLY) && TESLA_BLE_BENCH_ONLY && defined(TESLA_BLE_IRAM_DIAGNOSTICS) && TESLA_BLE_IRAM_DIAGNOSTICS
+    // server.on callbacks run on the scheduler owner thread. Credential
+    // verification (users callback awaits that scheduler) must run HERE first,
+    // on the HTTP thread, never recursively inside the dispatched bench handler.
+    constexpr char bench_prefix[] = "/tesla_vehicle/bench_";
+    if (port_handlers->supports_user_authentication && !strncmp(req->uri,bench_prefix,sizeof(bench_prefix)-1)) {
+        server->mark_authenticated_HTTPThread(request);
+    }
+#endif
     const char *uri = req->uri;
     const size_t uri_len = strlen(uri);
     const httpd_method_t method = static_cast<httpd_method_t>(req->method);
@@ -821,9 +830,26 @@ void WebServer::onNotAuthorized_HTTPThread(wshCallback &&callback)
     this->on_not_authorized = std::move(callback);
 }
 
-void WebServer::onAuthenticate_HTTPThread(std::function<bool(WebServerRequest)> &&auth_fn_)
+void WebServer::onAuthenticate_HTTPThread(std::function<bool(WebServerRequest)> &&auth_fn_, std::function<bool(WebServerRequest)> &&strict_fn)
 {
     this->auth_fn = std::move(auth_fn_);
+    this->strict_auth_fn = strict_fn ? std::move(strict_fn) : this->auth_fn;
+}
+
+bool WebServer::authenticate_strict_HTTPThread(WebServerRequest request)
+{
+    if (!auth_fn || !strict_auth_fn) { return false; }
+    const String auth = request.header("Authorization");
+    if (!auth.startsWith("Digest ")) { return false; }
+    const AuthFields fields = parseDigestAuth(auth.substring(7).c_str());
+    // Existing provider callback still verifies the real digest. Additionally
+    // refuse header authentication for any different HTTP request URI.
+    return fields.success && fields.uri.equals(request.uri()) && strict_auth_fn(request);
+}
+
+void WebServer::mark_authenticated_HTTPThread(WebServerRequest &request)
+{
+    request.strict_authenticated = authenticate_strict_HTTPThread(request);
 }
 
 static WebServerHandler **web_server_find_handler_placement(WebServerHandler **handler_target, WebServerSortOrder sort_order, size_t uri_length)

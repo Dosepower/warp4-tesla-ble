@@ -1,0 +1,114 @@
+{
+  "schema": 1,
+  "review": "R6 lifecycle APPROVED per parent; R7 independent review pending, not invoked",
+  "base_revision": "a114447c4582456d123a0832eaa2d3ce5dd29f88",
+  "local_head": "187e00a29fd0f39f47db010cec9f832e9f535158",
+  "host": {
+    "normal": {
+      "preserved_helpers": 18,
+      "native_entries": 51,
+      "module_modes": 81,
+      "posix_modes": 13,
+      "target_semaphore_modes": 13,
+      "R6_ordinary_task_modes": 36,
+      "target_presence_payloads": 48
+    },
+    "sanitize": {
+      "preserved_helpers": 18,
+      "native_entries": 51,
+      "module_modes": 81,
+      "posix_modes": 13,
+      "target_semaphore_modes": 13,
+      "R6_ordinary_task_modes": 36,
+      "target_presence_payloads": 48
+    }
+  },
+  "focused_per_configuration": 145,
+  "packaging": {
+    "new_tests": 17,
+    "existing_tests": 42,
+    "exact_pre_R7_assertion_RED": 6,
+    "exact_pre_R7_passing_controls": 9,
+    "diagnostic_export": {
+      "exact_export_files_verified": 9,
+      "report_names_exact_durable_image": true,
+      "independent_reconstructed_stage_validation": true,
+      "image_sha256": "17fec96995c8f1d45cd9e10333e6876267464712050507a082618391b5f5a0e1",
+      "partition_table_offset": 57344,
+      "actual_bootloader_literal": {
+        "function": 1074240140,
+        "literal_address": 1074233856,
+        "offset": 57344
+      },
+      "installable": false,
+      "production_tesla_runtime_present": false,
+      "scope": "diagnostic bench packaging only; normal production packaging remains rejected"
+    },
+    "normal_production_packaging": "BLOCKED: retained normal SDK 0x8000 vs WARP4 split layout 0xe000; not relabelled",
+    "SDK_provenance_sha256": "8b3403b2289feb4934a03932f0013926f05c4ffedcf72ea6e7de47cfabc0d975",
+    "SDK_input_identity": "5c6c1af6daaf09fbaea4eedc728c78d31d3594c6bd4d49f49116997c8275aaca",
+    "intermediate_export_variant_assertion_RED": 1
+  },
+  "IRAM_bench_tests": 122,
+  "existing_skip": 1,
+  "builds": {
+    "normal": {
+      "ELF_sha256": "7b502b1ff81f0513f1bce00c2b1fe3421b5229ebf6967a702d547cfa720cc39c",
+      "map_sha256": "ef95509a73436b98814d84ee6e3ed4a8c771099f0f4c18d1d3b6b20b38169249",
+      "application_sha256": "b6fa30977ca7b572895602024fbf5e34ce2637049496c56e49bd4c466b9f3cdf",
+      "compiler_cache_disabled": true,
+      "heap_tests": 10,
+      "build_accounting": [
+        "RAM:   [===       ]  25.7% (used 84324 bytes from 327680 bytes)",
+        "Flash: [=======   ]  72.6% (used 4711049 bytes from 6488064 bytes)"
+      ]
+    },
+    "diagnostic_bench": {
+      "ELF_sha256": "952727a121de076cca7a783003c69b522205dc9239e646cb62ed68c837a0bf11",
+      "map_sha256": "332702c63efc427bc53c7307fd54f36c021cc74164402aa646ba27db81627e66",
+      "application_sha256": "0c67c76aae9fb0e56645254b551a00714afffaa0b845622414abd01b1537b7d2",
+      "compiler_cache_disabled": true,
+      "heap_tests": 10,
+      "build_accounting": [
+        "RAM:   [===       ]  25.9% (used 84908 bytes from 327680 bytes)",
+        "Flash: [=======   ]  71.8% (used 4657841 bytes from 6488064 bytes)"
+      ]
+    }
+  },
+  "latest_required_gate_exits": {
+    "sdk-summary": 0,
+    "firmware-summary": 0,
+    "bench-firmware-summary": 0,
+    "host-normal-summary": 0,
+    "host-sanitize-summary": 0,
+    "focused-final": 0,
+    "packaging-green": 0,
+    "packaging-existing-green": 0,
+    "iram-final": 0,
+    "current-elf-final": 0,
+    "bench-current-elf": 0,
+    "source-license-web": 0,
+    "exact-r6-red-replay": 0,
+    "post-export-readback": 0
+  },
+  "prior_evidence_bundles_unchanged": 7,
+  "protected_R6_source_files_unchanged": 80,
+  "upstream_development_fixture_inventory": {
+    "path": "software/src/modules/iso15118/dev_certs.cpp",
+    "sha256": "3f6615e0bf66c47fba1fd4cff2ba01f494461306de70e092f9672603d116f9e4",
+    "upstream_base": "a114447c4582456d123a0832eaa2d3ce5dd29f88",
+    "unchanged_from_upstream": true,
+    "private_key_fixture_count": 2,
+    "classification": "upstream ISO15118 development fixtures; not customer or Tesla credentials"
+  },
+  "limitations": [
+    "No hardware, serial, LAN, Proxmox, Tesla, Vaultwarden, qualified-A or prior hardware-evidence access",
+    "Diagnostic image disables production Tesla runtime; not a production lifecycle bench image",
+    "NON-INSTALLABLE, not for end users, no release; production WARP4 SDK/bootloader/security chain approval remains blocked",
+    "No FreeRTOS/Xtensa/race proof; ASan/UBSan are not race detectors; host mbedTLS archives uninstrumented",
+    "Stack sums retain unresolved indirect calls and are not bounds",
+    "No hardware/runtime-resource, crypto/licensing/upstream, flashable-image or release approval",
+    "B/C and two remaining A cold boots NO-GO",
+    "Upstream ISO15118 development PEM fixtures remain unchanged; not literally PEM-free; no customer/Tesla credentials included"
+  ]
+}

@@ -1,0 +1,218 @@
+{
+  "schema": 1,
+  "revision": "R8",
+  "status": "IMPLEMENTED; NEW INDEPENDENT ASTRA REVIEW REQUIRED; NO PUBLICATION APPROVAL",
+  "R7_review": "BLOCK R7 SOURCE-ONLY HANDOFF; Astra session 20261016_074934_0c8be6",
+  "R6_lifecycle": "supplied APPROVE unchanged; no expansion",
+  "base_revision": "a114447c4582456d123a0832eaa2d3ce5dd29f88",
+  "local_head": "187e00a29fd0f39f47db010cec9f832e9f535158",
+  "changed_existing_files": [
+    "TESLA_BLE_HANDOFF.md",
+    "TINKERFORGE_REVIEW.md",
+    "software/bench_guard_hook.py",
+    "software/bench_image_hook.py",
+    "software/tests/tesla_vehicle/test_iram_bench_image.py",
+    "software/tests/tesla_vehicle/test_r7_review_packaging.py",
+    "software/tools/bench_image_report.py",
+    "software/tools/bench_review_export.py"
+  ],
+  "new_files": [
+    "R8_PACKAGING_HANDOFF.md",
+    "review/r8/verify_publication.py",
+    "review/r8/software-evidence-summary.json",
+    "review/r8/publication-allowlist.json",
+    "review/r8/evidence-receipt.json",
+    "software/tests/tesla_vehicle/test_r8_review_packaging.py",
+    "software/tests/tesla_vehicle/test_r8_publication.py"
+  ],
+  "findings": {
+    "F1": "both targets and all ancestors checked before deletion; external sentinels survive",
+    "F2": "complete loadable range coverage; only exact zero section-length word padding (0..3 bytes)",
+    "F3": "pinned QIO SDK / DIO ROM header / 80m checked",
+    "F4": "injection only at final ordinary.unchecked -> ordinary; reached once and cleanup asserted"
+  },
+  "tests": {
+    "r7_packaging": 17,
+    "r8_packaging": 21,
+    "existing_image": 42,
+    "publication_index": 8,
+    "iram": 122,
+    "heap_current_normal": 10,
+    "heap_current_diagnostic": 10,
+    "host": {
+      "normal": {
+        "preserved_helpers": 18,
+        "native_entries": 51,
+        "focused_executions": 145,
+        "exit": 0
+      },
+      "sanitize": {
+        "preserved_helpers": 18,
+        "native_entries": 51,
+        "focused_executions": 145,
+        "exit": 0
+      }
+    },
+    "counts_overlap_do_not_sum": true
+  },
+  "builds": {
+    "normal": {
+      "firmware.elf": {
+        "bytes": 86982820,
+        "sha256": "96032e0da912fbb0a99e64496d9c46b81fe7dcd93d1273dd11a597dba9d151dc"
+      },
+      "firmware.map": {
+        "bytes": 40055360,
+        "sha256": "fb84336c10a16dddb56af2131e8fbb3803503eec759fcd717c99b6fb1693e992"
+      },
+      "firmware.bin": {
+        "bytes": 4712752,
+        "sha256": "1ce692eed15e1d39b5163b4d478d3cd69f23387d9a713e5c59c70534714aeff4"
+      },
+      "bootloader.bin": {
+        "bytes": 25136,
+        "sha256": "ad07f6e1d1f8298a3dfa67c14687ee3f8e500b48cdc684d37154d88c6e324e27"
+      },
+      "clean_build_compiler_cache_disabled": true,
+      "accounting": [
+        "RAM:   [===       ]  25.7% (used 84324 bytes from 327680 bytes)",
+        "Flash: [=======   ]  72.6% (used 4711049 bytes from 6488064 bytes)"
+      ],
+      "stack_observations": {
+        "roots": {
+          "TeslaVehicle::task_entry(void*)": {
+            "configured_bytes": 12288,
+            "discovered_entry_sum_bytes": 10288
+          },
+          "TeslaVehicle::teardown_entry(void*)": {
+            "configured_bytes": 4096,
+            "discovered_entry_sum_bytes": 2832
+          }
+        },
+        "unresolved_indirect_sites": 1176,
+        "complete_static_bound": false
+      }
+    },
+    "diagnostic": {
+      "firmware.elf": {
+        "bytes": 85693512,
+        "sha256": "9dc1d4d6c56c48b0d05701d09e762440113839c9dd3494533cc56255d1edd808"
+      },
+      "firmware.map": {
+        "bytes": 41264379,
+        "sha256": "343cb9956d78394cf18850a57094dcc1b273da432a7a2da1ddb70a25d1da6ba0"
+      },
+      "firmware.bin": {
+        "bytes": 4659552,
+        "sha256": "55329827f2978f08d521bb9e1b23bd5251da5c1739f8e313bc0dd41a6eacebba"
+      },
+      "bootloader.bin": {
+        "bytes": 25136,
+        "sha256": "ded09b33ffe53c4548787cf461d5af69e2ba504e3b66278fb428d5e2fe2e53df"
+      },
+      "clean_build_compiler_cache_disabled": true,
+      "accounting": [
+        "RAM:   [===       ]  25.9% (used 84908 bytes from 327680 bytes)",
+        "Flash: [=======   ]  71.8% (used 4657841 bytes from 6488064 bytes)"
+      ],
+      "stack_observations": {
+        "roots": {
+          "TeslaBleBenchSmoke::task_entry(void*)": {
+            "configured_bytes": null,
+            "discovered_entry_sum_bytes": 3808
+          },
+          "TeslaBleBenchDiscovery::task_entry(void*)": {
+            "configured_bytes": null,
+            "discovered_entry_sum_bytes": 6688
+          },
+          "TeslaVehicle::teardown_entry(void*)": {
+            "configured_bytes": null,
+            "discovered_entry_sum_bytes": 2800
+          }
+        },
+        "unresolved_indirect_sites": 1027,
+        "complete_static_bound": false
+      }
+    }
+  },
+  "build_source_binding": {
+    "normal_production_task_present": true,
+    "diagnostic_production_task_absent": true,
+    "final_R8_packaging_sources_bound_before_diagnostic_compilation": true,
+    "build_identity": "6073e4e0201741cf5a81d3480506429215d6f082c0c3c2e2a868141be6b778ca",
+    "normal_elf_sha256": "96032e0da912fbb0a99e64496d9c46b81fe7dcd93d1273dd11a597dba9d151dc",
+    "diagnostic_elf_sha256": "9dc1d4d6c56c48b0d05701d09e762440113839c9dd3494533cc56255d1edd808"
+  },
+  "diagnostic_export": {
+    "exact_export_files_verified": 9,
+    "report_names_exact_durable_image": true,
+    "independent_reconstructed_stage_validation": true,
+    "image_sha256": "0e4a024855d8e78502251997cc92b50ab3059230193320bb55e0b44d5ba5a66c",
+    "partition_table_offset": 57344,
+    "actual_bootloader_literal": {
+      "function": 1074240140,
+      "literal_address": 1074233856,
+      "offset": 57344
+    },
+    "installable": false,
+    "production_tesla_runtime_present": false,
+    "scope": "diagnostic bench packaging only; normal production packaging remains rejected"
+  },
+  "normal_production_packaging": "BLOCKED: SDK 0x8000 vs split WARP4 0xe000; expected validator exit 2",
+  "red_evidence": {
+    "initial_pre_fix_new_tests": "exit 1; 15 test methods; 20 assertion failures (including subtests) and 2 direct-target rmtree errors",
+    "exact_pre_fix_replay": "exit 1; exact baseline production files mounted read-only; current fixture/config harness only",
+    "original_astra_probes": "pre-fix reproduced acceptance/deletion; originals unchanged",
+    "F4": "old unconditional-rename patch reaches firmware.elf, not publication; corrected targeted test GREEN",
+    "resolved_verification_attempts": [
+      "first diagnostic clean: SCons lacks __file__; added RED test then fixed env-based tools path",
+      "first full IRAM: wrong normal ELF lacks diagnostic operation roots; rerun against fresh diagnostic ELF",
+      "publication executable-mode regression RED then exact indexed modes checked",
+      "first export reconstruction omitted the required source/package overlay and could not resolve bound input blobs; rerun with original build overlays mounted"
+    ]
+  },
+  "required_gate_exits": {
+    "sdk-summary": 0,
+    "normal-firmware-final": 0,
+    "bench-firmware-final": 0,
+    "host-normal-final": 0,
+    "host-sanitize-final": 0,
+    "focused-normal": 0,
+    "focused-sanitize": 0,
+    "r7_review_packaging-final": 0,
+    "r8-packaging-final": 0,
+    "iram_bench_image-final": 0,
+    "publication-final": 0,
+    "iram-current-bench-final": 0,
+    "web-actions": 0,
+    "web-integration": 0,
+    "clean-safety": 0,
+    "production-binding": 0,
+    "normal-current-elf": 0,
+    "bench-current-elf": 0,
+    "post-export-readback": 0,
+    "astra-final": 0,
+    "diff-check-final": 0
+  },
+  "integrity": {
+    "prior_sealed_files_unchanged": 3504,
+    "astra_files_unchanged": 931,
+    "prior_manifests": {
+      "r6": "464828efe10fc0ee34b49c97c07b6c75ff75f091dda09240c7bb2f41c31b08ab",
+      "r7": "78629cbe0e2ac04d15b7625e2b149b3b90528537a8c98eaf973a46b09678b895"
+    }
+  },
+  "SDK_provenance_sha256": "19c59bbef3cc76e19adbf6d8beecf355d6507fe64f838ba834177a0f1c4e2850",
+  "publication": "exact source-only proposed alternate Git index verified after sealing; no real-index changes, commits or publication",
+  "limitations": [
+    "No hardware, serial, LAN, Proxmox, Tesla, Vaultwarden, GitHub or external service access; offline namespaces",
+    "Diagnostic image lacks production Tesla task; NON_INSTALLABLE, no production lifecycle qualification",
+    "Normal production packaging remains BLOCKED; no binary publication",
+    "ASan/UBSan not race detectors; no FreeRTOS/Xtensa concurrency proof; host mbedTLS uninstrumented",
+    "Stack observations retain unknown indirect calls; not complete bounds",
+    "No hardware/runtime-resource, RF, vehicle, power-loss, crypto, licensing, upstream or release approval",
+    "B/C and two remaining A cold boots NO-GO",
+    "Unchanged upstream ISO15118 development PEM fixtures remain; not literally private-PEM-free",
+    "Confinement assumes exclusive private workspace; not a hostile concurrent-filesystem race proof"
+  ]
+}

@@ -1,0 +1,1546 @@
+{
+  "schema": 2,
+  "base_revision": "a114447c4582456d123a0832eaa2d3ce5dd29f88",
+  "local_head": "187e00a29fd0f39f47db010cec9f832e9f535158",
+  "publication_recommendation": "source-only after NEW independent Astra review; implementer does not approve publication",
+  "source_test_docs": [
+    {
+      "path": "R6_EVIDENCE_CORRECTION.md",
+      "sha256": "0d692021b2d1f22af69d0d3bd858a5c8d38e7930213de518275058fcccb5b361",
+      "bytes": 1610,
+      "mode": "100644"
+    },
+    {
+      "path": "R7_PACKAGING_HANDOFF.md",
+      "sha256": "fe0ee1d788b1c36591e225cf7ef15b1d30c70e6c55fedc0dad9f21a17788a904",
+      "bytes": 8894,
+      "mode": "100644"
+    },
+    {
+      "path": "R8_PACKAGING_HANDOFF.md",
+      "sha256": "f900dbe767ea06b35c73b61408d51e59a84494c06cc90e2b29584a7fd11cfec5",
+      "bytes": 7661,
+      "mode": "100644"
+    },
+    {
+      "path": "TESLA_BLE_HANDOFF.md",
+      "sha256": "370600e57304e76841bf4781e7877e1502784883d6ed2bb3640c40d48f990528",
+      "bytes": 8047,
+      "mode": "100644"
+    },
+    {
+      "path": "TINKERFORGE_REVIEW.md",
+      "sha256": "7caa6d54dc0185bc6f51d9da16ce5699e432617f8dc4731f4cca53a5254182ef",
+      "bytes": 4431,
+      "mode": "100644"
+    },
+    {
+      "path": "review/r7/evidence-receipt.json",
+      "sha256": "c1c32ad69cd8c98e18624ca71e2e2f5fc42c9404074ab228da51566c27535bbd",
+      "bytes": 587,
+      "mode": "100644"
+    },
+    {
+      "path": "review/r7/publication-allowlist.json",
+      "sha256": "9033c973edff7b6f706c35019648ce199e0f72fca6f8b3338df8b1d18ec6a495",
+      "bytes": 48228,
+      "mode": "100644"
+    },
+    {
+      "path": "review/r7/reproduce.sh",
+      "sha256": "253671ee924a276503e4baf8168372359386845c28d8746d5db03557ae0c6d8c",
+      "bytes": 1904,
+      "mode": "100644"
+    },
+    {
+      "path": "review/r7/software-evidence-summary.json",
+      "sha256": "7598ed48062af31b4041684b98b658a0313f3efbd7d698cd1cbefbf735716cea",
+      "bytes": 4832,
+      "mode": "100644"
+    },
+    {
+      "path": "review/r7/verify_publication.py",
+      "sha256": "97886e971fb93119aef60d56734d0e6ca2dadb068c49614d993faa7f8e45d0ea",
+      "bytes": 1097,
+      "mode": "100644"
+    },
+    {
+      "path": "review/r8/verify_publication.py",
+      "sha256": "5809b25b7d7237d0ebaf64ac660a7acb170c345a883e9e554b6c71cf3702500a",
+      "bytes": 5280,
+      "mode": "100644"
+    },
+    {
+      "path": "software/bench_guard_hook.py",
+      "sha256": "a4df70d063255805a1e8f3377cb5d6e79ee23e5eb6cbc5f2487d05049093d288",
+      "bytes": 709,
+      "mode": "100644"
+    },
+    {
+      "path": "software/bench_image_hook.py",
+      "sha256": "5c24c8e2428d5f00ff299592d2b35bf8608c4516c9fe96e2a2adba6d4a2a5b94",
+      "bytes": 3793,
+      "mode": "100644"
+    },
+    {
+      "path": "software/lib-builder/defconfig.esp32ethernetbrick",
+      "sha256": "87065c82248cc9da5e43155f02d018f15b0ecc70b370a033ce8d6d82a5094b40",
+      "bytes": 10321,
+      "mode": "100644"
+    },
+    {
+      "path": "software/lib-builder/defconfig.esp32ethernetbrick.ble-minimal",
+      "sha256": "92120f6d198d63bb3c43cdabb96babaa8aca8b325654f60951934fe21dc3e174",
+      "bytes": 962,
+      "mode": "100644"
+    },
+    {
+      "path": "software/lib-builder/defconfig.warp4-ble-bench",
+      "sha256": "c42cfcb0a4759658a950fb6d92e6ea2718c7bc6b107eb2e83f834b29c171338a",
+      "bytes": 1330,
+      "mode": "100644"
+    },
+    {
+      "path": "software/lib-builder/prepare_warp4_bench.py",
+      "sha256": "dcfde6c84b3b0d6d46671e43be985e6c070be31ca80e90fda9c3720fdc57956e",
+      "bytes": 6782,
+      "mode": "100644"
+    },
+    {
+      "path": "software/lib/TeslaBLEClean/LICENSE",
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+      "bytes": 11358,
+      "mode": "100644"
+    },
+    {
+      "path": "software/lib/TeslaBLEClean/NOTICE",
+      "sha256": "c05f44da2bdbb89888e5c56139a6115dcb092cc87354077a180b604ea5468e96",
+      "bytes": 375,
+      "mode": "100644"
+    },
+    {
+      "path": "software/lib/TeslaBLEClean/PROVENANCE.md",
+      "sha256": "3f5df0848f170b849d31210108712ca112e5cb0e6fe60a4aa0b277976e1146f6",
+      "bytes": 17253,
+      "mode": "100644"
+    },
+    {
+      "path": "software/lib/TeslaBLEClean/README.md",
+      "sha256": "8aba2c8dbe2f2df70711ce7997d5fe2d88080d1e1aeffd1b26dcefb365bfa520",
+      "bytes": 14512,
+      "mode": "100644"
+    },
+    {
+      "path": "software/lib/TeslaBLEClean/include/tesla_clean/authentication.hpp",
+      "sha256": "941bcb9ccb81503dde7bdc461069db355e79c535abbda1d6a62fce180fe31c28",
+      "bytes": 3067,
+      "mode": "100644"
+    },
+    {
+      "path": "software/lib/TeslaBLEClean/include/tesla_clean/charge_state.hpp",
+      "sha256": "12fc6c215c029325e0f0103fca825aa1d1759d03d2037c77f166cb90d88eb96a",
+      "bytes": 737,
+      "mode": "100644"
+    },
+    {
+      "path": "software/lib/TeslaBLEClean/include/tesla_clean/framing.hpp",
+      "sha256": "5dbff233fc9431ee915a232f8a50e27d2e52b536f1b5740286ce38f10cd23cb4",
+      "bytes": 883,
+      "mode": "100644"
+    },
+    {
+      "path": "software/lib/TeslaBLEClean/include/tesla_clean/identity.hpp",
+      "sha256": "0c1dbb862091178cbe90dd4c7a0c8bd03ae0ee59a5d5f6b0dd29d8912344a1cf",
+      "bytes": 2441,
+      "mode": "100644"
+    },
+    {
+      "path": "software/lib/TeslaBLEClean/include/tesla_clean/key.hpp",
+      "sha256": "1a9008fbea29a824dbca35513ea4d75a9003103f5f64dd477bfcf2ee9960c46f",
+      "bytes": 834,
+      "mode": "100644"
+    },
+    {
+      "path": "software/lib/TeslaBLEClean/include/tesla_clean/messages.hpp",
+      "sha256": "4acd19ee4390504095d8bac639b48e033c719dcdc76cfeaf9787e2505b534056",
+      "bytes": 1103,
+      "mode": "100644"
+    },
+    {
+      "path": "software/lib/TeslaBLEClean/include/tesla_clean/metadata.hpp",
+      "sha256": "1114169ff271059240625c18f17b22f85fcc8046c1bab3ccdbeaf5a47bcf5e94",
+      "bytes": 702,
+      "mode": "100644"
+    },
+    {
+      "path": "software/lib/TeslaBLEClean/include/tesla_clean/protobuf.hpp",
+      "sha256": "c4d5540e0d7e9365ef07e5f8c6d1c8188557f3e406973df0229ef07afe35368f",
+      "bytes": 3209,
+      "mode": "100644"
+    },
+    {
+      "path": "software/lib/TeslaBLEClean/include/tesla_clean/replay.hpp",
+      "sha256": "80222e56b4b03bd0785d32383bcbb1a828767cf51e0d4a748ced4d95360f0f36",
+      "bytes": 1062,
+      "mode": "100644"
+    },
+    {
+      "path": "software/lib/TeslaBLEClean/include/tesla_clean/response.hpp",
+      "sha256": "3b5efb02aae7bcbe16b553dc212dc84b8babf20bf302b394464a5503cda84b71",
+      "bytes": 2080,
+      "mode": "100644"
+    },
+    {
+      "path": "software/lib/TeslaBLEClean/include/tesla_clean/session_crypto.hpp",
+      "sha256": "eb1ec2fe4c2aa8c97ba60ee666b5b2a2fb807850894f8eca0614a31f51287ba0",
+      "bytes": 862,
+      "mode": "100644"
+    },
+    {
+      "path": "software/lib/TeslaBLEClean/include/tesla_clean/session_info.hpp",
+      "sha256": "cfbaf1e2cea23f19afc727323e6a371b743f655b2db8f25c7985f56e43c01a66",
+      "bytes": 768,
+      "mode": "100644"
+    },
+    {
+      "path": "software/lib/TeslaBLEClean/include/tesla_clean/session_wire.hpp",
+      "sha256": "ad82f72fb10dc6d636097ca0a9571dd5a7c390a78fdb43329a8f88107504cf50",
+      "bytes": 890,
+      "mode": "100644"
+    },
+    {
+      "path": "software/lib/TeslaBLEClean/include/tesla_clean/storage.hpp",
+      "sha256": "ce36cedce2503ef5b95a1aa446d39adf4ed41512adfac3fd8d452152b7e1a71d",
+      "bytes": 2382,
+      "mode": "100644"
+    },
+    {
+      "path": "software/lib/TeslaBLEClean/include/tesla_clean/support.hpp",
+      "sha256": "6f2f3c9530f98c9617fb12cb826c287babff73799cc03bb3dcfcde6017f699b4",
+      "bytes": 4394,
+      "mode": "100644"
+    },
+    {
+      "path": "software/lib/TeslaBLEClean/include/tesla_clean/vcsec.hpp",
+      "sha256": "dd20658ca44611fda2e4f7de117d4e8d689df92a11618e857711a3a70349aac6",
+      "bytes": 976,
+      "mode": "100644"
+    },
+    {
+      "path": "software/lib/TeslaBLEClean/include/tesla_clean/vehicle.hpp",
+      "sha256": "26c1a09af22afb3793f4af7a0ee4fbe77d0d8c8444ef7bef942997e04a875bca",
+      "bytes": 5643,
+      "mode": "100644"
+    },
+    {
+      "path": "software/lib/TeslaBLEClean/library.json",
+      "sha256": "9dd39d711af7e2ebfe5e82aad15ad5382c3084a5bd6d766e5cc7af3001c81591",
+      "bytes": 255,
+      "mode": "100644"
+    },
+    {
+      "path": "software/lib/TeslaBLEClean/src/authentication.cpp",
+      "sha256": "23b254810053cc9d6d84576a9478d10834e8fb7a5b2ab83a1bebb6391e1e5bab",
+      "bytes": 9122,
+      "mode": "100644"
+    },
+    {
+      "path": "software/lib/TeslaBLEClean/src/charge_state.cpp",
+      "sha256": "215331f0688673b1858e0ccb5aeabaf0841db7c2bec49299d7ecc11ec32fc6e3",
+      "bytes": 3728,
+      "mode": "100644"
+    },
+    {
+      "path": "software/lib/TeslaBLEClean/src/framing.cpp",
+      "sha256": "211c2f41ca470db85b8d1f6b181e25b2891dbcb56b824e823564f67d21d01dde",
+      "bytes": 2525,
+      "mode": "100644"
+    },
+    {
+      "path": "software/lib/TeslaBLEClean/src/identity.cpp",
+      "sha256": "1211aef2eb3dfde0da8a5afd01ed71b5d599d7ab98c85d33b6a4eb0a243237c1",
+      "bytes": 5562,
+      "mode": "100644"
+    },
+    {
+      "path": "software/lib/TeslaBLEClean/src/key.cpp",
+      "sha256": "1247889c01c03a7e51f0f371a5e4d7d417222ce67bb0eae0e6a1f9066eff6dc5",
+      "bytes": 5073,
+      "mode": "100644"
+    },
+    {
+      "path": "software/lib/TeslaBLEClean/src/messages.cpp",
+      "sha256": "7fb6f7743a1864d2eed39eb7fd4d05ed54df782c68adc38080f0bddfc6341983",
+      "bytes": 7032,
+      "mode": "100644"
+    },
+    {
+      "path": "software/lib/TeslaBLEClean/src/metadata.cpp",
+      "sha256": "29ad33df9cb66ed4ea20044b838718f0337e1b7b9f8a452b17f58d1ff9d1a21a",
+      "bytes": 1616,
+      "mode": "100644"
+    },
+    {
+      "path": "software/lib/TeslaBLEClean/src/response.cpp",
+      "sha256": "bf428d9dcff8b8037339129abfd9a81d1610366d7354a67fc62041adc0ec5999",
+      "bytes": 3631,
+      "mode": "100644"
+    },
+    {
+      "path": "software/lib/TeslaBLEClean/src/session_crypto.cpp",
+      "sha256": "76e72bd6f2eba42dec8afd35d2b3b6c59623944915fc4e84a3f9cd15972b5f6f",
+      "bytes": 3864,
+      "mode": "100644"
+    },
+    {
+      "path": "software/lib/TeslaBLEClean/src/session_info.cpp",
+      "sha256": "e9809758506b211fda91ac048d2abafb7a3fff434570cd7b1160bbf1205be545",
+      "bytes": 5094,
+      "mode": "100644"
+    },
+    {
+      "path": "software/lib/TeslaBLEClean/src/session_wire.cpp",
+      "sha256": "682756cc4fd8ef7ed4973b437b09d41bb861a7a0079f7ab9b3ca4737a7d66a5c",
+      "bytes": 4266,
+      "mode": "100644"
+    },
+    {
+      "path": "software/lib/TeslaBLEClean/src/vcsec.cpp",
+      "sha256": "e9ee247296849e2936fd3ccefeffafda6ba9901340933f60d96f41b96bd6570d",
+      "bytes": 4151,
+      "mode": "100644"
+    },
+    {
+      "path": "software/lib/TeslaBLEClean/src/vehicle.cpp",
+      "sha256": "7d2794d367c4285a7bd0d3ef353667519354314e853c6ec71a4c10e1629e2c81",
+      "bytes": 18316,
+      "mode": "100644"
+    },
+    {
+      "path": "software/patches/lib-builder/esp-idf/0009-heap-Add-MALLOC_CAP_IRAM-reserve-regions-for-manual-.patch",
+      "sha256": "1b2350607235cc5b07a36bb1db5c5d7d0fb9f64060eb28d36bdcd95f63673a12",
+      "bytes": 5272,
+      "mode": "100644"
+    },
+    {
+      "path": "software/pio_hooks.py",
+      "sha256": "16c21880b16596a0cf0f92528880b4ca4f36fedade33650a76a489bc7987ca48",
+      "bytes": 99568,
+      "mode": "100644"
+    },
+    {
+      "path": "software/src/config.cpp",
+      "sha256": "89455e6079cd5d5dedac19be826a66ab90c7ab515e340a927a5e7df1386fb6f9",
+      "bytes": 34255,
+      "mode": "100644"
+    },
+    {
+      "path": "software/src/config.h",
+      "sha256": "da7c1cfc7cd1e17477f0b059e92677365bd0df2e64204d4727e4c02286e66172",
+      "bytes": 41778,
+      "mode": "100644"
+    },
+    {
+      "path": "software/src/digest_auth.cpp",
+      "sha256": "bed62fcf6629975b72111d8e6c82b61e5d7f4dd832f1879c3b4ca35780a412b2",
+      "bytes": 7993,
+      "mode": "100644"
+    },
+    {
+      "path": "software/src/modules/api/api.cpp",
+      "sha256": "76c7c67724e4f7fb980e0045e2f4de6f218530859bc8799f43931f5a2d2497aa",
+      "bytes": 42769,
+      "mode": "100644"
+    },
+    {
+      "path": "software/src/modules/coredump/coredump.cpp",
+      "sha256": "e2ff4ca8cd876e73f78a155139180754a12c8f33a8f28cea0cc58e0b1acea909",
+      "bytes": 9588,
+      "mode": "100644"
+    },
+    {
+      "path": "software/src/modules/debug/debug.cpp",
+      "sha256": "3b3b66ca3825cb0223bdefa98dc40f6774e24df85e2710ce8ef90a78417068d3",
+      "bytes": 60716,
+      "mode": "100644"
+    },
+    {
+      "path": "software/src/modules/esp32_common/esp32_common.cpp",
+      "sha256": "3ecd8a3bb36651314f082153418db6922dab6874b6983c4359f37f45bfdaacfc",
+      "bytes": 28031,
+      "mode": "100644"
+    },
+    {
+      "path": "software/src/modules/ev/ev.cpp",
+      "sha256": "1cf78541c2c21f03d6cba120bd696d07cdb68bd9d6e065d3affc78aa4f69a84b",
+      "bytes": 17044,
+      "mode": "100644"
+    },
+    {
+      "path": "software/src/modules/ev/ev.h",
+      "sha256": "9140b0da5de8ba81651c4056c07d974701a45c1d056ae828e43d2c639be97ddd",
+      "bytes": 3540,
+      "mode": "100644"
+    },
+    {
+      "path": "software/src/modules/ev/ev_session_generation.h",
+      "sha256": "71880b86953afdc1dec3d5c6a9abe4bc8111f35d048eb26863cb3de331f848b4",
+      "bytes": 431,
+      "mode": "100644"
+    },
+    {
+      "path": "software/src/modules/meters_iso15118/EV Data Source.uint8.enum",
+      "sha256": "c2cb2738594309bcde343a324fbc6dfbdc2523990627d84c8f22d2c88bbaf04d",
+      "bytes": 30,
+      "mode": "100644"
+    },
+    {
+      "path": "software/src/modules/tesla_vehicle/module.ini",
+      "sha256": "bb6180fd5767708575eee2e069911c75e95234c3f72b33d8a4380e45ed72c680",
+      "bytes": 118,
+      "mode": "100644"
+    },
+    {
+      "path": "software/src/modules/tesla_vehicle/tesla_ble_bench_admission.h",
+      "sha256": "da2377ca95dfbb3f43d74335cae9f4bee2361597d834d285c538638eb30c7903",
+      "bytes": 507,
+      "mode": "100644"
+    },
+    {
+      "path": "software/src/modules/tesla_vehicle/tesla_ble_bench_discovery.cpp",
+      "sha256": "a69a4a2e4f848e69550ffd50f3ed26f00344f56a570cea75e4e69a826f53dc04",
+      "bytes": 36393,
+      "mode": "100644"
+    },
+    {
+      "path": "software/src/modules/tesla_vehicle/tesla_ble_bench_discovery.h",
+      "sha256": "a46e15aa775c7cb38cf1650dc1f5328dc88bc4010a2641ed8c93212776661e8d",
+      "bytes": 5367,
+      "mode": "100644"
+    },
+    {
+      "path": "software/src/modules/tesla_vehicle/tesla_ble_bench_discovery_api.cpp",
+      "sha256": "40f0063e51c042b653ad9100e81a19318b7159e4ff8b59fe8f443d3567cc664a",
+      "bytes": 16202,
+      "mode": "100644"
+    },
+    {
+      "path": "software/src/modules/tesla_vehicle/tesla_ble_bench_pair_disk.cpp",
+      "sha256": "29ef3c445ffc0862c8367c50667edd25d810d3c33efbc5b453e8f40345d7b0e2",
+      "bytes": 6246,
+      "mode": "100644"
+    },
+    {
+      "path": "software/src/modules/tesla_vehicle/tesla_ble_bench_pair_disk.h",
+      "sha256": "d5527d146cf6981f46dbe1f4d939d39a0c8e02f9eea918a15035a583f7f11d45",
+      "bytes": 461,
+      "mode": "100644"
+    },
+    {
+      "path": "software/src/modules/tesla_vehicle/tesla_ble_bench_pairing.cpp",
+      "sha256": "0f1b6628e7a79e8521e38a8c7aedf6532f24f886ef637ec3bf7507f73f349e8b",
+      "bytes": 9683,
+      "mode": "100644"
+    },
+    {
+      "path": "software/src/modules/tesla_vehicle/tesla_ble_bench_pairing.h",
+      "sha256": "2e68b5e0090a50d5e41ec633be9372b22dde764cf0656fec46b313250e399999",
+      "bytes": 3198,
+      "mode": "100644"
+    },
+    {
+      "path": "software/src/modules/tesla_vehicle/tesla_ble_bench_record.h",
+      "sha256": "c86b999c8ec3901a51a7130404a0f5021b277328eaf7f22dcade837775445abf",
+      "bytes": 619,
+      "mode": "100644"
+    },
+    {
+      "path": "software/src/modules/tesla_vehicle/tesla_ble_bench_smoke.cpp",
+      "sha256": "99ee5984abcd7a85a6b5a130911153e0725bcaa943f203f80964526c46f952bd",
+      "bytes": 9439,
+      "mode": "100644"
+    },
+    {
+      "path": "software/src/modules/tesla_vehicle/tesla_ble_bench_smoke.h",
+      "sha256": "bb21ab433549be084a5b71f94b41ffc4e871018f0f8e88c2143bf1c505ef26a0",
+      "bytes": 2109,
+      "mode": "100644"
+    },
+    {
+      "path": "software/src/modules/tesla_vehicle/tesla_ble_bench_smoke_api.cpp",
+      "sha256": "db6952559c6ac939465f08853eebe4435cfe59b9cb83821eab9a815779c16476",
+      "bytes": 4430,
+      "mode": "100644"
+    },
+    {
+      "path": "software/src/modules/tesla_vehicle/tesla_ble_clean_platform.h",
+      "sha256": "c76614d3ceb1f1714c13d55024f6b88c8a74343f4a9c40c08fcaaa8c9cf1c4ba",
+      "bytes": 2387,
+      "mode": "100644"
+    },
+    {
+      "path": "software/src/modules/tesla_vehicle/tesla_ble_command_outcome.h",
+      "sha256": "25649c1b74cab4fe464d1eb4c2b57a793d7f91169539a8241ea339f3acd7cb79",
+      "bytes": 10335,
+      "mode": "100644"
+    },
+    {
+      "path": "software/src/modules/tesla_vehicle/tesla_ble_config_policy.h",
+      "sha256": "11789d7e19dea5f2d3868ebbcc3470950a12faf06f886e9c2a8f21c8220f5a82",
+      "bytes": 488,
+      "mode": "100644"
+    },
+    {
+      "path": "software/src/modules/tesla_vehicle/tesla_ble_gatt.cpp",
+      "sha256": "30cd489f7f6b068d3b03dafdefdc24e0eaf90154f57202241759c74536dd3dca",
+      "bytes": 15333,
+      "mode": "100644"
+    },
+    {
+      "path": "software/src/modules/tesla_vehicle/tesla_ble_iram_diagnostics.cpp",
+      "sha256": "8cc5d8f6a74d61b8121be67c45540c59e7783facfd10000fee794a015fcfb8e5",
+      "bytes": 4995,
+      "mode": "100644"
+    },
+    {
+      "path": "software/src/modules/tesla_vehicle/tesla_ble_iram_diagnostics.h",
+      "sha256": "3232eaacbb104333edfae5fb847d3f0d4ad3cb04aed9c64631778db7c77d4178",
+      "bytes": 445,
+      "mode": "100644"
+    },
+    {
+      "path": "software/src/modules/tesla_vehicle/tesla_ble_key_command.h",
+      "sha256": "cc564399f6fc06e8d569c7bd2e2cdc6a19bc974ac5f91838bd065342e866792f",
+      "bytes": 894,
+      "mode": "100644"
+    },
+    {
+      "path": "software/src/modules/tesla_vehicle/tesla_ble_key_validation.h",
+      "sha256": "93fa383b1a3e87f38a0d3aeb9d667f761c43799d7b64cc94a9dd454816097521",
+      "bytes": 674,
+      "mode": "100644"
+    },
+    {
+      "path": "software/src/modules/tesla_vehicle/tesla_ble_operation.h",
+      "sha256": "fec15c6024abd519a50308c2ac0a7ba4f06ae1393be33b5e6a0499d09fb00a4f",
+      "bytes": 4951,
+      "mode": "100644"
+    },
+    {
+      "path": "software/src/modules/tesla_vehicle/tesla_ble_pairing_policy.h",
+      "sha256": "4b4f45c026e24a7838ccfdc229537d98cf568e3791621248aeae988300665c70",
+      "bytes": 1264,
+      "mode": "100644"
+    },
+    {
+      "path": "software/src/modules/tesla_vehicle/tesla_ble_presence.h",
+      "sha256": "c8b875d30981a505425577d6ae7e6a1fbe27730dc85970e4ed6df4c4d764333f",
+      "bytes": 873,
+      "mode": "100644"
+    },
+    {
+      "path": "software/src/modules/tesla_vehicle/tesla_ble_result.h",
+      "sha256": "3ee766fbe0101cf51397db77465df047809704b9eec4a48e4e7b88cf51989772",
+      "bytes": 9394,
+      "mode": "100644"
+    },
+    {
+      "path": "software/src/modules/tesla_vehicle/tesla_ble_runtime.h",
+      "sha256": "c02ee2980af69ecbe46b73be9c88e7103e0f594eff166d41811db3413061b2ac",
+      "bytes": 7914,
+      "mode": "100644"
+    },
+    {
+      "path": "software/src/modules/tesla_vehicle/tesla_ble_soc_policy.h",
+      "sha256": "91d1c7954bdbc87b15b0e237bc77836298c42339221237c29bfbb6f312f13c05",
+      "bytes": 2813,
+      "mode": "100644"
+    },
+    {
+      "path": "software/src/modules/tesla_vehicle/tesla_ble_storage.cpp",
+      "sha256": "26eff62bf6f731a92d9f568c736bae04bb482cca07d3ab138f8c1dc4fa1464fc",
+      "bytes": 9562,
+      "mode": "100644"
+    },
+    {
+      "path": "software/src/modules/tesla_vehicle/tesla_ble_storage.h",
+      "sha256": "80f2d752f9249d19c8bd4677bc4fb1e1287e62bda5d65298723d3efeeb236a61",
+      "bytes": 1241,
+      "mode": "100644"
+    },
+    {
+      "path": "software/src/modules/tesla_vehicle/tesla_ble_storage_io.h",
+      "sha256": "3a31b9fb566176d87128dfc46ac27d27aeed22df438ffed318d5e8a25ac07f12",
+      "bytes": 4870,
+      "mode": "100644"
+    },
+    {
+      "path": "software/src/modules/tesla_vehicle/tesla_ble_transport.cpp",
+      "sha256": "8f8f0279956b98e47f2c0555a12fb1920ade27e68c4ffc53d1425f6e1aa7424b",
+      "bytes": 1040,
+      "mode": "100644"
+    },
+    {
+      "path": "software/src/modules/tesla_vehicle/tesla_ble_transport.h",
+      "sha256": "165210b6bd0884bce0b343ca7ed8c45ab6eee5cfedcccab918a0da1893c44271",
+      "bytes": 368,
+      "mode": "100644"
+    },
+    {
+      "path": "software/src/modules/tesla_vehicle/tesla_ble_uuid.h",
+      "sha256": "199e4ebf2c0bebd4e9063fe2b8b56522b3a3fc8333669fb7ef0ba747e063f082",
+      "bytes": 505,
+      "mode": "100644"
+    },
+    {
+      "path": "software/src/modules/tesla_vehicle/tesla_ble_validation.h",
+      "sha256": "e05018ca11dd758b983e2a667b4f811faae845fac9b209f022acabcddc5c9095",
+      "bytes": 861,
+      "mode": "100644"
+    },
+    {
+      "path": "software/src/modules/tesla_vehicle/tesla_vehicle.cpp",
+      "sha256": "0b0c14d284e2a1ff642f69c3dd1d11a85a0d5e6b97d07d038350e286875e8df2",
+      "bytes": 55337,
+      "mode": "100644"
+    },
+    {
+      "path": "software/src/modules/tesla_vehicle/tesla_vehicle.h",
+      "sha256": "ba6b892e5d53428ec98bc309edd0973b8916716fd24133e6d5caf201e0361202",
+      "bytes": 8115,
+      "mode": "100644"
+    },
+    {
+      "path": "software/src/modules/users/users.cpp",
+      "sha256": "23b672592772db1f096df60f7e331e83970b2474e2494bccc3479be278e84950",
+      "bytes": 32949,
+      "mode": "100644"
+    },
+    {
+      "path": "software/src/modules/web_server/web_server.cpp",
+      "sha256": "10e4b028dbb6e8f5172202c48ea932f5378af94d2e51a8ad527c80dccea3629a",
+      "bytes": 51580,
+      "mode": "100644"
+    },
+    {
+      "path": "software/src/modules/web_server/web_server.h",
+      "sha256": "4fd7db8b4f2eb80c739b8b71e973bfd0f98512ce8274d81d0cd915eedb131994",
+      "bytes": 12284,
+      "mode": "100644"
+    },
+    {
+      "path": "software/src/tools/malloc.h",
+      "sha256": "3e3bfd8f8a8ecda1f0269a3abd1b678e76182fe45bfb47b4b513b9b8a7aef4f7",
+      "bytes": 8052,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/cleanroom/astra/protocol_probe_confirm.cpp",
+      "sha256": "a54624a05903a12772d4fca44eb6814b5d464dbf363cd1f52c231bfa49ce3b45",
+      "bytes": 6414,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/cleanroom/astra/run_protocol_confirm.py",
+      "sha256": "1be3d0a3ee0fcefad6c91d4ae37b986c1fed25a37f6e9ceccbb5acf393c7efd5",
+      "bytes": 1346,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/cleanroom/controller_fixture.hpp",
+      "sha256": "9040ca048a2132797dd4c85d591fec6396283f0d76ab255565fc05a9975490c8",
+      "bytes": 10981,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/cleanroom/make_vectors.py",
+      "sha256": "15cd15d1e19e865369a04743d3a50814b9f2c5393271034b138682483dc50264",
+      "bytes": 2935,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/cleanroom/run_suite.sh",
+      "sha256": "73670c1544e3d5175af83e114a22d58360598e2ba5df483d39d70d712f7a966f",
+      "bytes": 3930,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/cleanroom/run_test.sh",
+      "sha256": "28288279e778ce914b172973c46f7235a90972c28aab9c9147b41a7418445d45",
+      "bytes": 5619,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/cleanroom/target_ports/freertos/FreeRTOS.h",
+      "sha256": "9c033a77b9aa56d2c943ee231cce2e89599967d284b6efcd876a6b75e621204e",
+      "bytes": 406,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/cleanroom/target_ports/freertos/semphr.h",
+      "sha256": "98cf8214a9b6ab7dffce1ee46ebf20fa4193205de09c0e1480463114d57b012c",
+      "bytes": 870,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/cleanroom/target_sync/freertos/FreeRTOS.h",
+      "sha256": "415798dc24ed61f987c81504bfb5b8bde90938ae105d809be39f4571422380a7",
+      "bytes": 148,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/cleanroom/target_sync/freertos/semphr.h",
+      "sha256": "1f015fe50e3e558246d99c13d9f96561def6d28b98ee7d285c3345e5db6ee5aa",
+      "bytes": 569,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/cleanroom/target_sync/platform.h",
+      "sha256": "8ca2e20061705d2310c78dca4bea408b0b3629735187581271e2054b6acb69cf",
+      "bytes": 302,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/cleanroom/test_acceptance_schedules.cpp",
+      "sha256": "5cc771b09be7527cbf39ebf36897b344f437f0b8fbe080fe292bffc049da19b8",
+      "bytes": 6633,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/cleanroom/test_astra_faults.cpp",
+      "sha256": "e63a7e84e7d019310a7edd87ba571b55c80e77ece3ef2bbd66078b6fbd8304e6",
+      "bytes": 3396,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/cleanroom/test_astra_protocol.cpp",
+      "sha256": "70da241b8710a9babef57ea49b62a09ff1beadc69b42677d4871b4e750611b8c",
+      "bytes": 489,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/cleanroom/test_authentication.cpp",
+      "sha256": "d4904436aa9d02143e2d9c8c9c9a3f9a547b9dd06833f934fcd924de128bccbe",
+      "bytes": 8177,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/cleanroom/test_callback_capture.cpp",
+      "sha256": "38042c01304f0ea9bbdc4385846995103ff7ea4dcc32b6b2444e4a2d3080f8d9",
+      "bytes": 1122,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/cleanroom/test_charge_state.cpp",
+      "sha256": "e375c40d340768c9b4ba41a3e7da36367fad91af2936e1eaf5eb8a3d8665372b",
+      "bytes": 5011,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/cleanroom/test_checked_callback.cpp",
+      "sha256": "c1333e2ce1eedac06b1daec122ac3398e76550a6594e03a9e08bea4ef616fe78",
+      "bytes": 2051,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/cleanroom/test_checked_mutex.cpp",
+      "sha256": "e0c7fae7c6aec685c7262d453644f5ed12b345f0c050d7df533d90ba8a7d3894",
+      "bytes": 1708,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/cleanroom/test_command_session_update.cpp",
+      "sha256": "d25a843cb53baaa977be11b96014656ac1301b247598f2cdad7df0e05e6df594",
+      "bytes": 12350,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/cleanroom/test_faults.cpp",
+      "sha256": "61ff19b6e1e15647edd378307709e83189e2f5a729cfea3f1fb22ba77c80ec52",
+      "bytes": 5824,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/cleanroom/test_framing.cpp",
+      "sha256": "3ae8fd9eecb6cbcac093ee0a2ddb9a683ffacc0ffb7ba536fbcda3d91b86bc57",
+      "bytes": 3927,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/cleanroom/test_identity.cpp",
+      "sha256": "89f04fbd8947c47828a9d07edff32855ec3573a7f2af68f618bfb46cc922d1f3",
+      "bytes": 6913,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/cleanroom/test_identity_auth.cpp",
+      "sha256": "0275694aeba56ee2adfd1adcd3b44f3fbe5e1469f828bbb76997d8cc218a4acf",
+      "bytes": 2342,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/cleanroom/test_inner_admission.cpp",
+      "sha256": "e5964b0eeaa2182b8b619cb402a89b782a88e7b267b98d12078cb07cafd35219",
+      "bytes": 1584,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/cleanroom/test_key.cpp",
+      "sha256": "5eb9112e7e304cd8c399eeabfadefde1d168565703d70e32f99281d112050aa6",
+      "bytes": 3460,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/cleanroom/test_key_schedules.cpp",
+      "sha256": "7e57f7f3c0d4b2f023efc054bc3f53551cbdf512610e0f565f31c7260ec215a6",
+      "bytes": 4809,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/cleanroom/test_lifecycle_faults.cpp",
+      "sha256": "4c007bf5a193f84846db81f07c8084f364544977b4ad6489a111a584982f6fc8",
+      "bytes": 5496,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/cleanroom/test_message_defaults.cpp",
+      "sha256": "5346ce8847e42c1e51d1d5fa75f098a4c5727b09dd3e3bd4f2ef58fa305e9f41",
+      "bytes": 1524,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/cleanroom/test_messages.cpp",
+      "sha256": "0ff0c24e1c5edfcc0f3ac2302a8d814cb62db58e0006307eccb629cc0c2a504b",
+      "bytes": 4910,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/cleanroom/test_metadata.cpp",
+      "sha256": "ceef16b9e2dbfa2676aa78f17a450000c036039712ae0e5e2a3044e6a1f4d49c",
+      "bytes": 2070,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/cleanroom/test_optional_completion.cpp",
+      "sha256": "2278c14ec441e8148416a8b9a989574994bd467b409f0ed4af50102932f49022",
+      "bytes": 2477,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/cleanroom/test_production_binding.py",
+      "sha256": "eed76597124d428bd5fcbaa4db871977d4e99c96f204cacb9c30e42b43aa7255",
+      "bytes": 1057,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/cleanroom/test_replacement_reviews.cpp",
+      "sha256": "4f4e20ce03a4e233483bd22c550098eb1051b842ec176c14244a3fa8af30b437",
+      "bytes": 4489,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/cleanroom/test_replay.cpp",
+      "sha256": "3b498124b2dbc76413bc82722f1694462e299eb7e83753ea865c4bf949736832",
+      "bytes": 1493,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/cleanroom/test_request_replay_scope.cpp",
+      "sha256": "ad7290856e9a1ba3fc869ecb9bde8ffd3c02b6473d27d767a79b129e890db6db",
+      "bytes": 3960,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/cleanroom/test_response.cpp",
+      "sha256": "0f1d6ce27fb10be211a9606bd737f2a6542bd29e21ddb0927fec0893c562947b",
+      "bytes": 3730,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/cleanroom/test_safety.py",
+      "sha256": "f7c0629be25749f46a21bd1f981275310ca4f257a20ea941c9ce23faeb23685e",
+      "bytes": 2003,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/cleanroom/test_session_crypto.cpp",
+      "sha256": "9846931322960d9a1933bbc0794c31104387176e2091c390d3487593bdbcca50",
+      "bytes": 3358,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/cleanroom/test_session_info.cpp",
+      "sha256": "f2613a428979f6e77fcf7a857d7acb93eb66b2d5f8029572a52f603a4eb1f1b5",
+      "bytes": 4118,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/cleanroom/test_session_update.cpp",
+      "sha256": "2d180d30b6acd3887aab51a70848862c71fa3c986b665401d82a62e5909a08b0",
+      "bytes": 4687,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/cleanroom/test_session_wire.cpp",
+      "sha256": "97e5bfaab96a0fcf32c94eceb700876e792e2658145b1a3d56d24b9324a68fbb",
+      "bytes": 3945,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/cleanroom/test_storage_port.cpp",
+      "sha256": "5c1ac6fddf379140e4c51de86e33f5a76e1d5aae7f0c323bc809e95d65977824",
+      "bytes": 3692,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/cleanroom/test_vcsec.cpp",
+      "sha256": "f3a3325f8ef43db6c31bc10999d5143ef46eea36a18616fcae6349ed0efb3f88",
+      "bytes": 3045,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/cleanroom/test_vehicle.cpp",
+      "sha256": "0152e026df05314c4aa5a6ec14eff584d638b3ea19089c57c943d10b6c1b2bc6",
+      "bytes": 3615,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/cleanroom/test_vehicle_faults.cpp",
+      "sha256": "4a1b8df2176027d4a944ccef9a40aa9888df8f42ab351b14e831dc2b4fdea330",
+      "bytes": 4845,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/cleanroom/test_vehicle_lifecycle.cpp",
+      "sha256": "50e0f98b82c382093d21208d5ce46dd2f59f7b13782023b31817a6cf71bf826a",
+      "bytes": 5659,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/cleanroom/test_vehicle_policy.cpp",
+      "sha256": "427a65c6975bdb5936addf59552ebb70835234b323b0fed164b7ac7d1ebf1a35",
+      "bytes": 3990,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/cleanroom/test_vehicle_recovery.cpp",
+      "sha256": "f162561fb3e256f52587651ef88bb3de5c51f8ef4af84bc4a9a2805cf1f7dd56",
+      "bytes": 5489,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/cleanroom/test_warp_adapters.cpp",
+      "sha256": "d39c00a95f8ce0fceb50ca0cbd91070aa2a66f2b7b03b463298e7d6d1a663feb",
+      "bytes": 2908,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/cleanroom/test_warp_iram_diagnostics.cpp",
+      "sha256": "daeb5fdf99c6b27ea8c46292c0b85269f206efc2066d4825f93c1fcc5695a714",
+      "bytes": 3629,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/cleanroom/test_warp_littlefs.cpp",
+      "sha256": "1c1bc139a13fe6a6f485cd65709cd4dc50f29636a11238264ba0ac577ad906b3",
+      "bytes": 3060,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/cleanroom/test_warp_module.cpp",
+      "sha256": "33da935f6a9143c819298b37ee777087b4e487b41513be4b202d3a9c46d70b45",
+      "bytes": 34365,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/cleanroom/test_warp_module_posix.cpp",
+      "sha256": "8af29e579d73be6af04dce588fde93eb6b56d68ee464440db0e8c7b042e74ee7",
+      "bytes": 6822,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/cleanroom/test_warp_no_wrap.cpp",
+      "sha256": "2409c8b7d559b9633217f56676c170c9b7344cc820f14cab121019670f9754f5",
+      "bytes": 1305,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/cleanroom/test_warp_presence_oom.cpp",
+      "sha256": "361adda6f3fee212bf400f2f1ece2f6edae877e1d9f9c9659e0fbf90fae3d8be",
+      "bytes": 1537,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/cleanroom/test_warp_r6.cpp",
+      "sha256": "e5e07da4440fd046bd6ec922229e6e61ec7725e9a93e38ab7d1a21c7cc69b8e8",
+      "bytes": 738,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/cleanroom/test_warp_r6_posix.cpp",
+      "sha256": "0c59e80d89bae12c006daac20b80b6af42ab55323cf945403f87be2c9ccacf06",
+      "bytes": 139,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/cleanroom/test_warp_r6_sync.cpp",
+      "sha256": "3af6a355dd23e25de39e206ffeeb2f0b3060335ce5ccb475240d8bc3360b16f8",
+      "bytes": 140,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/cleanroom/test_warp_storage_faults.cpp",
+      "sha256": "bebed9ffdf083dcae35e2e096774a1fe61dfbc1974521f1a3e996767f2c88ec9",
+      "bytes": 11523,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/cleanroom/test_warp_target_mutex.cpp",
+      "sha256": "dabb999c8781631187b1a9712ef7c148cdeaf5e854f61ce109830f4376ad0a03",
+      "bytes": 1100,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/cleanroom/test_warp_target_sync.cpp",
+      "sha256": "668efe3ed8f3c091eacb46f59aacdbc6a5663b85221ef875a7a640931ad0da3e",
+      "bytes": 443,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/cleanroom/test_warp_target_text.cpp",
+      "sha256": "e506ea430a9b07cadf336d8cf2739ea2f1e84f45511d73c72030038800854322",
+      "bytes": 2075,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/cleanroom/test_warp_target_validation.cpp",
+      "sha256": "2337ffa6c96cd72856168fea3b092e69261422cc0a158326277c3c88cdaf9719",
+      "bytes": 3813,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/cleanroom/vectors.hpp",
+      "sha256": "5d98dfa021f88ba571053ec35f2d5e6d975e97cf28d26ef27b68122f820238e7",
+      "bytes": 3512,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/cleanroom/warp_module_contracts.inc",
+      "sha256": "5cc5331e3083d58ce917065973e4dcc2f97a6337b3a54fab138dd0a82fa0a05d",
+      "bytes": 11880,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/cleanroom/warp_ui_contracts.inc",
+      "sha256": "e9df3efccd6430dc2ec4c289a282bed1f8871bc15a6d882bcdc582092875f98d",
+      "bytes": 2952,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/cleanroom/warp_ui_interleavings.inc",
+      "sha256": "ed847c86d54adab6c73c2f945d128a325d13cb9975c1c97a3b3c39f960298f38",
+      "bytes": 9927,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/cleanroom/warp_ui_r2_interleavings.inc",
+      "sha256": "6c90bdb4dfa21d292a631ec2403961c2b6cea28b2d61aae7f40f3d911374e11e",
+      "bytes": 7287,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/cleanroom/warp_ui_r3_interleavings.inc",
+      "sha256": "30c7a1ae09381a87693632998cfd861722fad4b268d7edec9c45f042bc753cfa",
+      "bytes": 7440,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/cleanroom/warp_ui_r4_interleavings.inc",
+      "sha256": "ac1d70d30a0a6a24212784a94cf6253ddce26c57908ad18e07d93e7fef5a7d86",
+      "bytes": 8163,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/cleanroom/warp_ui_r5_interleavings.inc",
+      "sha256": "c282f177b38d68c20e869b1fce6f9159868bc483ebc4784e29329a5e88bf90ad",
+      "bytes": 8763,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/cleanroom/warp_ui_r6_interleavings.inc",
+      "sha256": "6dfccf8689f04de660d5594a9010d30c6ed356654a36291612f9567c3d51c151",
+      "bytes": 9112,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/cleanroom/wire_vectors.hpp",
+      "sha256": "8cd7ca8b9edebf37e7b597c2c3928d4ad8019fbc41bacce374fedf76491b571d",
+      "bytes": 3556,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/cleanroom/wire_vectors.py",
+      "sha256": "e8de676bea91d8008d351e2e169ce5cc0e434badaba060114b1fde18fb186068",
+      "bytes": 3025,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/host/LittleFS.h",
+      "sha256": "12c4a7a0b6515ba0033097ce7d2cae45d905e1b2670ded71ef3d5c1d812fee3b",
+      "bytes": 4318,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/host/allocation_probe.h",
+      "sha256": "3aada48a9c636b6d5ac4eded2330fdbe5c9a57423697913ea1ad661948e8afa4",
+      "bytes": 4139,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/host/audit_external_publication.py",
+      "sha256": "dfb34c5f02ea67601c6e49fa61670c0447240f8d83732cb786e6b1a2de695313",
+      "bytes": 8660,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/host/audit_reachable_stack.py",
+      "sha256": "067a1d9daef50a0fb0264526d03347956573006f4a3f7271390c16e3f74e78f2",
+      "bytes": 11031,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/host/build_littlefs_close_harness.py",
+      "sha256": "e885f1ef114640b9e6a0255e74b78914c2d1f55ce0f3573616b8936ced315290",
+      "bytes": 3824,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/host/build_module_validation_harness.py",
+      "sha256": "8effeed785dcc354cab39aadaf942edc7b05a4eaac47c28e3d64e28c6651171e",
+      "bytes": 5668,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/host/build_target_oom_harness.py",
+      "sha256": "3b23ffdc65903876a1ea3f940649aac52abbeea72373789d94f27f2108671ca2",
+      "bytes": 8511,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/host/littlefs_close_device.inc",
+      "sha256": "f082f58b1a6745fa8fa4c7842ddc1c5fe801f9905cd69b5e9cf7a5b3d18c34d8",
+      "bytes": 4819,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/host/littlefs_close_support.h",
+      "sha256": "c32e306980e58be33304ae1f4e5e0136c566d8cb5683304e03413d10f7905035",
+      "bytes": 1441,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/host/module_platform.h",
+      "sha256": "146b26e2a4f160a6eeeb4b8e3b52b15efc5f5ae688aa8ba479f790a7f39b785f",
+      "bytes": 13258,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/host/review5_controls.inc",
+      "sha256": "63c03b0cae92dec644e8d681786ac92241a1115baa39084e094beb899175f777",
+      "bytes": 8704,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/host/review5_recovery.inc",
+      "sha256": "747a46fa39a5a14751dc7e8e2b1ff30500afac0593e113e9b7f09f6d0dc2f66a",
+      "bytes": 11594,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/host/run_protocol_test.sh",
+      "sha256": "59542eedfb57bf957999ecb3d7ecde466c65974eb896cb6d056bf34cc20c2a27",
+      "bytes": 3483,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/host/sync_fault_probe.h",
+      "sha256": "66620c99fc136019a576b5075d7b4e419fa189b5b7d2e47afe53e2d4ed9bb25d",
+      "bytes": 3431,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/host/test_api_permanent_allocation.cpp",
+      "sha256": "7bb7965e62d25e819c3529bf193ea7c10b2afc18495ce355f08dd017d2231e64",
+      "bytes": 8934,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/run_host_tests.sh",
+      "sha256": "a8193a1ed93a2380e8c2e072a348f372a354a51901b30d1d79b1757d3e1c96f1",
+      "bytes": 1756,
+      "mode": "100755"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/test_iram_bench_discovery.py",
+      "sha256": "8073c76232a85ed3727c8f33ed77b8af89b863d0e67b65641f49e72ab09f26e7",
+      "bytes": 40728,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/test_iram_bench_discovery_api.py",
+      "sha256": "00e87533589e5be4e99594adfe4321b79867e302a14b68cf5e6264a1020ce6e0",
+      "bytes": 12877,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/test_iram_bench_http_auth.py",
+      "sha256": "2a4391b1815a4d57aedba5b0dfedd9ff12aebcd109ef03ab5735124162486a18",
+      "bytes": 14624,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/test_iram_bench_image.py",
+      "sha256": "f1401d9e3fa295604f6dbf6d52791747a7c085a44c368f18d72c0089da03d3e2",
+      "bytes": 37087,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/test_iram_bench_memory.py",
+      "sha256": "8d319db80463037ed8b6bb65c4a1772c398d9b2c451337f3a86a0df0a32d95d4",
+      "bytes": 5584,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/test_iram_bench_operation_stack.py",
+      "sha256": "d0a82fb6713d43d647e7bdbd8bf7f109d53a6d32aa6e41cf653d74ae9bab2f72",
+      "bytes": 9257,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/test_iram_bench_pair_privacy.py",
+      "sha256": "3288726a1148089692d74220149751aa973961f816372b8324efceed867f1ec6",
+      "bytes": 1463,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/test_iram_bench_pairing.py",
+      "sha256": "5e403409f6e42f3261a17d8c36a7891cd76f6b15279c75489080265958a39f4b",
+      "bytes": 22897,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/test_iram_bench_rehearsal.py",
+      "sha256": "76694c35f331cf9d5c24624c75999eb1052e210606d10b99c7f6b5097bd3f925",
+      "bytes": 10654,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/test_iram_bench_smoke.py",
+      "sha256": "9a1371067c1ef1192edd39e9a5e154655b6686ac556958c952e7ea55d559a11f",
+      "bytes": 13953,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/test_iram_bench_smoke_api.py",
+      "sha256": "379c5b09af93bcc343efeeba644fcaee9c6d66a7d958bdacc94cd8c2301d0e12",
+      "bytes": 10073,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/test_iram_bluedroid_memory.py",
+      "sha256": "636be69ca5515a3149b0d33a4eb35abceed534091464554272991f341246af8e",
+      "bytes": 3060,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/test_iram_diagnostics.py",
+      "sha256": "76aaa139706fef61f41f44d17d314b81cfff7c3892a817b11e466dc19a0cf6d2",
+      "bytes": 7719,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/test_iram_heap_regions.py",
+      "sha256": "b5a2deb64278bdc10309797601620f9114d45b0b1b4bf05154bd94cb6d8f45e2",
+      "bytes": 4726,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/test_iram_map_report.py",
+      "sha256": "11d2e7fb798b326f73cea457afb3ac57fabaf2530279a9d24db80ca231c4d5c3",
+      "bytes": 6320,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/test_iram_permanent_allocation.py",
+      "sha256": "f3e5f9be2ee01d3ccfb59cfbf50f926c9a83e1348bafeecd4dd380bc15776ec5",
+      "bytes": 4555,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/test_r7_review_packaging.py",
+      "sha256": "47f387ce5ce6ba95850bd9728bf76dd6479b9873afa3e597857a3184fc394a63",
+      "bytes": 10408,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/test_r8_publication.py",
+      "sha256": "392040b68bd644973f7b398ae41988ebe68c9147b948fcd6715f13dc00f23f0b",
+      "bytes": 3659,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/test_r8_review_packaging.py",
+      "sha256": "7d1f44e5249514ef9784c2ca873d0fe8d58084e7c8c8bad8ba860536cc3af56c",
+      "bytes": 10747,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/test_tesla_ble_callback_gate.cpp",
+      "sha256": "e9192d411e613d6e30bae977cd2cdf54f16f3e00433ff28920df094e68ed72dc",
+      "bytes": 1960,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/test_tesla_ble_config_policy.cpp",
+      "sha256": "e0c6735c14a9a7aad7cd7545dc1585026bdaf9a1055aa9d68aa804d2157d94b1",
+      "bytes": 679,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/test_tesla_ble_disabled_boot.cpp",
+      "sha256": "0d08106de5a7a330976f88586b913b3d8ceda96fc83817f00a3d8fcd446af5e2",
+      "bytes": 403,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/test_tesla_ble_generation.cpp",
+      "sha256": "d8caab063c8752aac9fad32bff93ff4e5ceefc0be8c30590f00ecc8019e86666",
+      "bytes": 3935,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/test_tesla_ble_key_command.cpp",
+      "sha256": "3ea12a1a5a617977ae9e24cf6b000b8e7a33cd71061ccc18a99c63637623ebbb",
+      "bytes": 985,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/test_tesla_ble_key_validation.cpp",
+      "sha256": "db85b33818ac18bb5df086b182901d95c7edc2533b934dc3047e22b5a78cb5c9",
+      "bytes": 568,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/test_tesla_ble_operation.cpp",
+      "sha256": "ad063f706dd2ca9ca32c72d0b176bb0c70c13e36c02bfb787db3983857dc241b",
+      "bytes": 2315,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/test_tesla_ble_pairing_policy.cpp",
+      "sha256": "3aa7e20fdaca302ac8c5288aecdd4bb155a301ac4004d1955d3c791684e64b69",
+      "bytes": 939,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/test_tesla_ble_publication.cpp",
+      "sha256": "b2048b90d336d6abd8389c00d589e7b3235757c2cf1a32d6be724ba77f0bc6d7",
+      "bytes": 1047,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/test_tesla_ble_queues.cpp",
+      "sha256": "8830d9548353be54bd29eb248572cff4f58b94f349b7e86e1df08cf955cc6bc6",
+      "bytes": 797,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/test_tesla_ble_result.cpp",
+      "sha256": "81e912652d7d42f9d69221b2433dcadc7bdc530d4ac9f58daef0f002a54655ac",
+      "bytes": 845,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/test_tesla_ble_runtime.cpp",
+      "sha256": "d59aadea79853f058cc784213a0a813fa007890e17ef33f2bb015d2738b144ed",
+      "bytes": 2305,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/test_tesla_ble_session.cpp",
+      "sha256": "547f00d35603513c9abc32b1fca6a2d39121d225dfc7bb189f9ef3cb6e477cb2",
+      "bytes": 2701,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/test_tesla_ble_shutdown_result.cpp",
+      "sha256": "898fd23b1b37da69cbf44e65543d391ac47d2998e9d4dd96ce23860ca3b043b1",
+      "bytes": 773,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/test_tesla_ble_soc_policy.cpp",
+      "sha256": "292c1ed52d1fd9eecaa6b6de82a2b3b9be08b41ec85a6a70419f3d0c210c2a65",
+      "bytes": 2277,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/test_tesla_ble_teardown.cpp",
+      "sha256": "ca2d0cc5d65ba3ff22ad4ba438981d311d9a4f16f55f404e12ec0fa413341874",
+      "bytes": 2042,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/test_tesla_ble_validation.cpp",
+      "sha256": "32406fb36af59bb875e5f481a35324c912fadf5652f2f75542ff873b03adb826",
+      "bytes": 569,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/test_tesla_ble_watch_sampling.cpp",
+      "sha256": "bdef9e2a38f69db8ed1bfd28117159a490a5071593a64133be2a1692236794d2",
+      "bytes": 867,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/test_web_actions.mjs",
+      "sha256": "3770f994cdf6013d95decabb382358aefb60f79c63993a973fad2b2020ab1de3",
+      "bytes": 4322,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/test_web_integration.mjs",
+      "sha256": "59070098b62f0ec500cb1f98e119105dfb08d0bf4522028a2171b08fec45f676",
+      "bytes": 7591,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tools/bench_bluedroid_memory_check.py",
+      "sha256": "1d9df671e9bdcc2a552e27429a1368c70e06931f52f35c1db9f5a1c55ec94b60",
+      "bytes": 19799,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tools/bench_build_identity.py",
+      "sha256": "c2a6b9851bc9c12411478cdc917d4cc91089ac5350ab6a2af2ce7efca3f68f37",
+      "bytes": 13270,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tools/bench_heap_host_check.py",
+      "sha256": "80c2ec577fe5611c72465b286e11b813fdd939f8bab8d3e7d21c06701027f49f",
+      "bytes": 6093,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tools/bench_image_report.py",
+      "sha256": "2519fd6951b52cfb1b9e75c5fd5cff6ac394fb697827f3541c52f7467f08b3e8",
+      "bytes": 26490,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tools/bench_operation_stack.py",
+      "sha256": "000ad5dba3043dfb1b1f4956f68f08dbf01b8f2d98461f76f82c4786da363ef3",
+      "bytes": 28471,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tools/bench_review_export.py",
+      "sha256": "f6623396a538c9716663bd4d5252e70c5fa595c7da3e06187a625dcbbe570848",
+      "bytes": 4504,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tools/iram_map_report.py",
+      "sha256": "b3d770c8563f3aacc847542b41c1af628402dc5baae0daed05236a23bc96e1c5",
+      "bytes": 3764,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tools/rebuild_warp4_bench.sh",
+      "sha256": "207cb093ef9b52c4af7b08a80eb3e7a0844646d4d85d1c453893c46583ad3be8",
+      "bytes": 2882,
+      "mode": "100644"
+    },
+    {
+      "path": "software/warp4_tesla_ble.ini",
+      "sha256": "4535c97d8e4d25fc05e543a8bbedee7b7fbbf40d472d51e447a2795e42509716",
+      "bytes": 4095,
+      "mode": "100644"
+    },
+    {
+      "path": "software/web/src/modules/tesla_vehicle/action_policy.ts",
+      "sha256": "d278a11c62c3446b43d86c6b111124914475eb8dab92b94a0d1446f653e712b8",
+      "bytes": 1444,
+      "mode": "100644"
+    },
+    {
+      "path": "software/web/src/modules/tesla_vehicle/api.ts",
+      "sha256": "0561a542e9973a2f4156dcc94ddc50d95816281769c38fa3bedd9847d2e61f54",
+      "bytes": 759,
+      "mode": "100644"
+    },
+    {
+      "path": "software/web/src/modules/tesla_vehicle/main.tsx",
+      "sha256": "85ea1b9b4874b22aa461724ada41d40006bd75c0100a42c8ed6de0cf8453d116",
+      "bytes": 11845,
+      "mode": "100644"
+    },
+    {
+      "path": "software/web/src/modules/tesla_vehicle/translation_de.tsx",
+      "sha256": "26bc9d33f92707b08996a946913109a9c1ae7d5139daf3ae497bda4f0342d77c",
+      "bytes": 6964,
+      "mode": "100644"
+    },
+    {
+      "path": "software/web/src/modules/tesla_vehicle/translation_en.tsx",
+      "sha256": "eb2e6d096c2d47ad5bd0bf2d493e4c1edd28d2a8f36b3a5e00ba4bf17f27d0bf",
+      "bytes": 6105,
+      "mode": "100644"
+    }
+  ],
+  "generated_evidence": [
+    {
+      "path": "review/r8/software-evidence-summary.json",
+      "sha256": "3350cc1075391d70a9e4c4191711cb51ea4f4d47d251d6e8f3bc7a6cc342ceeb",
+      "bytes": 8978,
+      "mode": "100644"
+    }
+  ],
+  "control_files": [
+    "review/r8/publication-allowlist.json",
+    "review/r8/evidence-receipt.json"
+  ],
+  "control_file_note": "detached controls compared byte-for-byte and by mode against reviewed files; no recursive self-hash",
+  "exclusions": [
+    "hardware-evidence/**",
+    "software/.pio/** (including all R0-R8 bundles, SDK/build/blob/object trees and binary review packages)",
+    "software/build/**",
+    "software/build_latest/**",
+    "**/default_wifi*.json",
+    "**/warp4_wifi.json",
+    "**/.env*",
+    "credentials and user-specific secrets/identifiers",
+    "private Tesla key storage and staging",
+    "request dumps, UART/serial captures, full-flash backups",
+    "raw logs, firmware/OTA/binaries/ELFs/maps/archives/caches",
+    "BENCH_*.md, SECOND_BOOT_CRASH.md, IRAM_DIAGNOSTICS.md, HARDWARE_COMPATIBILITY_AND_RECOVERY.md, historical TESLA_BLE_PHASE1.md and TESLA_BLE_PHASE2.md (not part of this concise handoff)",
+    "legacy TeslaBLE tree and prototype history; parent should publish a clean source snapshot, not historical legacy content"
+  ],
+  "excluded_delta_paths": [
+    "HARDWARE_COMPATIBILITY_AND_RECOVERY.md",
+    "IRAM_DIAGNOSTICS.md",
+    "README.rst",
+    "TESLA_BLE_PHASE1.md",
+    "TESLA_BLE_PHASE2.md"
+  ],
+  "license_boundary": "Clean Apache-2.0 LICENSE/NOTICE/PROVENANCE retained; existing WARP/SDK licenses unchanged. Mechanical checks are not licensing/upstream/distribution approval.",
+  "development_fixtures": {
+    "path": "software/src/modules/iso15118/dev_certs.cpp",
+    "sha256": "3f6615e0bf66c47fba1fd4cff2ba01f494461306de70e092f9672603d116f9e4",
+    "upstream_base": "a114447c4582456d123a0832eaa2d3ce5dd29f88",
+    "unchanged_from_upstream": true,
+    "private_key_fixture_count": 2,
+    "classification": "upstream ISO15118 development fixtures; not customer or Tesla credentials"
+  }
+}

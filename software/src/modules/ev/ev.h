@@ -71,6 +71,11 @@ public:
     void session_updated(EVDataSource source); // Called after writing session fields.
     void add_seen_mac_address(const uint8_t mac[EV_MAC_ADDRESS_LENGTH]);
 
+    int get_active_ev_index() const { return active_ev_index; }
+    uint64_t get_session_generation() const { return session_generation; }
+    bool session_exhausted() const { return session_generation_exhausted; }
+    uint64_t get_active_ev_mac() const { return active_ev_mac; }
+
     EVSession session;
 
 private:
@@ -88,6 +93,9 @@ private:
     Config auth_info;
 
     int active_ev_index = -1; // Index into config evs array, -1 = no match / unknown EV
+    uint64_t session_generation = 0; // Invalidates asynchronous data after EV changes; never truncate at BLE boundaries.
+    bool session_generation_exhausted = false;
+    uint64_t active_ev_mac = 0;
 
     uint64_t soc_estimation_task = 0;
 };

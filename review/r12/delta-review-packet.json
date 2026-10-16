@@ -1,0 +1,537 @@
+{
+  "schema": 1,
+  "revision": "R12",
+  "review_request": "independent bounded Astra R12 delta review only, not approval",
+  "authoritative_review": {
+    "path": "/home/hermes/.hermes/cache/scratch/r11-independent-delta-FSy9ZBkl/R11-independent-delta-review.txt",
+    "sha256": "2a7e4d1ecf818fbbbd90d4fa9a511b9ecbc08d23ff589306c50f466bd6be0898",
+    "evidence_index_sha256": "dcb54d9c1cdcce16ff1364036f1e67be15c887189dbaa0ac63aaa3a7ba9cbe02",
+    "verdict": "BLOCK R11 SOURCE-ONLY HANDOFF"
+  },
+  "changed_runtime_paths": [
+    "software/pio_hooks.py",
+    "software/util.py"
+  ],
+  "new_paths": [
+    "R12_PACKAGING_HANDOFF.md",
+    "software/tests/tesla_vehicle/test_r12_frontend_digest.py",
+    "review/r12/verify_publication.py",
+    "review/r12/verify_delta_packet.py",
+    "review/r12/software-evidence-summary.json",
+    "review/r12/delta-review-packet.json",
+    "review/r12/publication-allowlist.json",
+    "review/r12/evidence-receipt.json"
+  ],
+  "delta_files": [
+    {
+      "path": "software/pio_hooks.py",
+      "sha256": "3ac9a8499a4e92ef6a6b842a659f7eeea08ec0f038e9dbd277bb1dd3ace8fd5a",
+      "bytes": 101121,
+      "mode": "100644"
+    },
+    {
+      "path": "software/util.py",
+      "sha256": "c74c71a807b7db0bb2e13e63a39f4680d2ffc0f68a9638d777e31660aed24d13",
+      "bytes": 31676,
+      "mode": "100644"
+    },
+    {
+      "path": "R12_PACKAGING_HANDOFF.md",
+      "sha256": "70fb1dc5480fc36167bad32afd49ba58a533e30dc45e95aa21c7fb28ceaed9d6",
+      "bytes": 9722,
+      "mode": "100644"
+    },
+    {
+      "path": "software/tests/tesla_vehicle/test_r12_frontend_digest.py",
+      "sha256": "ce2bb3d5975610f8a7a10c2fae88f07e3b2646090b03e3cb731d48b9ebd73581",
+      "bytes": 10690,
+      "mode": "100644"
+    },
+    {
+      "path": "review/r12/verify_publication.py",
+      "sha256": "ed7fe62b254fc3ceffb084f50f857f81c97ff51eca153388eb12fe5f3b66ff14",
+      "bytes": 1438,
+      "mode": "100644"
+    },
+    {
+      "path": "review/r12/verify_delta_packet.py",
+      "sha256": "81a063874a163cb24e687513b4374ab4ecec586094c3b4b589e1138723afb596",
+      "bytes": 3457,
+      "mode": "100644"
+    }
+  ],
+  "summary_sha256": "c13df53887033715c92d3a1bf626ff8f4122faeb28194c33f6d40ab451deb17d",
+  "protected_inventories": [
+    {
+      "kind": "seal",
+      "stage": "r6",
+      "root": "/home/hermes/warp-tesla-ble/software/.pio/production-ui-evidence-lifecycle-r6",
+      "entries": 1319,
+      "inventory_sha256": "7303f1207d1a18f2c0f64ce3822fd190ba9db3eca121269b2c1a9bd6a3612c0b",
+      "manifest_sha256": "464828efe10fc0ee34b49c97c07b6c75ff75f091dda09240c7bb2f41c31b08ab"
+    },
+    {
+      "kind": "seal",
+      "stage": "r7",
+      "root": "/home/hermes/warp-tesla-ble/software/.pio/production-ui-evidence-lifecycle-r7",
+      "entries": 2802,
+      "inventory_sha256": "ffd3f49307537677117d00f5c5d6cb61e0b6ea2008d5ced128498474ce8110ff",
+      "manifest_sha256": "78629cbe0e2ac04d15b7625e2b149b3b90528537a8c98eaf973a46b09678b895"
+    },
+    {
+      "kind": "seal",
+      "stage": "r8",
+      "root": "/home/hermes/warp-tesla-ble/software/.pio/production-ui-evidence-lifecycle-r8",
+      "entries": 5128,
+      "inventory_sha256": "cb05ab4d1687aa8c32e8be9a0f2c4bdc703c5becd28e99aaaf05af199832441a",
+      "manifest_sha256": "589489531362c1b2d5ea153286e6e6920215dd77767ace00eefee46c9b5c7533"
+    },
+    {
+      "kind": "seal",
+      "stage": "r9",
+      "root": "/home/hermes/warp-tesla-ble/software/.pio/production-ui-evidence-lifecycle-r9",
+      "entries": 5174,
+      "inventory_sha256": "5742a5777442192a7b95e4281cedfc8a9926ede3323156670b79b2dc4fd5e2df",
+      "manifest_sha256": "db3745b39f351f755fc9a78003778c1333c2a6b5e61f2b4eaaa0eeae2e3befbb"
+    },
+    {
+      "kind": "seal",
+      "stage": "r10",
+      "root": "/home/hermes/warp-tesla-ble/software/.pio/production-ui-evidence-lifecycle-r10",
+      "entries": 5240,
+      "inventory_sha256": "75272d2bc7d34b1bbcab4264656f5e36305b2cdfaedef7cfb66907b8e668e3af",
+      "manifest_sha256": "6df884f391dfb3e797a8c6cdb9fcb19301c29e93c01325c054e8898f93c9c786"
+    },
+    {
+      "kind": "reviewer-tree",
+      "stage": "r7",
+      "root": "/home/hermes/.hermes/cache/scratch/r7-independent-review-tuwl8ej1",
+      "entries": 1024,
+      "inventory_sha256": "1cca2bdde3211e29355bd2a83fb0b38a5e1f4c6a5a767d17866147bfd80b5d27"
+    },
+    {
+      "kind": "reviewer-tree",
+      "stage": "r8",
+      "root": "/home/hermes/.hermes/cache/scratch/r8-independent-review-sw_nz0cu",
+      "entries": 1546,
+      "inventory_sha256": "636583cfe7a5bd1bd82660dd5472a694669780464c11b83a9bfcaca065656aa1"
+    },
+    {
+      "kind": "reviewer-tree",
+      "stage": "r9",
+      "root": "/home/hermes/.hermes/cache/scratch/r9-independent-review-i6_icb0t",
+      "entries": 2296,
+      "inventory_sha256": "670239fed32b2657c20adaed056f09a351ae7ffde01806b8fb776ef2cfa7c22e"
+    },
+    {
+      "kind": "reviewer-tree",
+      "stage": "r10",
+      "root": "/home/hermes/.hermes/cache/scratch/r10-independent-review-r7hg7fse",
+      "entries": 3525,
+      "inventory_sha256": "5bb53e69a40268aedd3300d1005601e0cf1ed2fda0d0288cab17ed1ac2e06210"
+    },
+    {
+      "kind": "seal",
+      "stage": "r11",
+      "root": "/home/hermes/warp-tesla-ble/software/.pio/production-ui-evidence-lifecycle-r11",
+      "entries": 433,
+      "inventory_sha256": "1741117741edfdf78f54767956689952b61ff700e7f8e3766d8b100dc03d3098",
+      "manifest_sha256": "295d1c757336fefdbff6701f9dadf41e1575142707d48976c27c68ba3ea00ade"
+    },
+    {
+      "kind": "reviewer-tree",
+      "stage": "r11",
+      "root": "/home/hermes/.hermes/cache/scratch/r11-independent-delta-FSy9ZBkl",
+      "entries": 32,
+      "inventory_sha256": "903880bfee0ece666ed42e9b5e9e35c4afa524fa0205654551340c4ae5d1ddf4"
+    }
+  ],
+  "real_index": {
+    "sha256": "a74b7a61fdc4173816ecec27199054e3bad56b431be9bfb0e818fd5e84570218",
+    "entries_sha256": "59f663684ffcb2facbf2ab34ff7c3b6977175f65ebfc48b13ab021937dd2a522",
+    "head": "187e00a29fd0f39f47db010cec9f832e9f535158",
+    "branch": "diagnostics/esp32-ethernet-iram-prep",
+    "staged_delta_empty_before_and_after": true
+  },
+  "baseline_root": "/home/hermes/warp-tesla-ble/software/.pio/lifecycle-r12-work/baseline",
+  "baseline_source_sha256": {
+    "software/pio_hooks.py": "824360d348762ce6f2f8951903ee00b081558b9ea9d29e5c8e15e7275ed96017",
+    "software/util.py": "f2b9c82ffe2db5bb242676b4f6751faa08d78aa036c72966565470b111ae32b2"
+  },
+  "evidence": [
+    {
+      "path": "/home/hermes/warp-tesla-ble/software/.pio/lifecycle-r12-work/exact-astra-red.json",
+      "sha256": "72d0af801144ad455e908fb21543a92b3835b17ca24fd3e3c33c721a92d8d7ca"
+    },
+    {
+      "path": "/home/hermes/warp-tesla-ble/software/.pio/lifecycle-r12-work/exact-astra-r11-red.log",
+      "sha256": "cde31009ecc43bc11e73053028603ab8ce1ad32133ad593244b994a7cf00d4c8"
+    },
+    {
+      "path": "/home/hermes/warp-tesla-ble/software/.pio/lifecycle-r12-work/exact-astra-r11-red-replay.log",
+      "sha256": "cde31009ecc43bc11e73053028603ab8ce1ad32133ad593244b994a7cf00d4c8"
+    },
+    {
+      "path": "/home/hermes/warp-tesla-ble/software/.pio/lifecycle-r12-work/focused-prefixed-red.log",
+      "sha256": "2907df4b9d3ce10d2afdd110d1b035d1469bcadb20b4cbb5603bf9b847c02a58"
+    },
+    {
+      "path": "/home/hermes/warp-tesla-ble/software/.pio/lifecycle-r12-work/focused-baseline-red.log",
+      "sha256": "4661f7625e4cff41f5c0613cbfab57af3785074b7f33f557dc7db4de7cb2e063"
+    },
+    {
+      "path": "/home/hermes/warp-tesla-ble/software/.pio/lifecycle-r12-work/focused-r12.log",
+      "sha256": "2ee1c73c94178855d670b2e5cc70a85da49a3f704f160db610594df192c8d59d"
+    },
+    {
+      "path": "/home/hermes/warp-tesla-ble/software/.pio/lifecycle-r12-work/r11-focused.log",
+      "sha256": "b46c793f65dde013c485e58db9d23ae16eb72866fe24ca893c76303217d84944"
+    },
+    {
+      "path": "/home/hermes/warp-tesla-ble/software/.pio/lifecycle-r12-work/changed-path-writer-scan.json",
+      "sha256": "764bc93965883bba27e9db524a9fd16befbc91e7c550e1f8fe60b27c5086bfcb"
+    },
+    {
+      "path": "/home/hermes/warp-tesla-ble/software/.pio/lifecycle-r12-work/web-actions.log",
+      "sha256": "eb975929d5da15dd8cf716251312c0219c4d864cb7860732e3611d46df4e5958"
+    },
+    {
+      "path": "/home/hermes/warp-tesla-ble/software/.pio/lifecycle-r12-work/web-integration.log",
+      "sha256": "cf834c61a2e468f0b91402b7cfd94a662c9f5957831e0d1c3c539419e854c393"
+    },
+    {
+      "path": "/home/hermes/warp-tesla-ble/software/.pio/lifecycle-r12-work/shell-syntax.log",
+      "sha256": "6d1b9fc8db7604528b91cb27eec62c2f5aa7ebd4a23a58411dc75ecc28891801"
+    },
+    {
+      "path": "/home/hermes/warp-tesla-ble/software/.pio/lifecycle-r12-work/diff-check.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "/home/hermes/warp-tesla-ble/software/.pio/lifecycle-r12-work/packet-self-log-initial-failure.log",
+      "sha256": "460187dd22c2807494ee1f228a94ceaede11e9fcf7a991b77ae1a7dfde11419a"
+    },
+    {
+      "path": "/home/hermes/warp-tesla-ble/software/.pio/lifecycle-r12-work/mechanical-negative-results.json",
+      "sha256": "64a1158fd05eea8a92fd1c832f755b46f885e37746560ead55ad61d89a02ed4d"
+    },
+    {
+      "path": "/home/hermes/warp-tesla-ble/software/.pio/lifecycle-r12-work/astra-originals/R11-evidence-index.json",
+      "sha256": "dcb54d9c1cdcce16ff1364036f1e67be15c887189dbaa0ac63aaa3a7ba9cbe02"
+    },
+    {
+      "path": "/home/hermes/warp-tesla-ble/software/.pio/lifecycle-r12-work/astra-originals/R11-independent-delta-review.txt",
+      "sha256": "2a7e4d1ecf818fbbbd90d4fa9a511b9ecbc08d23ff589306c50f466bd6be0898"
+    },
+    {
+      "path": "/home/hermes/warp-tesla-ble/software/.pio/lifecycle-r12-work/astra-originals/frontend_digest_probe.py",
+      "sha256": "0b0052f4ffac28d11716d654b472955fcb1671810156b2ac1bfd8a8d7d2cdc38"
+    }
+  ],
+  "reused_evidence": {
+    "source": "immutable R11 result records; unchanged non-delta source/test inputs checked; not rerun",
+    "recorded_gate_exits": {
+      "test_r7_review_packaging": 0,
+      "test_r8_review_packaging": 0,
+      "test_r9_driver_confinement": 0,
+      "test_r10_confinement": 0,
+      "test_iram_bench_image": 0,
+      "test_r8_publication": 0,
+      "test_r9_publication": 0,
+      "test_r10_publication": 0,
+      "test_r11_publication": 0,
+      "iram-retained-elf": 0,
+      "host-normal-final": 0,
+      "host-sanitize-final": 0,
+      "focused-normal": 0,
+      "focused-sanitize": 0,
+      "prior-f1f4-green": 0,
+      "clean-safety": 0,
+      "production-binding": 0,
+      "retained-artifact-validation": 0
+    },
+    "recorded_test_counts": {
+      "test_r7_review_packaging": 17,
+      "test_r8_review_packaging": 21,
+      "test_r9_driver_confinement": 16,
+      "test_r10_confinement": 23,
+      "test_iram_bench_image": 42,
+      "test_r8_publication": 8,
+      "test_r9_publication": 12,
+      "test_r10_publication": 12,
+      "test_r11_publication": 12,
+      "iram-retained-elf": 122
+    },
+    "host_configurations": {
+      "normal": {
+        "exit": 0,
+        "preserved_helpers": 18,
+        "native_entries": 51,
+        "extra_executions": 145
+      },
+      "sanitize": {
+        "exit": 0,
+        "preserved_helpers": 18,
+        "native_entries": 51,
+        "extra_executions": 145
+      }
+    },
+    "files": [
+      {
+        "path": "/home/hermes/warp-tesla-ble/software/.pio/production-ui-evidence-lifecycle-r11/verification/test_r7_review_packaging.log",
+        "sha256": "dd33bc20ef695bb630f87ba7799ea2912616896adf6b8ca76c481210e27f4bb7"
+      },
+      {
+        "path": "/home/hermes/warp-tesla-ble/software/.pio/production-ui-evidence-lifecycle-r11/verification/test_r8_review_packaging.log",
+        "sha256": "2c68e2659e3f2db35e56c9ca90cf8cc11d65cc88d4917a05d4bbb80ccb85489a"
+      },
+      {
+        "path": "/home/hermes/warp-tesla-ble/software/.pio/production-ui-evidence-lifecycle-r11/verification/test_r9_driver_confinement.log",
+        "sha256": "a897fdfb9a7a60b438c785c11782257e703ba1b8e6f8e41b9c86a0063b4d07c2"
+      },
+      {
+        "path": "/home/hermes/warp-tesla-ble/software/.pio/production-ui-evidence-lifecycle-r11/verification/test_r10_confinement.log",
+        "sha256": "c3abc912b3b266d05c7793369b986402e661e52bcecd887a2fdb3279617543cd"
+      },
+      {
+        "path": "/home/hermes/warp-tesla-ble/software/.pio/production-ui-evidence-lifecycle-r11/verification/test_iram_bench_image.log",
+        "sha256": "b2cad67f3013314112b1b430d4cfb646eac46d13c79a7c294bb7354e6d98111a"
+      },
+      {
+        "path": "/home/hermes/warp-tesla-ble/software/.pio/production-ui-evidence-lifecycle-r11/verification/test_r8_publication.log",
+        "sha256": "a1cb0de71a26ebadced66756aae88f5cd2cff0f1e03f5ac971f99519a003e4b7"
+      },
+      {
+        "path": "/home/hermes/warp-tesla-ble/software/.pio/production-ui-evidence-lifecycle-r11/verification/test_r9_publication.log",
+        "sha256": "68de48732dce603a4ce589d9eb58291627e8496eff681b124af45dcff77797d8"
+      },
+      {
+        "path": "/home/hermes/warp-tesla-ble/software/.pio/production-ui-evidence-lifecycle-r11/verification/test_r10_publication.log",
+        "sha256": "b66d4ad85d859a3bb279c0e07223de114833fb93d9846c590b0016a550e5b462"
+      },
+      {
+        "path": "/home/hermes/warp-tesla-ble/software/.pio/production-ui-evidence-lifecycle-r11/verification/test_r11_publication.log",
+        "sha256": "41333e12577c4dfd0e5b609fdbd3c86f607d7a33c99551028c68a2d08b69910c"
+      },
+      {
+        "path": "/home/hermes/warp-tesla-ble/software/.pio/production-ui-evidence-lifecycle-r11/verification/iram-retained-elf.log",
+        "sha256": "5c537b66bc6c8fa88e75ebdb3221af750c97e0537f316d30e28aaaa88afd07ed"
+      },
+      {
+        "path": "/home/hermes/warp-tesla-ble/software/.pio/production-ui-evidence-lifecycle-r11/verification/host-normal-final.log",
+        "sha256": "153df9dcb468dd16a7c11d5a7387b7a40abf7da230e3a1e2dc59a97dec4eaeaf"
+      },
+      {
+        "path": "/home/hermes/warp-tesla-ble/software/.pio/production-ui-evidence-lifecycle-r11/verification/host-sanitize-final.log",
+        "sha256": "fb3931171e12bf4b2dd191627040d32cc801ac0aa85cc99c1ccdcdc4c0c92445"
+      },
+      {
+        "path": "/home/hermes/warp-tesla-ble/software/.pio/production-ui-evidence-lifecycle-r11/verification/focused-normal.log",
+        "sha256": "2c05415362d4b9492a7fceccd5995afef9a592f4de39501139c22df66e1a2dda"
+      },
+      {
+        "path": "/home/hermes/warp-tesla-ble/software/.pio/production-ui-evidence-lifecycle-r11/verification/focused-sanitize.log",
+        "sha256": "2c05415362d4b9492a7fceccd5995afef9a592f4de39501139c22df66e1a2dda"
+      },
+      {
+        "path": "/home/hermes/warp-tesla-ble/software/.pio/production-ui-evidence-lifecycle-r11/verification/prior-f1f4-green.log",
+        "sha256": "3b47ef24ef38bef6cfd8ea3a01e0e4cb3480971c97c2da90da797c4c4e4feff2"
+      },
+      {
+        "path": "/home/hermes/warp-tesla-ble/software/.pio/production-ui-evidence-lifecycle-r11/verification/clean-safety.log",
+        "sha256": "618f0e5aa341077a9311dbe3425cdb3f9f4fadf1264698448b8bfd9064fc8d38"
+      },
+      {
+        "path": "/home/hermes/warp-tesla-ble/software/.pio/production-ui-evidence-lifecycle-r11/verification/production-binding.log",
+        "sha256": "26c609f9b80232b837a7e09ff54941584a2392e5c1cc68434c2ac865d84fcfcb"
+      },
+      {
+        "path": "/home/hermes/warp-tesla-ble/software/.pio/production-ui-evidence-lifecycle-r11/verification/retained-artifact-validation.log",
+        "sha256": "913babed38636479cfce9a4775d0e71b2dfc785446950b4a541a25f20b475c15"
+      },
+      {
+        "path": "/home/hermes/warp-tesla-ble/software/.pio/production-ui-evidence-lifecycle-r11/verification/artifact-result.json",
+        "sha256": "913babed38636479cfce9a4775d0e71b2dfc785446950b4a541a25f20b475c15"
+      },
+      {
+        "path": "/home/hermes/warp-tesla-ble/review/r11/software-evidence-summary.json",
+        "sha256": "f88f0a7a78789f921f926662d7797186f40ee81c05e2d6a7c303dac46759a55d"
+      },
+      {
+        "path": "/home/hermes/warp-tesla-ble/review/r11/evidence-receipt.json",
+        "sha256": "41c5cc08697cb1d99dd5f8034a33f2e9dd124712b950964684c666cf8e705765"
+      }
+    ],
+    "packaging": {
+      "diagnostic_full_validation": "PASS, software packaging only",
+      "export_files": 9,
+      "image_sha256": "87e0cd1009f827b652b5e892dcc6fd78231d36ce25e92a6c5271331e51f85ae4",
+      "installable": false,
+      "normal_production_task_symbols": [
+        "_ZN12TeslaVehicle10task_entryEPv"
+      ],
+      "diagnostic_production_task_symbols": [],
+      "bootloader_partition_literal": {
+        "function": 1074240140,
+        "literal_address": 1074233856,
+        "offset": 57344
+      },
+      "component_ranges": [
+        {
+          "name": "bootloader.bin",
+          "start": "0x1000",
+          "end_exclusive": "0x7230",
+          "size": 25136
+        },
+        {
+          "name": "partitions.bin",
+          "start": "0xe000",
+          "end_exclusive": "0xec00",
+          "size": 3072
+        },
+        {
+          "name": "firmware.bin",
+          "start": "0x10000",
+          "end_exclusive": "0x481960",
+          "size": 4659552
+        },
+        {
+          "name": "boot_app0.bin",
+          "start": "0x640000",
+          "end_exclusive": "0x642000",
+          "size": 8192
+        }
+      ],
+      "normal_gate_exit": 2,
+      "normal_gate_message": "bench image validation failed: SDK partition table offset 0x8000 != merged WARP4 offset 0xe000",
+      "mutations": [
+        {
+          "sealed_stage": "r7",
+          "mutation": "zero_tail_4096",
+          "result": "REJECTED",
+          "reason": "application: ELF/BIN unbacked loadable extent 0x50000348..0x50001348"
+        },
+        {
+          "sealed_stage": "r7",
+          "mutation": "invalid_flash_mode",
+          "result": "REJECTED",
+          "reason": "application: unsupported/unpinned flash mode 0xff; DIO header required"
+        },
+        {
+          "sealed_stage": "r7",
+          "mutation": "invalid_flash_frequency",
+          "result": "REJECTED",
+          "reason": "application: unsupported/unpinned flash frequency 0xe; 80m required"
+        },
+        {
+          "sealed_stage": "r8",
+          "mutation": "zero_tail_4096",
+          "result": "REJECTED",
+          "reason": "application: ELF/BIN unbacked loadable extent 0x50000348..0x50001348"
+        },
+        {
+          "sealed_stage": "r8",
+          "mutation": "invalid_flash_mode",
+          "result": "REJECTED",
+          "reason": "application: unsupported/unpinned flash mode 0xff; DIO header required"
+        },
+        {
+          "sealed_stage": "r8",
+          "mutation": "invalid_flash_frequency",
+          "result": "REJECTED",
+          "reason": "application: unsupported/unpinned flash frequency 0xe; 80m required"
+        },
+        {
+          "sealed_stage": "r9",
+          "mutation": "zero_tail_4096",
+          "result": "REJECTED",
+          "reason": "application: ELF/BIN unbacked loadable extent 0x50000348..0x50001348"
+        },
+        {
+          "sealed_stage": "r9",
+          "mutation": "invalid_flash_mode",
+          "result": "REJECTED",
+          "reason": "application: unsupported/unpinned flash mode 0xff; DIO header required"
+        },
+        {
+          "sealed_stage": "r9",
+          "mutation": "invalid_flash_frequency",
+          "result": "REJECTED",
+          "reason": "application: unsupported/unpinned flash frequency 0xe; 80m required"
+        },
+        {
+          "sealed_stage": "r10",
+          "mutation": "zero_tail_4096",
+          "result": "REJECTED",
+          "reason": "application: ELF/BIN unbacked loadable extent 0x50000348..0x50001348"
+        },
+        {
+          "sealed_stage": "r10",
+          "mutation": "invalid_flash_mode",
+          "result": "REJECTED",
+          "reason": "application: unsupported/unpinned flash mode 0xff; DIO header required"
+        },
+        {
+          "sealed_stage": "r10",
+          "mutation": "invalid_flash_frequency",
+          "result": "REJECTED",
+          "reason": "application: unsupported/unpinned flash frequency 0xe; 80m required"
+        }
+      ],
+      "build_identity": "98ba0e422e03051d7b6378bbbb3b2b2738f1fd508a12d09303f7ef3f4531ee6d",
+      "sdk_manifest_sha256": "6a8237b550f27f31b122e25ae8e91478c9318805ddc4b66ff2cd7fb4ab890ff0"
+    }
+  },
+  "fresh_gate_exits": {
+    "initialize": 0,
+    "exact-astra-r11-red": 0,
+    "exact-astra-r11-red-replay": 0,
+    "focused-r12": 0,
+    "r11-focused": 0,
+    "changed-path-writer-scan": 0,
+    "web-actions": 0,
+    "web-integration": 0,
+    "diff-check": 0,
+    "shell-syntax": 0
+  },
+  "mechanical_gate_exits": {
+    "exact-private-index-preflight-final": 0,
+    "packet-verifier": 0,
+    "mechanical-negative-controls": 0
+  },
+  "fresh_tests": {
+    "R12": {
+      "tests": 10,
+      "exit": 0,
+      "result": "PASS"
+    },
+    "R11": {
+      "tests": 16,
+      "exit": 0,
+      "result": "PASS"
+    }
+  },
+  "publication_boundary": {
+    "result": "PASS",
+    "sole_parent_plan": "a114447c4582456d123a0832eaa2d3ce5dd29f88",
+    "candidate_created": false,
+    "strategy": "clean-snapshot",
+    "no_binaries_private_raw_evidence": true,
+    "final_receipt_and_exact_index_readback_required": true
+  },
+  "limits": [
+    "Exact entry/dependency/index_html AST subprocedures and actual digest helpers, not a full PlatformIO/frontend/package process; store registration/third-party writer bounded by scratch observations",
+    "Symlink/dangling digest leaves and shared-inode regular files are rejected; ordinary lexical pairs retain semantics; unsafe ancestry, traversal and project-external output roots refused",
+    "Exclusive-workspace static/substitution checks, not hostile concurrent filesystem/mount defense, arbitrary-I/O rollback or crash durability",
+    "Prior R7-R11 packaging/publication/host/sanitizer/IRAM/F2-F4/safety/binding and retained-artifact results reused by immutable hashes, not rerun; no firmware/SDK rebuild or new source-to-firmware association",
+    "Normal production packaging remains expected exit 2 (SDK 0x8000 vs WARP4 0xe000); diagnostic NON_INSTALLABLE and lacks production Tesla task; retained normal ELF has task",
+    "R6 lifecycle approval unchanged; historical R7/R8/R9/R10/R11 source-only BLOCK verdicts unchanged; no independent R12 approval",
+    "Historical R9 index/cache and possible early hardware metadata exceptions, R10 observation/early-RED qualifications, and R11 intermediate/private-index-cache qualifications remain disclosed; equal current hashes do not erase them",
+    "Host/ASan/UBSan not FreeRTOS/Xtensa concurrency/race proof; host mbedTLS uninstrumented; unresolved stack calls prevent complete bounds",
+    "No hardware/resource/RF/vehicle/power-loss/crypto/licensing/upstream/release qualification; B/C and two remaining A cold boots NO-GO",
+    "No candidate commit created; eventual separately authorized candidate still requires raw sole-parent/full-tree verification against pinned base",
+    "No prohibited services/devices, hardware-evidence contents, flash, real-index staging, commit, push, publication or release; namespace observations are at gate entry, not continuous audit"
+  ],
+  "binding_note": "Allowlist hashes packet+summary; detached receipt binds allowlist+manifest+packet+summary. Final readback validates exact proposed controls; no recursive self-hash.",
+  "unchanged_r11_source_inventory_sha256": "b3701dad89845dc0b8f404d06cee2dbe162a73a6effec4ca35d0c5289741e573"
+}

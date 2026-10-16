@@ -1,0 +1,50 @@
+{
+  "revision": "R10",
+  "manifest_path": "/home/hermes/warp-tesla-ble/software/.pio/production-ui-evidence-lifecycle-r10/manifest.json",
+  "manifest_sha256": "6df884f391dfb3e797a8c6cdb9fcb19301c29e93c01325c054e8898f93c9c786",
+  "content_files": 5134,
+  "source_snapshot_count": 291,
+  "publication_files": 267,
+  "publication_allowlist_sha256": "0a9de384ae21d04e283497f6b619111fd03cfda54aff5570c7d5b90752b38f27",
+  "diagnostic_image_sha256": "87e0cd1009f827b652b5e892dcc6fd78231d36ce25e92a6c5271331e51f85ae4",
+  "historical_verdicts": "R6 lifecycle APPROVE unchanged; R7/R8/R9 BLOCK unchanged",
+  "R10_status": "new independent Astra review required; not publication approval",
+  "ancestry": "exact sole upstream parent PLAN checked; no commit created; eventual actual candidate verification required",
+  "publication": "source-only; all binaries excluded; exact private proposed-index readback required",
+  "prior_integrity": {
+    "prior_seals": {
+      "r6": {
+        "manifest_sha256": "464828efe10fc0ee34b49c97c07b6c75ff75f091dda09240c7bb2f41c31b08ab",
+        "unchanged_files": 1227,
+        "exact_hash_mode_inventory": true
+      },
+      "r7": {
+        "manifest_sha256": "78629cbe0e2ac04d15b7625e2b149b3b90528537a8c98eaf973a46b09678b895",
+        "unchanged_files": 2277,
+        "exact_hash_mode_inventory": true
+      },
+      "r8": {
+        "manifest_sha256": "589489531362c1b2d5ea153286e6e6920215dd77767ace00eefee46c9b5c7533",
+        "unchanged_files": 5031,
+        "exact_hash_mode_inventory": true
+      },
+      "r9": {
+        "manifest_sha256": "db3745b39f351f755fc9a78003778c1333c2a6b5e61f2b4eaaa0eeae2e3befbb",
+        "unchanged_files": 5072,
+        "exact_hash_mode_inventory": true
+      }
+    },
+    "astra_tree_entries_unchanged": {
+      "r7": 931,
+      "r8": 1233,
+      "r9": 1568
+    },
+    "inventory_scope": "all files/links except never-descended hardware-evidence names",
+    "real_index_bytes_unchanged_sha256": "a74b7a61fdc4173816ecec27199054e3bad56b431be9bfb0e818fd5e84570218",
+    "real_index_entries_unchanged_sha256": "59f663684ffcb2facbf2ab34ff7c3b6977175f65ebfc48b13ab021937dd2a522",
+    "initial_and_final_real_staged_delta_empty": true,
+    "baseline_source_copies_verified": 260,
+    "head_unchanged": "187e00a29fd0f39f47db010cec9f832e9f535158"
+  },
+  "historical_process_exceptions": "R9 real-index byte/cache change and possible early hardware metadata traversal remain disclosed; later equal index hash does not erase history"
+}

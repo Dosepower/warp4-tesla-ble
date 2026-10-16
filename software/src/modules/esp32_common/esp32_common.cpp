@@ -192,7 +192,8 @@ void ESP32Common::register_urls()
     }
 #endif
 
-#ifdef DEBUG_FS_ENABLE
+#if defined(DEBUG_FS_ENABLE) && !(defined(TESLA_BLE_BENCH_ONLY) && TESLA_BLE_BENCH_ONLY && defined(TESLA_BLE_IRAM_DIAGNOSTICS) && TESLA_BLE_IRAM_DIAGNOSTICS)
+    // Physical bench-key records must never leave through raw flash HTTP export.
     server.on_HTTPThread("/esp32/dump_flash", HTTP_GET, [this](WebServerRequest request) {
         constexpr uint32_t BUFFER_SIZE = 4000;
         char buffer[BUFFER_SIZE];
@@ -618,6 +619,10 @@ String ESP32Common::get_default_wifi_passphrase()
 [[gnu::noinline]]
 bool ESP32Common::create_complete_master_key()
 {
+#if defined(TESLA_BLE_BENCH_ONLY)
+    logger.printfln("BENCH ONLY: eFuse master-key provisioning disabled");
+    return false;
+#else
     if ((EFUSE.blk3_rdata0.val & 0xFFFF0000) != 0 ||
         EFUSE.blk3_rdata1.val != 0 ||
         EFUSE.blk3_rdata2.val != 0 ||
@@ -654,11 +659,16 @@ bool ESP32Common::create_complete_master_key()
 
     logger.printfln("Complete master key set");
     return true;
+#endif
 }
 
 [[gnu::noinline]]
 bool ESP32Common::create_basic_master_key()
 {
+#if defined(TESLA_BLE_BENCH_ONLY)
+    logger.printfln("BENCH ONLY: eFuse master-key provisioning disabled");
+    return false;
+#else
     if ((EFUSE.blk3_rdata1.val & 0xFF000000) != 0 ||
         EFUSE.blk3_rdata2.val != 0 ||
         (EFUSE.blk3_rdata5.val & 0x00FFFFFF) != 0 ||
@@ -693,11 +703,18 @@ bool ESP32Common::create_basic_master_key()
 
     logger.printfln("Basic master key set");
     return true;
+#endif
 }
 
 [[gnu::noinline]]
 bool ESP32Common::fill_missing_master_key()
 {
+#if defined(TESLA_BLE_BENCH_ONLY)
+    // Older generic Bricks can reach this from get_subkey(). Never expand their
+    // existing eFuse key, even implicitly; report the subkey unavailable instead.
+    logger.printfln("BENCH ONLY: eFuse master-key provisioning disabled");
+    return false;
+#else
     if ((EFUSE.blk3_rdata0.val & 0xFFFF0000) != 0 ||
         (EFUSE.blk3_rdata1.val & 0x00FFFFFF) != 0 ||
         EFUSE.blk3_rdata3.val != 0 ||
@@ -739,6 +756,7 @@ bool ESP32Common::fill_missing_master_key()
 
     logger.printfln("Master key completed");
     return true;
+#endif
 }
 
 [[gnu::const]]

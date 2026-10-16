@@ -1,0 +1,11 @@
+{
+  "manifest_path": "/home/hermes/warp-tesla-ble/software/.pio/production-ui-evidence-lifecycle-r7/manifest.json",
+  "manifest_sha256": "78629cbe0e2ac04d15b7625e2b149b3b90528537a8c98eaf973a46b09678b895",
+  "source_snapshot_count": 269,
+  "R7_changed_files": 13,
+  "content_files": 2275,
+  "diagnostic_image_sha256": "17fec96995c8f1d45cd9e10333e6876267464712050507a082618391b5f5a0e1",
+  "normal_production_packaging": "BLOCKED",
+  "R7_independent_review": "pending; not invoked",
+  "publication": "source-only after parent verification and later independent review; no binary release"
+}

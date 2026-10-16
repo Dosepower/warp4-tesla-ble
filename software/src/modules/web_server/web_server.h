@@ -137,9 +137,13 @@ public:
 
     IPAddress getLocalAddress();
     IPAddress getPeerAddress();
+    // Read-only evidence populated by HTTP middleware before main dispatch.
+    bool is_strictly_authenticated() const { return strict_authenticated; }
 
 private:
     httpd_req_t *req;
+    friend class WebServer;
+    bool strict_authenticated = false;
     enum class ChunkedResponseState {
         NotStarted,
         Started,
@@ -200,7 +204,9 @@ public:
     WebServerHandler *on_HTTPThread(const char *uri, httpd_method_t method, wshCallback &&callback, wshUploadCallback &&uploadCallback, wshUploadErrorCallback &&uploadErrorCallback, uint16_t port = 0);
     WebServerHandler *onWS_HTTPThread(const char *uri, httpd_handle_t *httpd_handle_out, wshCallback &&callback, uint16_t port = 0);
     void onNotAuthorized_HTTPThread(wshCallback &&callback);
-    void onAuthenticate_HTTPThread(std::function<bool(WebServerRequest)> &&auth_fn);
+    void onAuthenticate_HTTPThread(std::function<bool(WebServerRequest)> &&auth_fn, std::function<bool(WebServerRequest)> &&strict_auth_fn = nullptr);
+    bool authenticate_strict_HTTPThread(WebServerRequest request);
+    void mark_authenticated_HTTPThread(WebServerRequest &request);
 
     void register_extra_port(WebServerExtraPortData *port_data);
     bool reload_extra_port_cert(cert_load_info *load_info, uint16_t port, bool allow_fallback = true, String *cert_error = nullptr);
@@ -242,6 +248,7 @@ private:
     httpd_handle_t httpd = nullptr;
     wshCallback on_not_authorized;
     std::function<bool(WebServerRequest)> auth_fn;
+    std::function<bool(WebServerRequest)> strict_auth_fn;
     listen_port_handlers_t *listen_port_handlers[WEB_SERVER_MAX_PORTS] = {};
     WebServerExtraPortData *extra_ports;
     size_t trace_buffer_index;

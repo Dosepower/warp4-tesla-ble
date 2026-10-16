@@ -18,6 +18,7 @@
  */
 
 #include "ev.h"
+#include "ev_session_generation.h"
 
 #include "event_log_prefix.h"
 #include "generated/module_dependencies.h"
@@ -245,7 +246,15 @@ void Ev::register_events()
 
 void Ev::on_ev_connected(const uint8_t mac[EV_MAC_ADDRESS_LENGTH], bool injected)
 {
+    if (!ev_advance_session(session_generation, session_generation_exhausted, active_ev_index, active_ev_mac)) {
+        on_ev_disconnected(); // Clear API/session; never profile-match or authenticate this SLAC identity.
+        return;
+    }
     active_ev_index = -1;
+    active_ev_mac = 0;
+    for (size_t i = 0; i < EV_MAC_ADDRESS_LENGTH; ++i) {
+        active_ev_mac = (active_ev_mac << 8) | mac[i];
+    }
     clear_session();
 
     // Track this MAC in the seen_macs list
@@ -307,7 +316,9 @@ void Ev::on_ev_connected(const uint8_t mac[EV_MAC_ADDRESS_LENGTH], bool injected
 
 void Ev::on_ev_disconnected()
 {
+    ev_advance_session(session_generation, session_generation_exhausted, active_ev_index, active_ev_mac);
     active_ev_index = -1;
+    active_ev_mac = 0;
     clear_session();
 
     // Update API state

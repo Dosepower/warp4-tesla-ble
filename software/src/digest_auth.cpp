@@ -30,6 +30,7 @@
 #include "main_dependencies.h"
 #include "build.h"
 #include "cool_string.h"
+#include <initializer_list>
 
 #define MD5_LEN 32
 
@@ -59,18 +60,46 @@ static String genRandomString(){
     memcpy(data + 12, &r, sizeof(r));
 
     char buf[33] = {0};
-    getMD5(data, 16, buf);
+    if (!getMD5(data, 16, buf)) { return ""; }
 
     return String(buf);
 }
 
-static String stringMD5(const String& in){
+static bool md5Hex(const String &value)
+{
+    if (value.length() != MD5_LEN) { return false; }
+    for (unsigned i = 0; i < MD5_LEN; ++i) {
+        const char c = value.c_str()[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))) { return false; }
+    }
+    return true;
+}
+
+// Hash transcript parts directly: unchecked Arduino String concatenations can
+// silently truncate on allocation failure. Only the output allocates, and all
+// callers validate its exact size before using it as a hash or credential.
+static String stringMD5(std::initializer_list<const char *> parts){
     CoolString out;
     if (!out.reserve(MD5_LEN + 1))
         return "";
 
-    if(!getMD5((uint8_t*)(in.c_str()), in.length(), out.begin()))
-        return "";
+    mbedtls_md5_context context;
+    mbedtls_md5_init(&context);
+    bool ok = mbedtls_md5_starts(&context) == 0;
+    for (const char *part : parts) {
+        if (!ok || part == nullptr) { ok = false; break; }
+        ok = mbedtls_md5_update(&context, reinterpret_cast<const uint8_t *>(part), strlen(part)) == 0;
+    }
+    uint8_t digest[16] = {};
+    if (ok) { ok = mbedtls_md5_finish(&context, digest) == 0; }
+    mbedtls_md5_free(&context);
+    if (!ok) { return ""; }
+    constexpr char hex[] = "0123456789abcdef";
+    for (unsigned i = 0; i < sizeof(digest); ++i) {
+        out.begin()[2 * i] = hex[digest[i] >> 4];
+        out.begin()[2 * i + 1] = hex[digest[i] & 15];
+    }
+    out.begin()[MD5_LEN] = 0;
     out.setLength(MD5_LEN);
     return out;
 }
@@ -147,12 +176,13 @@ AuthFields parseDigestAuth(const char *header)
         }
     } while (nextBreak > 0);
 
-    result.success = true;
+    // Missing/empty/malformed responses must not equal an empty hash on OOM.
+    result.success = md5Hex(result.response);
     return result;
 }
 
 bool checkDigestAuthentication(const AuthFields &fields, const char * method, const char * username, const char * password, const char * realm, bool passwordIsHash, const char * nonce, const char * opaque, const char * uri){
-    if (username == NULL || password == NULL || method == NULL) {
+    if (!fields.success || !md5Hex(fields.response) || username == NULL || password == NULL || method == NULL) {
         logger.printfln("AUTH FAIL: missing required fields");
         return false;
     }
@@ -184,22 +214,21 @@ bool checkDigestAuthentication(const AuthFields &fields, const char * method, co
         return false;
     }
 
-    String ha1 = (passwordIsHash) ? String(password) : stringMD5(fields.username + ":" + fields.realm + ":" + String(password));
-    if (passwordIsHash && ha1.length() < MD5_LEN) {
+    String ha1 = (passwordIsHash) ? String(password) : stringMD5({fields.username.c_str(), ":", fields.realm.c_str(), ":", password});
+    if (!md5Hex(ha1)) {
         logger.printfln("AUTH FAIL: out of memory");
         return false;
     }
 
-    String ha2 = String(method) + ":" + fields.uri;
-    ha2 = stringMD5(ha2);
-    if (ha2.length() < MD5_LEN) {
+    String ha2 = stringMD5({method, ":", fields.uri.c_str()});
+    if (!md5Hex(ha2)) {
         logger.printfln("AUTH FAIL: out of memory");
         return false;
     }
 
-    String response = ha1 + ":" + fields.nonce + ":" + fields.nc + ":" + fields.cnonce + ":" + fields.qop + ":" + ha2;
+    const String response = stringMD5({ha1.c_str(), ":", fields.nonce.c_str(), ":", fields.nc.c_str(), ":", fields.cnonce.c_str(), ":", fields.qop.c_str(), ":", ha2.c_str()});
 
-    if (fields.response.equals(stringMD5(response))) {
+    if (md5Hex(response) && fields.response.equals(response)) {
         return true;
     }
 
@@ -212,5 +241,5 @@ String generateDigestHash(const char * username, const char * password, const ch
         return "";
     }
 
-    return stringMD5(String(username) + ':' + realm + ':' + password);
+    return stringMD5({username, ":", realm, ":", password});
 }

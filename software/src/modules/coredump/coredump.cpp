@@ -213,6 +213,8 @@ void Coredump::register_urls()
         return request.send_plain(200);
     });
 
+#if !(defined(TESLA_BLE_BENCH_ONLY) && TESLA_BLE_BENCH_ONLY && defined(TESLA_BLE_IRAM_DIAGNOSTICS) && TESLA_BLE_IRAM_DIAGNOSTICS)
+    // Raw task stacks can contain key material. Never export them in this bench.
     server.on_HTTPThread("/coredump/coredump.elf", HTTP_GET, [this](WebServerRequest request) {
         constexpr size_t BUFFER_SIZE = 2048;
         char buffer[BUFFER_SIZE];
@@ -274,4 +276,5 @@ void Coredump::register_urls()
 
         return request.endChunkedResponse();
     });
+#endif
 }

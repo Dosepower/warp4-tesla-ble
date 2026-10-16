@@ -72,6 +72,12 @@ class FlavoredName:
             return self.cache[key]
 
 def get_digest_paths(dst_dir, var_name, env=None):
+    # Mutable output names must remain lexical: realpath on a leaf symlink
+    # would turn a later unlink into deletion of its unrelated referent.
+    from pathlib import Path
+    import sys
+    sys.path.insert(0, str(Path(__file__).absolute().parent / 'tools'))
+    from bench_confinement import lexical, preflight
     if env is not None:
         project_dir = env.subst('$PROJECT_DIR')
         build_dir = env.subst('$BUILD_DIR')
@@ -80,8 +86,19 @@ def get_digest_paths(dst_dir, var_name, env=None):
         project_dir = metadata['project_dir']
         build_dir = metadata['build_dir']
 
-    digest1_path = os.path.realpath(os.path.join(build_dir, os.path.relpath(os.path.join(os.getcwd(), dst_dir), project_dir).replace('\\', '/').replace('/', ',') + ',' + var_name + '.digest'))
-    digest2_path = os.path.realpath(os.path.join(os.getcwd(), dst_dir, var_name + '.digest'))
+    project = lexical(project_dir)
+    build = lexical(build_dir)
+    destination = lexical(Path.cwd() / dst_dir)
+    if not destination.is_relative_to(project) or not build.is_relative_to(project) or build == project:
+        raise ValueError('confinement: digest outputs must be within project')
+    if not var_name or var_name in ('.', '..') or Path(var_name).name != var_name or '\\' in var_name:
+        raise ValueError('confinement: digest name must be a lexical leaf')
+    relative = str(destination.relative_to(project)).replace('\\', '/').replace('/', ',')
+    digest1_path = str(build / (relative + ',' + var_name + '.digest'))
+    digest2_path = str(destination / (var_name + '.digest'))
+    # Both leaves and every ancestor/type/shared inode are checked together,
+    # including read/check callers. Symlink leaves are rejected, not followed.
+    preflight(directories=(project, build, destination), files=(digest1_path, digest2_path)).revalidate()
 
     return digest1_path, digest2_path
 
@@ -134,7 +151,11 @@ def check_digest(src_paths, src_datas, dst_dir, var_name, env=None):
     return needs_update, reason, new_digest
 
 def remove_digest(dst_dir, var_name, env=None):
-    for digest_path in get_digest_paths(dst_dir, var_name, env=env):
+    paths = get_digest_paths(dst_dir, var_name, env=env)
+    from bench_confinement import preflight
+    plan = preflight(files=paths)
+    plan.revalidate()  # complete pair before the first lexical unlink
+    for digest_path in paths:
         try:
             os.remove(digest_path)
         except FileNotFoundError:
@@ -142,6 +163,9 @@ def remove_digest(dst_dir, var_name, env=None):
 
 def store_digest(digest, dst_dir, var_name, env=None):
     digest1_path, digest2_path = get_digest_paths(dst_dir, var_name, env=env)
+    from bench_confinement import preflight
+    plan = preflight(files=(digest1_path, digest2_path))
+    plan.revalidate()  # complete pair before mkdir, either write or registration
 
     if digest != None:
         # The first digest file is stored in $BUILD_DIR. We don't want to track it as

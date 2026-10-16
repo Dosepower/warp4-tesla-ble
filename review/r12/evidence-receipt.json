@@ -1,0 +1,27 @@
+{
+  "revision": "R12",
+  "status": "independent bounded Astra R12 delta review only, not approval",
+  "manifest_path": "/home/hermes/warp-tesla-ble/software/.pio/production-ui-evidence-lifecycle-r12/manifest.json",
+  "manifest_sha256": "18c2191cf09fcec31851f05c5e2cedb0785e28f7c163f3df42ac365782bb7ece",
+  "allowlist_sha256": "b980dc0fe55777f3f173a24b2c9cb8ec0fbcb58ade047db5efd7a6650e62bd08",
+  "packet_sha256": "210f6365429da5886745e5966beaa06c4a88b5fe1d8bff25af47600d6a7ee03c",
+  "summary_sha256": "c13df53887033715c92d3a1bf626ff8f4122faeb28194c33f6d40ab451deb17d",
+  "payload_files": 52,
+  "delta_source_snapshots": 9,
+  "publication_files": 285,
+  "sole_parent_plan": "a114447c4582456d123a0832eaa2d3ce5dd29f88",
+  "candidate_created": false,
+  "limits": [
+    "Exact entry/dependency/index_html AST subprocedures and actual digest helpers, not a full PlatformIO/frontend/package process; store registration/third-party writer bounded by scratch observations",
+    "Symlink/dangling digest leaves and shared-inode regular files are rejected; ordinary lexical pairs retain semantics; unsafe ancestry, traversal and project-external output roots refused",
+    "Exclusive-workspace static/substitution checks, not hostile concurrent filesystem/mount defense, arbitrary-I/O rollback or crash durability",
+    "Prior R7-R11 packaging/publication/host/sanitizer/IRAM/F2-F4/safety/binding and retained-artifact results reused by immutable hashes, not rerun; no firmware/SDK rebuild or new source-to-firmware association",
+    "Normal production packaging remains expected exit 2 (SDK 0x8000 vs WARP4 0xe000); diagnostic NON_INSTALLABLE and lacks production Tesla task; retained normal ELF has task",
+    "R6 lifecycle approval unchanged; historical R7/R8/R9/R10/R11 source-only BLOCK verdicts unchanged; no independent R12 approval",
+    "Historical R9 index/cache and possible early hardware metadata exceptions, R10 observation/early-RED qualifications, and R11 intermediate/private-index-cache qualifications remain disclosed; equal current hashes do not erase them",
+    "Host/ASan/UBSan not FreeRTOS/Xtensa concurrency/race proof; host mbedTLS uninstrumented; unresolved stack calls prevent complete bounds",
+    "No hardware/resource/RF/vehicle/power-loss/crypto/licensing/upstream/release qualification; B/C and two remaining A cold boots NO-GO",
+    "No candidate commit created; eventual separately authorized candidate still requires raw sole-parent/full-tree verification against pinned base",
+    "No prohibited services/devices, hardware-evidence contents, flash, real-index staging, commit, push, publication or release; namespace observations are at gate entry, not continuous audit"
+  ]
+}

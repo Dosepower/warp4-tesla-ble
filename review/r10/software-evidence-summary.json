@@ -1,0 +1,365 @@
+{
+  "schema": 1,
+  "revision": "R10",
+  "status": "IMPLEMENTED; NEW INDEPENDENT ASTRA REVIEW REQUIRED; NOT PUBLICATION APPROVAL",
+  "R9_review": {
+    "verdict": "BLOCK R9 SOURCE-ONLY HANDOFF",
+    "full_report_sha256": "7e59c88f7da9dadcd9228957636ca511daaa8adae3012709446032235843d488"
+  },
+  "historical_verdicts": "R6 lifecycle APPROVE unchanged; R7/R8/R9 source-only BLOCK unchanged",
+  "base_revision": "a114447c4582456d123a0832eaa2d3ce5dd29f88",
+  "changed_existing_files": [
+    "software/tools/bench_build_identity.py",
+    "software/tools/bench_confinement.py"
+  ],
+  "new_files": [
+    "R10_PACKAGING_HANDOFF.md",
+    "software/tests/tesla_vehicle/test_r10_confinement.py",
+    "software/tests/tesla_vehicle/test_r10_publication.py",
+    "review/r10/verify_publication.py",
+    "review/r10/software-evidence-summary.json",
+    "review/r10/publication-allowlist.json",
+    "review/r10/evidence-receipt.json"
+  ],
+  "findings": {
+    "R9-1": "all fifteen driver logs reject pre-existing shared inodes before first deletion/mkdir/log mutation; all eight export/SDK sentinels and victim bytes unchanged; zero rmtree calls",
+    "R9-2": "retained legacy quarantine uses lexical all-source/all-destination shared preflight and captured identity/byte revalidation before mkdir/move/unlink; later conflicts no longer partially move sources",
+    "F2_F3_F4": "unchanged implementation; retained image/header/final-rename/copy-time regressions pass"
+  },
+  "tests": {
+    "R10_confinement": 23,
+    "hardlinked_log_subcases": 15,
+    "R9_driver": 16,
+    "R7_packaging": 17,
+    "R8_packaging": 21,
+    "image": 42,
+    "R8_publication_index": 8,
+    "R9_publication_index_parent": 12,
+    "R10_publication_inputs": 12,
+    "IRAM": 122,
+    "heap_normal": 10,
+    "heap_diagnostic": 10,
+    "host": {
+      "normal": {
+        "preserved_helpers": 18,
+        "native_entries": 51,
+        "focused_executions": 145,
+        "exit": 0
+      },
+      "sanitize": {
+        "preserved_helpers": 18,
+        "native_entries": 51,
+        "focused_executions": 145,
+        "exit": 0
+      }
+    },
+    "counts_overlap_do_not_sum": true
+  },
+  "red_evidence": {
+    "initial_tests_before_production_edits": {
+      "tests": 19,
+      "result": "failures=17, errors=14",
+      "expected_exit": 1,
+      "log": "r10-red.log"
+    },
+    "expanded_exact_R9_baseline_replay": {
+      "tests": 23,
+      "result": "failures=17, errors=16",
+      "expected_exit": 1,
+      "log": "r10-exact-prefix-red.log"
+    },
+    "original_Astra_driver_and_quarantine": "unchanged scripts exit 0 on exact R9 baseline means unsafe behavior reproduced; originals not weakened",
+    "GREEN": "separate actual-entrypoint regressions and unchanged earlier Astra F1-F4 probe; no claim the defect-expecting original probes pass changed-source safety"
+  },
+  "builds": {
+    "normal": {
+      "firmware.elf": {
+        "sha256": "8d8dfe3481b22c1381a77c52b4585b14dc5afc3d75c4f70a066f5cc13df45afe",
+        "bytes": 86984260
+      },
+      "firmware.map": {
+        "sha256": "2f1fc4a58325032e189f48c7adf13959214909ef24967438682c5caab2ef3d9a",
+        "bytes": 40219943
+      },
+      "firmware.bin": {
+        "sha256": "fe7ce517e55a16590a4c1d1c44531b05a3720e0907b4a4aa852e5ac9ff83ee7c",
+        "bytes": 4712768
+      },
+      "bootloader.bin": {
+        "sha256": "ad07f6e1d1f8298a3dfa67c14687ee3f8e500b48cdc684d37154d88c6e324e27",
+        "bytes": 25136
+      },
+      "build_log": "final-firmware-build.log",
+      "build_cache_disabled_observed": true,
+      "accounting": [
+        "RAM:   [===       ]  25.7% (used 84324 bytes from 327680 bytes)",
+        "Flash: [=======   ]  72.6% (used 4711065 bytes from 6488064 bytes)"
+      ],
+      "fresh_clean_log": "final-firmware-clean.log",
+      "stack_observations": {
+        "roots": {
+          "TeslaVehicle::task_entry(void*)": {
+            "configured_bytes": 12288,
+            "discovered_entry_sum_bytes": 10288
+          },
+          "TeslaVehicle::teardown_entry(void*)": {
+            "configured_bytes": 4096,
+            "discovered_entry_sum_bytes": 2832
+          }
+        },
+        "unresolved_indirect_sites": 1176,
+        "complete_static_bound": false
+      }
+    },
+    "diagnostic": {
+      "firmware.elf": {
+        "sha256": "696d89b17965de47d9a3379f92d9f7baaf24dd78d5b9a28d2f078d66ba2e3b70",
+        "bytes": 85695120
+      },
+      "firmware.map": {
+        "sha256": "5fecc04500d0c5269d5e681b808a8c5deeec35d61bd93c96583b66be651767b4",
+        "bytes": 41429615
+      },
+      "firmware.bin": {
+        "sha256": "5a47f0f8d74ba0155f69d247f6429f827571e087d5464139f490127a9a3daf8b",
+        "bytes": 4659552
+      },
+      "bootloader.bin": {
+        "sha256": "08a0cc665d2f34f414f05f3de668f22b642370281aac9df2cb531e1fd8a7c19b",
+        "bytes": 25136
+      },
+      "build_log": "bench-firmware-build.log",
+      "build_cache_disabled_observed": true,
+      "accounting": [
+        "RAM:   [===       ]  25.9% (used 84908 bytes from 327680 bytes)",
+        "Flash: [=======   ]  71.8% (used 4657841 bytes from 6488064 bytes)"
+      ],
+      "fresh_clean_log": "bench-firmware-clean.log",
+      "stack_observations": {
+        "roots": {
+          "TeslaBleBenchSmoke::task_entry(void*)": {
+            "configured_bytes": null,
+            "discovered_entry_sum_bytes": 3808
+          },
+          "TeslaBleBenchDiscovery::task_entry(void*)": {
+            "configured_bytes": null,
+            "discovered_entry_sum_bytes": 6688
+          },
+          "TeslaVehicle::teardown_entry(void*)": {
+            "configured_bytes": null,
+            "discovered_entry_sum_bytes": 2800
+          }
+        },
+        "unresolved_indirect_sites": 1027,
+        "complete_static_bound": false
+      }
+    }
+  },
+  "SDK": "diagnostic SDK freshly compiled with CCACHE_ENABLE=0; normal SDK copied/reused, not freshly compiled",
+  "build_source_binding": {
+    "fresh_diagnostic_identity_matches_current_source_files": 1969,
+    "per_build_generated_output_exceptions": {
+      "software/src/build.cpp": {
+        "fresh_bound_sha256": "937add3a18ffa88a28661d8d503bb8fb5af493b90c8cc4eedf808ff37214dbff",
+        "host_worktree_sha256": "018dfb7b2546f626c90a16bae16835da0e0d6da58a7d5f0b03253ffa72347edd",
+        "note": "per-build generated output, not source equality; immutable blob is bound and export validation checks it"
+      },
+      "software/src/index_html.digest": {
+        "fresh_bound_sha256": "720180bc159dfb76b5e70cd182dfd1c51d3deb2d30fd6113353ebed339f93679",
+        "host_worktree_sha256": "d8cbc40489d68224d8ffee4f857bf73237dedf9482484c58fd403cd62f14b6c8",
+        "note": "per-build generated output, not source equality; immutable blob is bound and export validation checks it"
+      },
+      "software/src/index_html.embedded.cpp": {
+        "fresh_bound_sha256": "1dcee8223fe29e95ecb7873e878d8b19ecb4c5b6cb318b7047dae530769faaa6",
+        "host_worktree_sha256": "c99945af1c78fc08f0f3141b99ebd3adfa64361845a742811328357cf9749d2d",
+        "note": "per-build generated output, not source equality; immutable blob is bound and export validation checks it"
+      }
+    },
+    "selected_R10_mutation_code": {
+      "software/tools/bench_confinement.py": "342561d063fdd35c55d263ec8c98ef69307133198b09a55e8263903e0eabc1e7",
+      "software/tools/bench_build_identity.py": "4fd047fa12fd4e14f6d179214624384dfcf913948dd76983f55feac0f35fda69",
+      "software/tools/rebuild_warp4_bench.sh": "9916f8c188ecd53d85bb924e39a61ec7084aa3c6fed1795b950c21b0ef82b3ff"
+    },
+    "scope": "current source hashes compared with captured diagnostic input identity; not an independent source-freeze attestation or hardware execution proof"
+  },
+  "real_application_F2_F3_checks": {
+    "real_application_controls_passed": 4,
+    "in_memory_mutations_rejected": 12,
+    "retained_files_not_written": true,
+    "rows": [
+      {
+        "stage": "r7",
+        "mutation": "zero_tail_4096",
+        "result": "REJECTED",
+        "reason": "application: ELF/BIN unbacked loadable extent 0x50000348..0x50001348"
+      },
+      {
+        "stage": "r7",
+        "mutation": "invalid_flash_mode",
+        "result": "REJECTED",
+        "reason": "application: unsupported/unpinned flash mode 0xff; DIO header required"
+      },
+      {
+        "stage": "r7",
+        "mutation": "invalid_flash_frequency",
+        "result": "REJECTED",
+        "reason": "application: unsupported/unpinned flash frequency 0xe; 80m required"
+      },
+      {
+        "stage": "r8",
+        "mutation": "zero_tail_4096",
+        "result": "REJECTED",
+        "reason": "application: ELF/BIN unbacked loadable extent 0x50000348..0x50001348"
+      },
+      {
+        "stage": "r8",
+        "mutation": "invalid_flash_mode",
+        "result": "REJECTED",
+        "reason": "application: unsupported/unpinned flash mode 0xff; DIO header required"
+      },
+      {
+        "stage": "r8",
+        "mutation": "invalid_flash_frequency",
+        "result": "REJECTED",
+        "reason": "application: unsupported/unpinned flash frequency 0xe; 80m required"
+      },
+      {
+        "stage": "r9",
+        "mutation": "zero_tail_4096",
+        "result": "REJECTED",
+        "reason": "application: ELF/BIN unbacked loadable extent 0x50000348..0x50001348"
+      },
+      {
+        "stage": "r9",
+        "mutation": "invalid_flash_mode",
+        "result": "REJECTED",
+        "reason": "application: unsupported/unpinned flash mode 0xff; DIO header required"
+      },
+      {
+        "stage": "r9",
+        "mutation": "invalid_flash_frequency",
+        "result": "REJECTED",
+        "reason": "application: unsupported/unpinned flash frequency 0xe; 80m required"
+      },
+      {
+        "stage": "r10",
+        "mutation": "zero_tail_4096",
+        "result": "REJECTED",
+        "reason": "application: ELF/BIN unbacked loadable extent 0x50000348..0x50001348"
+      },
+      {
+        "stage": "r10",
+        "mutation": "invalid_flash_mode",
+        "result": "REJECTED",
+        "reason": "application: unsupported/unpinned flash mode 0xff; DIO header required"
+      },
+      {
+        "stage": "r10",
+        "mutation": "invalid_flash_frequency",
+        "result": "REJECTED",
+        "reason": "application: unsupported/unpinned flash frequency 0xe; 80m required"
+      }
+    ]
+  },
+  "diagnostic_export": {
+    "exact_export_files_verified": 9,
+    "report_names_exact_durable_image": true,
+    "independent_reconstructed_stage_validation": true,
+    "image_sha256": "87e0cd1009f827b652b5e892dcc6fd78231d36ce25e92a6c5271331e51f85ae4",
+    "partition_table_offset": 57344,
+    "actual_bootloader_literal": {
+      "function": 1074240140,
+      "literal_address": 1074233856,
+      "offset": 57344
+    },
+    "installable": false,
+    "production_tesla_runtime_present": false,
+    "normal_ELF_production_tesla_task_present": true,
+    "task_presence_evidence": "demangled nm symbol tables from both fresh ELFs; not target execution proof",
+    "scope": "diagnostic bench packaging only; normal production packaging remains rejected"
+  },
+  "normal_production_packaging": "expected BLOCKED: SDK partition reader 0x8000 vs WARP4 0xe000; validator exit 2",
+  "required_gate_exits": {
+    "sdk-summary": 0,
+    "bench-firmware-final": 0,
+    "normal-firmware-final": 0,
+    "normal-current-elf": 0,
+    "bench-current-elf": 0,
+    "iram-current-bench-final": 0,
+    "post-export-readback": 0,
+    "host-normal-final": 0,
+    "host-sanitize-final": 0,
+    "focused-normal": 0,
+    "focused-sanitize": 0,
+    "test_r10_confinement-final": 0,
+    "test_r10_publication-final": 0,
+    "test_r9_driver_confinement-final": 0,
+    "test_r9_publication-final": 0,
+    "test_r8_publication-final": 0,
+    "test_r8_review_packaging-final": 0,
+    "test_r7_review_packaging-final": 0,
+    "test_iram_bench_image-final": 0,
+    "astra-exact-prefix-red": 0,
+    "astra-prior-f1-f4-green": 0,
+    "web-actions": 0,
+    "web-integration": 0,
+    "clean-safety": 0,
+    "production-binding": 0,
+    "shell-syntax": 0,
+    "diff-check-final": 0,
+    "build-source-binding": 0,
+    "artifact-mutations": 0
+  },
+  "integrity": {
+    "prior_seals": {
+      "r6": {
+        "manifest_sha256": "464828efe10fc0ee34b49c97c07b6c75ff75f091dda09240c7bb2f41c31b08ab",
+        "unchanged_files": 1227,
+        "exact_hash_mode_inventory": true
+      },
+      "r7": {
+        "manifest_sha256": "78629cbe0e2ac04d15b7625e2b149b3b90528537a8c98eaf973a46b09678b895",
+        "unchanged_files": 2277,
+        "exact_hash_mode_inventory": true
+      },
+      "r8": {
+        "manifest_sha256": "589489531362c1b2d5ea153286e6e6920215dd77767ace00eefee46c9b5c7533",
+        "unchanged_files": 5031,
+        "exact_hash_mode_inventory": true
+      },
+      "r9": {
+        "manifest_sha256": "db3745b39f351f755fc9a78003778c1333c2a6b5e61f2b4eaaa0eeae2e3befbb",
+        "unchanged_files": 5072,
+        "exact_hash_mode_inventory": true
+      }
+    },
+    "astra_tree_entries_unchanged": {
+      "r7": 931,
+      "r8": 1233,
+      "r9": 1568
+    },
+    "inventory_scope": "all files/links except never-descended hardware-evidence names",
+    "real_index_bytes_unchanged_sha256": "a74b7a61fdc4173816ecec27199054e3bad56b431be9bfb0e818fd5e84570218",
+    "real_index_entries_unchanged_sha256": "59f663684ffcb2facbf2ab34ff7c3b6977175f65ebfc48b13ab021937dd2a522",
+    "initial_and_final_real_staged_delta_empty": true,
+    "baseline_source_copies_verified": 260,
+    "head_unchanged": "187e00a29fd0f39f47db010cec9f832e9f535158"
+  },
+  "execution_evidence": "per-gate namespace inode/interfaces/routes observed at entry; no non-loopback interfaces/routes; not continuous auditing",
+  "process_exceptions": [
+    "Initial namespace harness denied /proc/1/ns/net, then rejected empty IPv4 route output; both stopped before any gate command; corrected only observation harness, no privileged/network retry",
+    "Historical R9 real-index cache/byte change and possible early hardware metadata traversal remain disclosed; later equal hash does not erase those events",
+    "R10 initial RED probes ran in explicit offline namespaces before per-gate namespace observations were implemented; do not retroactively claim measured records for those initial runs"
+  ],
+  "limitations": [
+    "Exclusive-workspace static checks; not hostile concurrent rename/mount, arbitrary I/O failure rollback, or crash/power-loss proof",
+    "No real-index staging, commit, push, publication, release, flash or hardware-evidence content inspection",
+    "No hardware/serial/LAN/Proxmox/Tesla/Vaultwarden/GitHub/external service access",
+    "Diagnostic image NON_INSTALLABLE and lacks production Tesla task; normal packaging remains BLOCKED",
+    "Host/ASan/UBSan not FreeRTOS/Xtensa concurrency proof or race detection; host mbedTLS uninstrumented",
+    "Unresolved stack calls remain; stack observations are not complete bounds",
+    "No hardware/resource/RF/vehicle/power-loss/crypto/licensing/upstream/release qualification; B/C and two remaining A cold boots NO-GO",
+    "Unchanged upstream development PEM fixtures remain; no literal private-PEM-free claim",
+    "Exact private index and sole-parent plan checked; no candidate created; eventual authorized candidate raw parent/full tree must still be verified"
+  ]
+}

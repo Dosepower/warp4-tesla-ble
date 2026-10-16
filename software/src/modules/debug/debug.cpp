@@ -19,6 +19,11 @@
 
 #include "debug.h"
 
+#if defined(TESLA_BLE_BENCH_ONLY) && TESLA_BLE_BENCH_ONLY && defined(TESLA_BLE_IRAM_DIAGNOSTICS) && TESLA_BLE_IRAM_DIAGNOSTICS
+// Bench keys must not be readable through generic file/flash diagnostic APIs.
+#undef DEBUG_FS_ENABLE
+#endif
+
 #include <esp_debug_helpers.h>
 #include <esp_system.h>
 #include <esp_task.h>

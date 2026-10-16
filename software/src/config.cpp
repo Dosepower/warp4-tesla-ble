@@ -823,6 +823,20 @@ bool Config::updateString(const String &val)
     return update_value<String, ConfString>(val, "String");
 }
 
+bool Config::updateStringChecked(const char *val)
+{
+    if (!val) { return false; }
+    CoolString *target = get<ConfString>()->getVal();
+    if (*target == val) { return true; }
+    String candidate(val);
+    if (!candidate) { return false; }
+    // WString move either copies into existing capacity or transfers ownership;
+    // neither path allocates. Do not call update_value<String>: it copies first.
+    static_cast<String &>(*target) = std::move(candidate);
+    this->value.updated = 0xFF;
+    return true;
+}
+
 bool Config::updateInt(int32_t val)
 {
     // Asserts checked in ::update_value.

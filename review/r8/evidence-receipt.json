@@ -1,0 +1,22 @@
+{
+  "revision": "R8",
+  "manifest_path": "/home/hermes/warp-tesla-ble/software/.pio/production-ui-evidence-lifecycle-r8/manifest.json",
+  "manifest_sha256": "589489531362c1b2d5ea153286e6e6920215dd77767ace00eefee46c9b5c7533",
+  "content_files": 5029,
+  "source_snapshot_count": 276,
+  "publication_files": 252,
+  "publication_allowlist_sha256": "3206e5ea6d86722c0e781a79651e242876fb0d9a58b867941647cd1c310ec712",
+  "diagnostic_image_sha256": "0e4a024855d8e78502251997cc92b50ab3059230193320bb55e0b44d5ba5a66c",
+  "R7_review": "BLOCK; original retained unchanged",
+  "R8_review": "new independent Astra review required; implementer does not approve publication",
+  "normal_production_packaging": "BLOCKED",
+  "publication": "source-only; no binaries; exact private proposed index verification required",
+  "prior_integrity": {
+    "prior_sealed_files_unchanged": 3504,
+    "astra_files_unchanged": 931,
+    "prior_manifests": {
+      "r6": "464828efe10fc0ee34b49c97c07b6c75ff75f091dda09240c7bb2f41c31b08ab",
+      "r7": "78629cbe0e2ac04d15b7625e2b149b3b90528537a8c98eaf973a46b09678b895"
+    }
+  }
+}

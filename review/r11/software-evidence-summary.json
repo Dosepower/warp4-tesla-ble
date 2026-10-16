@@ -1,0 +1,260 @@
+{
+  "revision": "R11",
+  "status": "READY FOR INDEPENDENT ASTRA DELTA REVIEW ONLY; NOT APPROVAL",
+  "historical_verdicts": "R6 lifecycle APPROVE unchanged; R7/R8/R9/R10 source-only BLOCK unchanged",
+  "changed_existing_paths": [
+    "software/bench_guard_hook.py",
+    "software/bench_image_hook.py",
+    "software/lib-builder/prepare_warp4_bench.py",
+    "software/pio_hooks.py",
+    "software/tests/tesla_vehicle/cleanroom/astra/run_protocol_confirm.py",
+    "software/tests/tesla_vehicle/cleanroom/make_vectors.py",
+    "software/tests/tesla_vehicle/cleanroom/run_test.sh",
+    "software/tests/tesla_vehicle/cleanroom/wire_vectors.py",
+    "software/tests/tesla_vehicle/host/audit_external_publication.py",
+    "software/tests/tesla_vehicle/host/audit_reachable_stack.py",
+    "software/tests/tesla_vehicle/host/build_littlefs_close_harness.py",
+    "software/tests/tesla_vehicle/host/build_target_oom_harness.py",
+    "software/tests/tesla_vehicle/host/run_protocol_test.sh",
+    "software/tests/tesla_vehicle/run_host_tests.sh",
+    "software/tools/bench_build_identity.py",
+    "software/tools/bench_confinement.py",
+    "software/tools/bench_operation_stack.py"
+  ],
+  "new_paths": [
+    "R11_PACKAGING_HANDOFF.md",
+    "software/tests/tesla_vehicle/test_r11_confinement.py",
+    "software/tests/tesla_vehicle/test_r11_publication.py",
+    "review/r11/verify_publication.py",
+    "review/r11/verify_delta_packet.py",
+    "review/r11/software-evidence-summary.json",
+    "review/r11/delta-review-packet.json",
+    "review/r11/publication-allowlist.json",
+    "review/r11/evidence-receipt.json"
+  ],
+  "tests": {
+    "test_r7_review_packaging": 17,
+    "test_r8_review_packaging": 21,
+    "test_r9_driver_confinement": 16,
+    "test_r10_confinement": 23,
+    "test_iram_bench_image": 42,
+    "test_r8_publication": 8,
+    "test_r9_publication": 12,
+    "test_r10_publication": 12,
+    "test_r11_publication": 12,
+    "iram-retained-elf": 122,
+    "focused-green-final": 16
+  },
+  "hosts": {
+    "normal": {
+      "exit": 0,
+      "preserved_helpers": 18,
+      "native_entries": 51,
+      "extra_executions": 145
+    },
+    "sanitize": {
+      "exit": 0,
+      "preserved_helpers": 18,
+      "native_entries": 51,
+      "extra_executions": 145
+    }
+  },
+  "counts_overlap_do_not_sum": true,
+  "gate_exits": {
+    "full-regressions": 0,
+    "focused-green-final": 0,
+    "test_r7_review_packaging": 0,
+    "test_r8_review_packaging": 0,
+    "test_r9_driver_confinement": 0,
+    "test_r10_confinement": 0,
+    "test_iram_bench_image": 0,
+    "test_r8_publication": 0,
+    "test_r9_publication": 0,
+    "test_r10_publication": 0,
+    "test_r11_publication": 0,
+    "iram-retained-elf": 0,
+    "web-actions": 0,
+    "web-integration": 0,
+    "clean-safety": 0,
+    "production-binding": 0,
+    "diff-check": 0,
+    "sdk-driver-green": 0,
+    "retained-artifact-validation": 0,
+    "host-normal-final": 0,
+    "host-sanitize-final": 0,
+    "focused-normal": 0,
+    "focused-sanitize": 0,
+    "writer-scan": 0,
+    "exact-astra-r10-red-replay": 0,
+    "prior-f1f4-green": 0,
+    "final-operation-stack": 0,
+    "shell-syntax": 0
+  },
+  "expected_red_exits": {
+    "focused-prefixed-red": 1,
+    "expanded-r10-baseline-red": 1,
+    "original_astra_probes": {
+      "sdk-start-probe.py": {
+        "sha256": "32767386f34a5d89f4ac204aa28f292186b2c2ec2b2d606226d4c4576e6fdc78",
+        "exit": 0,
+        "meaning": "defect-expecting assertions must reproduce unsafe R10 behavior"
+      },
+      "hook-matrix.py": {
+        "sha256": "fd2e9b3064feb12f050e452d22169991ff12d16ed34a0690125f82063547cf17",
+        "exit": 0,
+        "meaning": "defect-expecting assertions must reproduce unsafe R10 behavior"
+      },
+      "additional-findings.py": {
+        "sha256": "e3de623bdc7c7770d85edaa4c78d0d594f728326a4459c324e86e3fd0a8e9712",
+        "exit": 0,
+        "meaning": "defect-expecting assertions must reproduce unsafe R10 behavior"
+      }
+    }
+  },
+  "retained_artifact_check": {
+    "diagnostic_full_validation": "PASS, software packaging only",
+    "export_files": 9,
+    "image_sha256": "87e0cd1009f827b652b5e892dcc6fd78231d36ce25e92a6c5271331e51f85ae4",
+    "installable": false,
+    "normal_production_task_symbols": [
+      "_ZN12TeslaVehicle10task_entryEPv"
+    ],
+    "diagnostic_production_task_symbols": [],
+    "bootloader_partition_literal": {
+      "function": 1074240140,
+      "literal_address": 1074233856,
+      "offset": 57344
+    },
+    "component_ranges": [
+      {
+        "name": "bootloader.bin",
+        "start": "0x1000",
+        "end_exclusive": "0x7230",
+        "size": 25136
+      },
+      {
+        "name": "partitions.bin",
+        "start": "0xe000",
+        "end_exclusive": "0xec00",
+        "size": 3072
+      },
+      {
+        "name": "firmware.bin",
+        "start": "0x10000",
+        "end_exclusive": "0x481960",
+        "size": 4659552
+      },
+      {
+        "name": "boot_app0.bin",
+        "start": "0x640000",
+        "end_exclusive": "0x642000",
+        "size": 8192
+      }
+    ],
+    "normal_gate_exit": 2,
+    "normal_gate_message": "bench image validation failed: SDK partition table offset 0x8000 != merged WARP4 offset 0xe000",
+    "mutations": [
+      {
+        "sealed_stage": "r7",
+        "mutation": "zero_tail_4096",
+        "result": "REJECTED",
+        "reason": "application: ELF/BIN unbacked loadable extent 0x50000348..0x50001348"
+      },
+      {
+        "sealed_stage": "r7",
+        "mutation": "invalid_flash_mode",
+        "result": "REJECTED",
+        "reason": "application: unsupported/unpinned flash mode 0xff; DIO header required"
+      },
+      {
+        "sealed_stage": "r7",
+        "mutation": "invalid_flash_frequency",
+        "result": "REJECTED",
+        "reason": "application: unsupported/unpinned flash frequency 0xe; 80m required"
+      },
+      {
+        "sealed_stage": "r8",
+        "mutation": "zero_tail_4096",
+        "result": "REJECTED",
+        "reason": "application: ELF/BIN unbacked loadable extent 0x50000348..0x50001348"
+      },
+      {
+        "sealed_stage": "r8",
+        "mutation": "invalid_flash_mode",
+        "result": "REJECTED",
+        "reason": "application: unsupported/unpinned flash mode 0xff; DIO header required"
+      },
+      {
+        "sealed_stage": "r8",
+        "mutation": "invalid_flash_frequency",
+        "result": "REJECTED",
+        "reason": "application: unsupported/unpinned flash frequency 0xe; 80m required"
+      },
+      {
+        "sealed_stage": "r9",
+        "mutation": "zero_tail_4096",
+        "result": "REJECTED",
+        "reason": "application: ELF/BIN unbacked loadable extent 0x50000348..0x50001348"
+      },
+      {
+        "sealed_stage": "r9",
+        "mutation": "invalid_flash_mode",
+        "result": "REJECTED",
+        "reason": "application: unsupported/unpinned flash mode 0xff; DIO header required"
+      },
+      {
+        "sealed_stage": "r9",
+        "mutation": "invalid_flash_frequency",
+        "result": "REJECTED",
+        "reason": "application: unsupported/unpinned flash frequency 0xe; 80m required"
+      },
+      {
+        "sealed_stage": "r10",
+        "mutation": "zero_tail_4096",
+        "result": "REJECTED",
+        "reason": "application: ELF/BIN unbacked loadable extent 0x50000348..0x50001348"
+      },
+      {
+        "sealed_stage": "r10",
+        "mutation": "invalid_flash_mode",
+        "result": "REJECTED",
+        "reason": "application: unsupported/unpinned flash mode 0xff; DIO header required"
+      },
+      {
+        "sealed_stage": "r10",
+        "mutation": "invalid_flash_frequency",
+        "result": "REJECTED",
+        "reason": "application: unsupported/unpinned flash frequency 0xe; 80m required"
+      }
+    ],
+    "build_identity": "98ba0e422e03051d7b6378bbbb3b2b2738f1fd508a12d09303f7ef3f4531ee6d",
+    "sdk_manifest_sha256": "6a8237b550f27f31b122e25ae8e91478c9318805ddc4b66ff2cd7fb4ab890ff0"
+  },
+  "writer_scan": {
+    "paths_scanned": 267,
+    "writer_paths": 41,
+    "sha256": "ebb7dc0e5577cea40fa9a5f7893ef4b3a53f3573eee0859862181bee48d77078"
+  },
+  "limits": [
+    "Exclusive-workspace static/substitution checks; no hostile concurrent filesystem/mount defense, arbitrary I/O rollback or crash/power-loss guarantee",
+    "Retained R10 ELF/BIN/SDK are revalidated with current validator; no new R11 firmware/SDK build or source-to-firmware association claimed",
+    "Actual driver safe control uses labelled configure/build-stop fixtures; it proves real begin identity and preflight, not SDK compilation",
+    "Both bench hooks executed with minimal SCons environment; extra pio_hooks main check executes exact AST with clean-return boundary, not full PlatformIO/frontend execution",
+    "Normal packaging remains expected BLOCKED 0x8000 vs 0xe000 (exit 2); diagnostic is NON_INSTALLABLE and lacks production Tesla task",
+    "Host/ASan/UBSan not target FreeRTOS/Xtensa concurrency proof or race detection; host mbedTLS uninstrumented; unresolved stack calls prevent complete bounds",
+    "No hardware/resource/RF/vehicle/power-loss/crypto/licensing/upstream/release qualification; B/C and two remaining A cold boots remain NO-GO",
+    "Historical R9 index-byte/cache change and possible early hardware metadata traversal remain disclosed; later equal hash does not erase them",
+    "Historical R10 namespace-observation harness failures and early unmeasured RED runs remain disclosed; namespace entry observations are not continuous packet auditing",
+    "No candidate commit created; exact sole parent/full-tree ancestry must be verified for any separately authorized eventual candidate",
+    "Historical review reproduction recipes remain immutable historical controls, not current operational entrypoints or approval",
+    "No hardware/serial/LAN/Proxmox/Tesla/Vaultwarden/GitHub/external services, real-index staging, commit/push/publication/release/flash or hardware-evidence content inspection"
+  ],
+  "process_notes": [
+    "First full regression attempt rejected legitimate project/build fixture by overly strict .pio/build-only policy; changed to any proper project descendant, preserving confinement; failure retained",
+    "Second attempt exposed valid ../build/file direct alias control; replaced reject-all-parent-steps with real-directory component validation; exact chained-alias Astra counterexample still preserved; failure retained",
+    "Final hardening propagates unreadable output-tree errors; a concurrent rerun exposed unrelated ancestor directory link-count churn; deterministic RED retained, directories now bind dev/inode/mode while regular-file link-count checks remain unchanged",
+    "Expanded baseline replay may include missing-new-helper errors; initial pre-edit regression and original exact Astra scripts separately establish actual R10 defects",
+    "One read-only delegated scan used gpt-6.1-sol on openai-codex; delegation interface has no worker-profile selector; no provider fallback",
+    "execute_code helper refused unattended execution; no code ran there; deterministic local scripts used instead"
+  ]
+}

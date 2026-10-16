@@ -1,0 +1,29 @@
+{
+  "revision": "R11",
+  "status": "Independent Astra delta review required; not approval",
+  "manifest_path": "/home/hermes/warp-tesla-ble/software/.pio/production-ui-evidence-lifecycle-r11/manifest.json",
+  "manifest_sha256": "295d1c757336fefdbff6701f9dadf41e1575142707d48976c27c68ba3ea00ade",
+  "allowlist_sha256": "24c10bc05371756d72f23c2bf8e1db45f9d292552f3f0771687eec72d7185d18",
+  "packet_sha256": "cfa23424abf2ea2b83fddbb512fc06ca183515c9629d1c791444a981c6865895",
+  "summary_sha256": "f88f0a7a78789f921f926662d7797186f40ee81c05e2d6a7c303dac46759a55d",
+  "content_files": 377,
+  "source_snapshot_count": 275,
+  "publication_files": 276,
+  "sole_parent_plan": "a114447c4582456d123a0832eaa2d3ce5dd29f88",
+  "candidate_created": false,
+  "final_exact_index_readback_required": true,
+  "limits": [
+    "Exclusive-workspace static/substitution checks; no hostile concurrent filesystem/mount defense, arbitrary I/O rollback or crash/power-loss guarantee",
+    "Retained R10 ELF/BIN/SDK are revalidated with current validator; no new R11 firmware/SDK build or source-to-firmware association claimed",
+    "Actual driver safe control uses labelled configure/build-stop fixtures; it proves real begin identity and preflight, not SDK compilation",
+    "Both bench hooks executed with minimal SCons environment; extra pio_hooks main check executes exact AST with clean-return boundary, not full PlatformIO/frontend execution",
+    "Normal packaging remains expected BLOCKED 0x8000 vs 0xe000 (exit 2); diagnostic is NON_INSTALLABLE and lacks production Tesla task",
+    "Host/ASan/UBSan not target FreeRTOS/Xtensa concurrency proof or race detection; host mbedTLS uninstrumented; unresolved stack calls prevent complete bounds",
+    "No hardware/resource/RF/vehicle/power-loss/crypto/licensing/upstream/release qualification; B/C and two remaining A cold boots remain NO-GO",
+    "Historical R9 index-byte/cache change and possible early hardware metadata traversal remain disclosed; later equal hash does not erase them",
+    "Historical R10 namespace-observation harness failures and early unmeasured RED runs remain disclosed; namespace entry observations are not continuous packet auditing",
+    "No candidate commit created; exact sole parent/full-tree ancestry must be verified for any separately authorized eventual candidate",
+    "Historical review reproduction recipes remain immutable historical controls, not current operational entrypoints or approval",
+    "No hardware/serial/LAN/Proxmox/Tesla/Vaultwarden/GitHub/external services, real-index staging, commit/push/publication/release/flash or hardware-evidence content inspection"
+  ]
+}

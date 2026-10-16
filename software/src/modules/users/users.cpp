@@ -110,7 +110,7 @@ static bool read_user_slot_info(UserSlotInfo *result)
 }
 #endif
 
-static bool check_http_auth(WebServerRequest req) {
+static bool check_http_auth(WebServerRequest req, bool allow_lockout = true) {
     String auth = req.header("Authorization");
     if (auth.isEmpty()) {
         return false;
@@ -149,7 +149,7 @@ static bool check_http_auth(WebServerRequest req) {
 
     if (!closure.result && !closure.user_with_password_found) {
         logger.printfln("Web interface authentication enabled, but no user with set password found! Allowing unauthenticated access to prevent lock-out!");
-        return true;
+        return allow_lockout;
     }
 
     return closure.result;
@@ -456,7 +456,8 @@ void Users::setup()
         // During setup(), httpd is not running yet (it starts in web_server's post_setup()).
         // It's safe to call onAuthenticate_HTTPThread directly here since no HTTP requests
         // can arrive before httpd starts.
-        server.onAuthenticate_HTTPThread(check_http_auth);
+        server.onAuthenticate_HTTPThread([](WebServerRequest req) { return check_http_auth(req); },
+                                         [](WebServerRequest req) { return check_http_auth(req, false); });
 
         logger.printfln("Web interface authentication enabled.");
     }
@@ -853,6 +854,7 @@ void Users::disable_http_auth() {
 
 void Users::enable_http_auth() {
     server.runInHTTPThread([](void *arg) {
-        server.onAuthenticate_HTTPThread(check_http_auth);
+        server.onAuthenticate_HTTPThread([](WebServerRequest req) { return check_http_auth(req); },
+                                         [](WebServerRequest req) { return check_http_auth(req, false); });
     }, nullptr);
 }
