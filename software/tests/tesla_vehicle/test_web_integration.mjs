@@ -18,6 +18,8 @@ const mock = `
 const f = globalThis.fixture;
 export const get = topic => f.values[topic];
 export const call = async (topic, payload) => { f.calls.push({topic, payload}); await f.call(); };
+export const save = async (topic, payload) => call(topic + '_update', payload);
+export const postReboot = () => {};
 export const __ = key => key;
 export const addApiEventListener = (topic, cb) => { f.listeners[topic] = cb; };
 export const render_allowed = () => true;
@@ -28,9 +30,10 @@ export class ConfigComponent {
     isDirty() { return this.dirty; }
     set() { return () => {}; } toggle() { return () => {}; }
 }
-export const Button = 'Button', Alert = 'Alert', BatteryCharging = 'BatteryCharging';
+export const Button = 'Button', Alert = 'Alert', Bluetooth = 'Bluetooth', BatteryCharging = 'BatteryCharging';
 export const FormRow = 'FormRow', FormSeparator = 'FormSeparator', InputNumber = 'InputNumber';
 export const InputSelect = 'InputSelect', InputText = 'InputText', NavbarItem = 'NavbarItem', Switch = 'Switch';
+export const ConfigForm = 'ConfigForm', PageHeader = 'PageHeader';
 export const SubPage = Object.assign(() => {}, {Status: 'Status', Config: 'Config'});
 `;
 const compiled = await build({
@@ -110,7 +113,7 @@ for (const transition of [{stopping: true}, {restart_required: true}, {running: 
 // Full state field names/types, command payloads and normal registration stay aligned.
 const firmware = source('src/modules/tesla_vehicle/tesla_vehicle.cpp');
 const schema = source('web/src/modules/tesla_vehicle/api.ts');
-const stateBlock = firmware.split('state = Config::Object({')[1].split('});')[0];
+const stateBlock = firmware.split('\n    state = Config::Object({')[1].split('});')[0];
 const stateFields = [...stateBlock.matchAll(/\{"(\w+)", Config::(\w+)/g)];
 const tsFields = [...schema.split('export interface state {')[1].split('}')[0].matchAll(/(\w+): ([^;]+);/g)];
 assert.deepEqual(stateFields.map(m => m[1]).sort(), tsFields.map(m => m[1]).sort());

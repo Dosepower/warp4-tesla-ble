@@ -2,13 +2,15 @@
 #include "tesla_vehicle.h"
 #endif
 #include <cstring>
+#if WARP_BLUETOOTH_COMPILED
 #include "tesla_ble_uuid.h"
+#endif
 #include "tesla_ble_iram_diagnostics.h"
 
-static constexpr uint16_t TESLA_GATT_APP = 0x5742;
-
-
 std::atomic<TeslaVehicle *> TeslaVehicle::gatt_owner{nullptr};
+
+#if WARP_BLUETOOTH_COMPILED
+static constexpr uint16_t TESLA_GATT_APP = 0x5742;
 
 void TeslaVehicle::process_disconnect()
 {
@@ -311,3 +313,14 @@ void TeslaVehicle::gatt_callback(esp_gattc_cb_event_t event, esp_gatt_if_t inter
     default: break;
     }
 }
+#else
+// A disabled SDK must link without any controller/host library references.
+void TeslaVehicle::process_disconnect() {}
+bool TeslaVehicle::gatt_operation(GattOperation, uint16_t, tesla_warp::FunctionRef<bool()>) { return false; }
+bool TeslaVehicle::ensure_connected() { return false; }
+void TeslaVehicle::disconnect_internal(bool) {}
+bool TeslaVehicle::transport_owns(uint64_t) const { return false; }
+bool TeslaVehicle::transport_recover_frame(uint64_t) { return false; }
+bool TeslaVehicle::transport_write_bytes(const uint8_t *, size_t) { return false; }
+
+#endif

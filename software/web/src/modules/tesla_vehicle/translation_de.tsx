@@ -2,10 +2,25 @@
 import { h } from "preact";
 let x = {
     "tesla_vehicle": {
-        "navbar": {"tesla_vehicle": "Tesla-Bluetooth"},
+        "navbar": {"tesla_vehicle": "Bluetooth"},
+        "bluetooth": {
+            "title": "Bluetooth",
+            "tesla_title": "Tesla-Ladezustand",
+            "enable": "Bluetooth aktivieren",
+            "desired": "Gewünschte allgemeine Freigabe (gespeichert, nicht der Laufzeitstatus)",
+            "help": "Bluetooth kann aktiviert werden, um den Tesla-Ladezustand (SoC) auszulesen. Das Fahrzeug muss separat eingerichtet und mit Schlüsselkarte gekoppelt werden. Dies ist kein allgemeiner Bluetooth-Gerätemanager. Änderungen der allgemeinen Freigabe werden erst nach Speichern und ausdrücklich bestätigtem Neustart wirksam. Es wird keine andere Firmware benötigt. Ausschalten löscht weder den lokalen Schlüssel noch die Berechtigung im Tesla.",
+            "runtime": "Tatsächlicher Bluetooth-Status",
+            "disabled": "Ausgeschaltet", "starting": "Startet", "active": "Aktiv", "stopping": "Wird beendet", "error": "Fehler / erneuter Start gesperrt",
+            "unsupported": "Bluetooth ist mit dieser SDK-/Hardware-Konfiguration nicht verfügbar. Aktivieren und Bluetooth-Neustart sind gesperrt. Grund",
+            "legacy": "Eine bisherige Tesla-Dienstkonfiguration ist vorhanden und bleibt erhalten. Sie aktiviert Bluetooth nicht automatisch. Allgemeine Freigabe separat speichern und Neustart bestätigen.",
+            "save_failed": "Bluetooth-Konfiguration nicht bestätigt gespeichert. Kein Neustart über diese Aktion. Letzter bestätigter Zustand bleibt erhalten; Fehler prüfen und erneut speichern.",
+            "pending": "Neustart ausstehend: gespeicherte Freigabe und Laufzeit können abweichen, oder die sichere Lifecycle-Sperre verlangt einen Neustart. Erst danach wird die gespeicherte Freigabe angewendet.",
+            "restart": "Jetzt neu starten",
+            "restart_confirm": "WARP jetzt neu starten und die bestätigte gespeicherte Bluetooth-Freigabe anwenden? Die Ladesteuerung wird dabei unterbrochen."
+        },
         "content": {
             "title": "Tesla-Bluetooth",
-            "enable": "Tesla-Bluetooth aktivieren",
+            "enable": "Tesla-SoC-Dienst aktivieren",
             "enable_desc": "Ladestand per Bluetooth lesen; die WARP startet die normale AC-Ladung selbst",
             "vehicle_profile": "WARP-Fahrzeugprofil",
             "vehicle_profile_help": "Die von der WARP per SLAC gemessene MAC dieses Profils wird fest mit dem Tesla-Schlüssel verknüpft.",
@@ -26,7 +41,7 @@ let x = {
             "pair_step_5": "Die WARP prüft die Freigabe innerhalb eines begrenzten Zeitfensters. Eine gesendete Anfrage oder ein lokaler Schlüssel beweist keine Freigabe. Bei Zeitüberschreitung das Fahrzeug prüfen und bewusst erneut versuchen. „SoC jetzt lesen“ kann auch einen vorhandenen lokalen Schlüssel prüfen.",
             "pair_confirm": "Eine Anfrage zum Anlernen eines Schlüssels an den angeschlossenen Tesla senden? Schlüsselkarte bereithalten und im Fahrzeug freigeben. Dadurch wird keine Ladung gestartet.",
             "poll_confirm": "Lokalen Schlüssel prüfen und SoC lesen? Diese manuelle Abfrage darf das Fahrzeug auch bei ausgeschaltetem automatischem Wecken wecken. Dadurch wird keine Ladung gestartet.",
-            "lifecycle_help": "Gespeicherte Konfiguration und aktive Bluetooth-Laufzeit sind getrennt. Erstmaliges Aktivieren nach deaktiviertem Boot startet ohne Neustart. Jede gespeicherte Änderung im Betrieb beendet die Laufzeit; nach Nutzung des Bluetooth-Controllers verlangt restart_required vor erneuter Nutzung einen WARP-Neustart. Der lokale Schlüssel bleibt beim Beenden erhalten. Kein automatischer Neustart.",
+            "lifecycle_help": "Der Tesla-Dienst benötigt die oben beim Boot angewendete allgemeine Bluetooth-Freigabe. Eine Änderung der Tesla-Konfiguration im Betrieb beendet die Laufzeit sicher; nach Controller-Nutzung bleibt der erneute Start bis zum Neustart gesperrt. Lokaler Schlüssel und Tesla-Berechtigung bleiben beim Ausschalten erhalten. Kein automatischer Neustart.",
             "vehicle_ready": "Das gewählte WARP-Fahrzeugprofil ist aktiv. Die Firmware prüft vor jeder Aktion erneut die angeschlossene SLAC-Identität und die Schlüsselbindung.",
             "vehicle_not_ready": "Zum Koppeln und Lesen muss der gewählte Tesla an dieser WARP angeschlossen und sein Fahrzeugprofil aktiv sein. Eine BLE-Verbindung allein genügt nicht.",
             "save_first": "Konfigurationsänderungen vor dem Koppeln oder Lesen speichern.",

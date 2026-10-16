@@ -2,6 +2,7 @@
 // Members of the independently authored module fixture; observable ownership only.
 static void configure(TeslaVehicle &o) {
     o.pre_setup(); o.setup(); o.config.get("enable")->updateBool(true);
+    o.bluetooth_boot_enabled = true; // Explicit master permission, never inferred from service config.
     o.config.get("vin")->updateString("5YJ3E1EA7KF000001");
     o.config.get("ble_address")->updateString("01:02:03:04:05:06");
     o.config.get("ev_index")->updateInt(ev.index);

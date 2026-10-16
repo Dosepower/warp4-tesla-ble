@@ -10,15 +10,18 @@
 #include "tesla_ble_bench_discovery.h"
 
 #ifndef TESLA_BLE_MODULE_HOST_TEST
+#if WARP_BLUETOOTH_COMPILED
 #include <BLEAddress.h>
 #include <BLEDevice.h>
 
 #include <esp_bt.h>
 #include <esp_bt_main.h>
 #include <esp32-hal-bt.h>
+#endif
 
 #include "event_log_prefix.h"
 #include "generated/module_dependencies.h"
+#include "tools.h"
 #endif
 #include "tesla_ble_storage.h"
 #include "tesla_ble_transport.h"
@@ -51,6 +54,17 @@ static std::array<uint8_t, 6> encode_vehicle_mac(uint64_t mac)
 
 void TeslaVehicle::pre_setup()
 {
+    bluetooth_config = Config::Object({{"enable", Config::Bool(false)}});
+    bluetooth_update = Config::Object({{"enable", Config::Bool(false)}});
+    bluetooth_state = Config::Object({
+        {"supported", Config::Bool(bluetooth_supported())},
+        {"unsupported_reason", Config::Str(bluetooth_unsupported_reason(), 0, 32)},
+        {"phase", Config::Str("disabled", 0, 8)},
+        {"restart_required", Config::Bool(false)},
+        {"restart_reason", Config::Str("", 0, 32)},
+        {"persistence_error", Config::Bool(false)},
+        {"legacy_tesla_enabled", Config::Bool(false)},
+    });
     config = ConfigRoot{Config::Object({
         {"enable", Config::Bool(false)},
         {"vin", Config::Str("", 0, 17)},
@@ -125,10 +139,13 @@ void TeslaVehicle::pre_setup()
 
 void TeslaVehicle::setup()
 {
-    if (!api.restorePersistentConfig("tesla_vehicle/config", &config) &&
-        api.restorePersistentConfig("tesla_ble/config", &config)) {
-        api.writeConfig("tesla_vehicle/config", &config);
-        api.removeConfig("tesla_ble/config");
+    bool desired = false;
+    bluetooth_commit_ok = bluetooth_store.load(desired);
+    bluetooth_config.get("enable")->updateBool(desired);
+    bluetooth_boot_enabled = bluetooth_supported() && bluetooth_commit_ok && desired;
+    if (!api.restorePersistentConfig("tesla_vehicle/config", &config)) {
+        // Retain the legacy fallback: never delete it after an unchecked write.
+        api.restorePersistentConfig("tesla_ble/config", &config);
     }
 
     // Unknown until a worker explicitly inspects storage. Disabled setup must
@@ -138,15 +155,50 @@ void TeslaVehicle::setup()
     state.get("paired")->updateBool(pairing_policy.paired());
 
     tesla_ble_iram_snapshot("module.setup", "boot");
-    if (config.get("enable")->asBool()) {
+    if (bluetooth_boot_enabled) {
         start_runtime();
     }
-
+    publish_bluetooth_state();
     initialized = true;
+}
+
+void TeslaVehicle::register_bluetooth_urls()
+{
+    // Local transaction: addPersistentConfig's void writer cannot confirm commit.
+    api.addState("bluetooth/config", &bluetooth_config);
+    api.addState("bluetooth/state", &bluetooth_state);
+    api.addCommand("bluetooth/config_update", &bluetooth_update, {}, [this](Language, String &errmsg) {
+        const bool desired = bluetooth_update.get("enable")->asBool();
+        if (desired && !bluetooth_supported()) {
+            errmsg = checked_error_string("Bluetooth unavailable: SDK or hardware does not support this service");
+            return;
+        }
+        bluetooth_commit_ok = bluetooth_store.save(desired);
+        if (!bluetooth_commit_ok) {
+            errmsg = checked_error_string("Bluetooth configuration commit failed; not saved; no restart permitted");
+        } else {
+            bluetooth_config.get("enable")->updateBool(desired);
+        }
+        publish_bluetooth_state();
+    }, false);
+    api.addCommand("bluetooth/restart", &empty_command, {}, [this](Language, String &errmsg) {
+        bool saved = false;
+        publish_bluetooth_state();
+        if (!bluetooth_supported() || !bluetooth_commit_ok ||
+            !bluetooth_state.get("restart_required")->asBool() ||
+            !bluetooth_store.load(saved) || saved != bluetooth_config.get("enable")->asBool()) {
+            bluetooth_commit_ok = false;
+            publish_bluetooth_state();
+            errmsg = checked_error_string("No verified Bluetooth commit available for restart");
+            return;
+        }
+        trigger_reboot("Bluetooth configuration");
+    }, true);
 }
 
 void TeslaVehicle::register_urls()
 {
+    register_bluetooth_urls();
     api.addPersistentConfig("tesla_vehicle/config", &config, {}, {"vin", "ble_address"});
     api.addState("tesla_vehicle/state", &state);
 #if defined(TESLA_BLE_BENCH_ONLY) && TESLA_BLE_BENCH_ONLY && defined(TESLA_BLE_IRAM_DIAGNOSTICS) && TESLA_BLE_IRAM_DIAGNOSTICS
@@ -188,7 +240,12 @@ void TeslaVehicle::register_urls()
             return;
         }
         if (!accepts_commands()) {
-            errmsg = checked_error_string("Tesla BLE is stopping; retry after teardown");
+            // A general Bluetooth-only worker is intentionally alive even when
+            // the Tesla service is OFF. Do not misreport that as teardown, or
+            // loosen the existing deletion/worker ownership gates.
+            errmsg = checked_error_string(!config.get("enable")->asBool() ?
+                "Tesla service is disabled; disable Bluetooth and restart before deleting the local key, or enable the Tesla service" :
+                "Tesla BLE is stopping; retry after teardown");
             return;
         }
         Runtime *r = runtime_owner.get();
@@ -205,13 +262,15 @@ void TeslaVehicle::register_urls()
 bool TeslaVehicle::accepts_commands() const
 {
     const Runtime *r = runtime_owner.get();
-    return !runtime_owner.restart_required() && !ev.session_exhausted() && config.get("enable")->asBool() && r != nullptr &&
+    return bluetooth_boot_enabled && !runtime_owner.restart_required() && !ev.session_exhausted() && config.get("enable")->asBool() && r != nullptr &&
+           r->service_enabled &&
            !r->identity_exhausted.load() &&
            !runtime_update_requested.load() && !r->stop_requested.load();
 }
 
 bool TeslaVehicle::start_runtime(bool storage_only)
 {
+    if (!storage_only && (!bluetooth_boot_enabled || !bluetooth_supported())) { return false; }
     if (ev.session_exhausted()) {
         runtime_owner.require_restart(); state.get("restart_required")->updateBool(true); return false;
     }
@@ -220,7 +279,7 @@ bool TeslaVehicle::start_runtime(bool storage_only)
     return false; // Bench smoke must never create a Tesla runtime.
 #else
     start_attempted = true;
-    return runtime_owner.start(storage_only || config.get("enable")->asBool(), [this, storage_only]() -> std::unique_ptr<Runtime> {
+    return runtime_owner.start(storage_only || bluetooth_boot_enabled, [this, storage_only]() -> std::unique_ptr<Runtime> {
         auto r = std::unique_ptr<Runtime>(new (std::nothrow) Runtime(this));
         if (!r) {
             publish_error("Failed to allocate Tesla runtime");
@@ -242,12 +301,13 @@ bool TeslaVehicle::start_runtime(bool storage_only)
         }
         const auto &vin = config.get("vin")->asString();
         const auto &address = config.get("ble_address")->asString();
-        if (!storage_only && (!tesla_ble_valid_vin(vin.c_str()) || !tesla_ble_valid_address(address.c_str()))) {
+        const bool service = !storage_only && config.get("enable")->asBool();
+        if (service && (!tesla_ble_valid_vin(vin.c_str()) || !tesla_ble_valid_address(address.c_str()))) {
             publish_error("Invalid or unavailable Tesla BLE identity");
             return nullptr;
         }
         r->vin.assign(vin.c_str());
-        if (!storage_only) {
+        if (service) {
             unsigned bytes[6]{};
             if (sscanf(address.c_str(), "%2x:%2x:%2x:%2x:%2x:%2x", &bytes[0], &bytes[1], &bytes[2],
                        &bytes[3], &bytes[4], &bytes[5]) != 6) { return nullptr; }
@@ -257,6 +317,7 @@ bool TeslaVehicle::start_runtime(bool storage_only)
         r->poll_interval_seconds = config.get("poll_interval")->asUint();
         r->wake_once = config.get("wake_once")->asBool();
         r->storage_only = storage_only;
+        r->service_enabled = service;
         return r;
     }, [this](Runtime &r) {
         r.epoch = runtime_owner.epoch();
@@ -268,7 +329,6 @@ bool TeslaVehicle::start_runtime(bool storage_only)
             publish_error("Failed to start Tesla BLE task");
             return false;
         }
-        state.get("running")->updateBool(true);
         return true;
     });
 #endif
@@ -310,7 +370,7 @@ void TeslaVehicle::task_loop()
         if (!r->stop_requested.load() && r->storage_only) {
             if (!r->storage->forget_material()) { post_event(EventType::Error, "Could not remove Tesla key material"); }
             r->stop_requested.store(true);
-        } else if (!r->stop_requested.load()) {
+        } else if (!r->stop_requested.load() && r->service_enabled) {
             uint8_t stored_vehicle_mac[6]{};
             size_t stored_size = 0;
             const auto loaded = r->storage->load_into("warp_ev_mac", stored_vehicle_mac, sizeof(stored_vehicle_mac), stored_size);
@@ -331,22 +391,26 @@ void TeslaVehicle::task_loop()
             if (r->stop_requested.load() || !create_vehicle()) {
                 post_event(EventType::Error, "Tesla protocol initialization failed or cancelled");
                 r->stop_requested.store(true);
-            } else {
-                r->controller_used = true;
-                if (BLEDevice::init("WARP4")) {
-                    gatt_owner.store(this);
-                    BLEDevice::setCustomGattcHandler(gatt_callback);
-                    r->ble_ready.store(true);
-                } else {
-                    post_event(EventType::Error, "Failed to initialize Bluetooth");
-                    r->stop_requested.store(true);
-                }
             }
+        }
+        if (!r->stop_requested.load() && !r->storage_only) {
+#if WARP_BLUETOOTH_COMPILED
+            r->controller_used = true;
+            if (BLEDevice::init("WARP4")) {
+                gatt_owner.store(this);
+                BLEDevice::setCustomGattcHandler(gatt_callback);
+                r->ble_ready.store(true);
+            } else {
+                post_event(EventType::Error, "Failed to initialize Bluetooth");
+                r->stop_requested.store(true);
+            }
+#endif
         }
         r->worker_watch.finish();
     }
 
     while (!r->stop_requested.load()) {
+        if (!r->service_enabled) { vTaskDelay(pdMS_TO_TICKS(20)); continue; }
         r->worker_watch.begin(millis());
         if (r->storage->restart_required()) {
             post_event(EventType::Error, "Tesla persistence close failed; storage quarantined until reboot");
@@ -403,6 +467,7 @@ void TeslaVehicle::task_loop()
 
 bool TeslaVehicle::release_bluetooth(Runtime &r)
 {
+#if WARP_BLUETOOTH_COMPILED
     if (!r.controller_used) {
         return true;
     }
@@ -437,6 +502,10 @@ bool TeslaVehicle::release_bluetooth(Runtime &r)
         return false;
     }
     return btMemReleased(BT_MODE_BLE);
+#else
+    (void)r;
+    return true; // Unsupported builds cannot acquire the controller.
+#endif
 }
 
 void TeslaVehicle::teardown_entry(void *context)
@@ -932,6 +1001,7 @@ void TeslaVehicle::flush_error()
 
 void TeslaVehicle::loop()
 {
+    publish_bluetooth_state();
 #if defined(TESLA_BLE_BENCH_ONLY) && TESLA_BLE_BENCH_ONLY && defined(TESLA_BLE_IRAM_DIAGNOSTICS) && TESLA_BLE_IRAM_DIAGNOSTICS
     tesla_ble_bench_smoke_loop();
     tesla_ble_bench_discovery.supervise();
@@ -962,13 +1032,13 @@ void TeslaVehicle::loop()
         state.get("restart_required")->updateBool(true);
         publish_error("Tesla BLE worker/submission timed out; ownership retained; reboot required");
     }
-    if (r != nullptr && (changed || (!config.get("enable")->asBool() && !r->storage_only) ||
+    if (r != nullptr && (changed || (!config.get("enable")->asBool() && r->service_enabled) ||
                          r->stop_requested.load() || runtime_owner.is_stopping())) {
 
         stop_runtime();
         return;
     }
-    if (r == nullptr && config.get("enable")->asBool() && !start_attempted && !runtime_owner.restart_required()) {
+    if (r == nullptr && bluetooth_boot_enabled && !start_attempted && !runtime_owner.restart_required()) {
         start_runtime();
         r = runtime_owner.get();
     }
@@ -979,6 +1049,24 @@ void TeslaVehicle::loop()
     const int index = ev.get_active_ev_index();
     r->session.publish({generation, index, ev.get_active_ev_mac()});
     process_module_events();
+}
+
+void TeslaVehicle::publish_bluetooth_state()
+{
+    const Runtime *r = runtime_owner.get();
+    const bool restart = bluetooth_supported() && (runtime_owner.restart_required() ||
+        bluetooth_config.get("enable")->asBool() != bluetooth_boot_enabled);
+    const char *phase = !bluetooth_supported() ? "disabled" : runtime_owner.restart_required() ? "error" :
+        r && (runtime_owner.is_stopping() || r->stop_requested.load()) ? "stopping" :
+        r && !r->storage_only ? (r->ble_ready.load() ? "active" : "starting") :
+        bluetooth_boot_enabled && start_attempted ? "error" : "disabled";
+    bluetooth_state.get("phase")->updateString(phase);
+    bluetooth_state.get("restart_required")->updateBool(restart);
+    bluetooth_state.get("restart_reason")->updateString(!restart ? "" : runtime_owner.restart_required() ?
+        "lifecycle_latched" : "configuration_changed");
+    bluetooth_state.get("persistence_error")->updateBool(!bluetooth_commit_ok);
+    bluetooth_state.get("legacy_tesla_enabled")->updateBool(config.get("enable")->asBool() && !bluetooth_boot_enabled);
+    state.get("running")->updateBool(r && r->service_enabled && r->ble_ready.load() && !runtime_owner.is_stopping());
 }
 
 void TeslaVehicle::process_module_events()

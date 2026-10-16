@@ -8,6 +8,7 @@ import os, re, subprocess, json, hashlib, sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / 'tools'))
 from bench_confinement import output_plan
 repo = Path(__file__).resolve().parents[4]
+arduinojson = Path(os.environ.get('TESLA_HOST_ARDUINOJSON', repo / 'software/.pio/libdeps/warp4_tesla_ble/ArduinoJson'))
 fw = Path(os.environ.get('TESLA_BLE_HOST_FRAMEWORK_SOURCE', '/home/hermes/.hermes/cache/scratch/esp32-arduino-lib-builder')) / 'components/arduino'
 out = Path(os.environ.get('TESLA_CLEAN_TEST_OUT', str(Path(os.environ['TMPDIR']) / 'warp-tesla-host-tests'))) / 'target-oom'
 output_plan(roots=(out,)).revalidate()
@@ -112,13 +113,13 @@ if presence_probe:
 inputs=[core/'WString.cpp',core/'WString.h',fw/'libraries/BLE/src/BLEUUID.cpp',repo/'software/src/config.cpp',repo/'software/src/config.h',repo/'software/src/modules/tesla_vehicle/tesla_ble_gatt.cpp']
 if presence_probe:
     inputs += [repo/'software/src/modules/tesla_vehicle/tesla_vehicle.cpp']
-    inputs += [repo/'software/src/config/visitors.h',repo/'software/.pio/libdeps/warp4_tesla_ble/ArduinoJson/src/ArduinoJson.h']
+    inputs += [repo/'software/src/config/visitors.h',arduinojson/'src/ArduinoJson.h']
     if helper.exists(): inputs += [helper]
     (out/'layout-adaptation.json').write_text(json.dumps({'SSOSIZE':15,'capacity':14,'sizeof_String':16,'flag_offset':15,'adaptation':'ESP32 SSO geometry only; native heap pointers retained; original WString.cpp and Config update method bodies unmodified','schema_max_length':7,'presence_sites':3},indent=2))
 (out/'source-hashes.json').write_text(json.dumps({str(p):hashlib.sha256(p.read_bytes()).hexdigest() for p in inputs},indent=2)+'\n')
 probe=Path(os.environ.get('TESLA_CLEAN_TARGET_OOM_TEST',str(repo/'software/tests/tesla_vehicle/test_tesla_ble_target_oom.cpp')))
 instrument=['-fsanitize=address,undefined','-fno-omit-frame-pointer','-g','-no-pie'] if os.environ.get('TESLA_CLEAN_HARNESS_SANITIZE')=='1' else []
 cmd=['g++',*instrument,'-std=c++20','-fno-exceptions','-ffunction-sections','-fdata-sections','-Wl,--gc-sections,--wrap=realloc','-Wno-sign-compare','-I'+str(out),'-I'+str(core),'-I'+str(repo/'software/src'),str(out/'WString.cpp'),str(probe),'-o',str(out/'test_tesla_ble_target_oom')]
-if presence_probe: cmd += ['-I'+str(repo/'software/.pio/libdeps/warp4_tesla_ble/ArduinoJson/src')]
+if presence_probe: cmd += ['-I'+str(arduinojson/'src')]
 subprocess.run(cmd,check=True)
 subprocess.run([str(out/'test_tesla_ble_target_oom')],check=True)

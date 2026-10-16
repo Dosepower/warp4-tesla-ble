@@ -83,6 +83,7 @@ struct TeslaVehicle {
     bool accepts_commands() const {return accepting;}
     bool start_runtime(bool) {return start_result;}
     void register_urls();
+    void register_bluetooth_urls() {} // Separate R13 full-module/POSIX harness covers this API.
     String validate(Config &update, ConfigSource source);
 };
 '''

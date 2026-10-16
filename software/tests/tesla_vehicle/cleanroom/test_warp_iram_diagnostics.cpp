@@ -32,6 +32,7 @@ struct TeslaBleModuleTest {
         // No protocol/worker execution needed to check asynchronous status
         // observation and preservation of the existing callback admission gates.
         module.config.get("enable")->updateBool(true);
+        module.bluetooth_boot_enabled = true;
         module.config.get("vin")->updateString("5YJ3E1EA7KF000001");
         module.config.get("ble_address")->updateString("01:02:03:04:05:06");
         assert(module.start_runtime());

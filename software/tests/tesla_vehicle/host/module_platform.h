@@ -95,6 +95,8 @@ struct HostAPI {
     template <typename F> void addCommand(const char *name, ConfigRoot *, std::initializer_list<int>, F f, bool) { commands[name] = f; }
 };
 inline HostAPI api;
+inline unsigned reboot_calls = 0;
+inline void trigger_reboot(const char *) { ++reboot_calls; }
 struct HostQueue { size_t capacity, size; std::deque<std::vector<uint8_t>> data; std::mutex mutex; };
 using QueueHandle_t = HostQueue *;
 inline int queues_live = 0;

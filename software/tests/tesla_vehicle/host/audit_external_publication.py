@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[3] / 'tools'))
 from bench_confinement import output_plan
 
 repo = Path(__file__).resolve().parents[4]
+arduinojson = Path(os.environ.get('TESLA_HOST_ARDUINOJSON', repo / 'software/.pio/libdeps/warp4_tesla_ble/ArduinoJson'))
 fw = Path('/home/hermes/.hermes/cache/scratch/esp32-arduino-lib-builder')
 core = fw / 'components/arduino/cores/esp32'
 out = Path(os.environ['TMPDIR']) / 'tesla-phase1-eleventh-external'
@@ -145,6 +146,6 @@ int main(){
 (out / 'external_contract.cpp').write_text(cpp)
 inputs = [config, api, sdk_copy, sdk_transfer, core/'WString.cpp', core/'WString.h']
 (out / 'source-hashes.json').write_text(json.dumps({str(p):hashlib.sha256(p.read_bytes()).hexdigest() for p in inputs},indent=2)+'\n')
-cmd=['g++','-std=c++20','-fno-exceptions','-ffunction-sections','-fdata-sections','-Wl,--gc-sections,--wrap=malloc,--wrap=realloc','-Wno-sign-compare','-I'+str(shims),'-I'+str(core),'-I'+str(repo/'software/.pio/libdeps/warp4_tesla_ble/ArduinoJson/src'),str(shims/'WString.cpp'),str(out/'external_contract.cpp'),'-o',str(out/'external_contract')]
+cmd=['g++','-std=c++20','-fno-exceptions','-ffunction-sections','-fdata-sections','-Wl,--gc-sections,--wrap=malloc,--wrap=realloc','-Wno-sign-compare','-I'+str(shims),'-I'+str(core),'-I'+str(arduinojson/'src'),str(shims/'WString.cpp'),str(out/'external_contract.cpp'),'-o',str(out/'external_contract')]
 subprocess.run(cmd,check=True)
 subprocess.run([str(out/'external_contract')],check=True)

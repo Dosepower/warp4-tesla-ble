@@ -28,3 +28,18 @@ export interface state {
 export type pair = {};
 export type poll = {};
 export type forget_key = {};
+
+//APIPath:bluetooth/
+export interface config___bluetooth {
+    enable: boolean;
+}
+export interface state___bluetooth {
+    supported: boolean;
+    unsupported_reason: '' | 'sdk_disabled' | 'hardware_unsupported' | 'bench_only' | 'storage_backend_unverified';
+    phase: 'disabled' | 'starting' | 'active' | 'stopping' | 'error';
+    restart_required: boolean;
+    restart_reason: '' | 'configuration_changed' | 'lifecycle_latched';
+    persistence_error: boolean;
+    legacy_tesla_enabled: boolean;
+}
+export type restart = {};

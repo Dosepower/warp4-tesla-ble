@@ -9,6 +9,10 @@ name="${1:?test name}"
 [[ -z "${2:-}" || "${2:-}" == sanitize ]] || { printf 'Unsafe test mode\n' >&2; exit 2; }
 mbed="${TESLA_BLE_HOST_MBEDTLS_SOURCE:-/home/hermes/.hermes/cache/scratch/esp32-arduino-lib-builder/esp-idf/components/mbedtls/mbedtls}"
 libs="${TESLA_CLEAN_MBEDTLS_BUILD:-$out/mbedtls}"
+TESLA_HOST_ARDUINOJSON="$(python3 -B "$root/software/tests/tesla_vehicle/r13_host_dependency.py")" || exit 2
+[[ -n "$TESLA_HOST_ARDUINOJSON" ]] || { printf 'Empty host dependency\n' >&2; exit 2; }
+export TESLA_HOST_ARDUINOJSON
+TESLA_CLEAN_TEST_OUT="$out" python3 -B "$root/software/tests/tesla_vehicle/materialize_cmake_sources.py" "$libs"
 python3 "$root/software/tools/bench_confinement.py" outputs "$out" "$libs"
 mkdir -p "$out"
 if [[ ! -f "$libs/library/libmbedcrypto.a" ]]; then

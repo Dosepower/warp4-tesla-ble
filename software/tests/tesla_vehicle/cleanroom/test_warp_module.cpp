@@ -84,6 +84,7 @@ struct TeslaBleModuleTest {
     unsigned closes=0;
     explicit TeslaBleModuleTest(uint64_t initial=0x100000007ULL, bool ordinary=false) {
         module.pre_setup(); module.setup(); assert(!module.runtime_owner.get());
+        module.bluetooth_boot_enabled = true; // Explicit R13 boot permission for legacy lifecycle schedules.
         module.config.get("enable")->updateBool(true);
         module.config.get("vin")->updateString("5YJ3E1EA7KF000001");
         module.config.get("ble_address")->updateString("01:02:03:04:05:06");
@@ -138,6 +139,7 @@ struct TeslaBleModuleTest {
     }
     void ready(uint64_t generation) {
         auto *r=module.runtime_owner.get(); r->connection_generation.store(generation);
+        r->ble_ready.store(true); // This fixture manually models completed SDK initialization.
         r->physical_generation.store(generation);
         r->gatt_if.store(1); r->gatt_connection.store(4); r->write_handle=10; r->notify_handle.store(20);
         r->connected.store(true); r->link_open.store(true); r->session.connect(); assert(r->vehicle->open(generation));
@@ -383,6 +385,7 @@ struct TeslaBleModuleTest {
             assert(!count());
             {
                 TeslaVehicle owner; owner.pre_setup(); owner.setup();
+                owner.bluetooth_boot_enabled = true;
                 owner.config.get("enable")->updateBool(true); owner.config.get("vin")->updateString("5YJ3E1EA7KF000001");
                 owner.config.get("ble_address")->updateString("01:02:03:04:05:06");
                 calls=failures=0; fail_at=fault; active=true; const bool ok=owner.start_runtime(); active=false;

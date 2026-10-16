@@ -4,7 +4,15 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "$0")/../../.." && pwd)"
 build_dir="${TESLA_CLEAN_TEST_OUT:-${TMPDIR:?}/tesla-clean-native}/module-helpers"
 [[ -z "${1:-}" || "${1:-}" == sanitize ]] || { printf 'Unsafe test mode\n' >&2; exit 2; }
-python3 "$repo_root/software/tools/bench_confinement.py" outputs "${build_dir%/module-helpers}" "${TESLA_CLEAN_MBEDTLS_BUILD:-${build_dir%/module-helpers}/mbedtls}"
+# Frontend generation may remove the repository's .pio/libdeps link. Select and
+# validate a separately owned, read-only ArduinoJson tree before any test output
+# mkdir/redirection; no symlink or copy is materialized in the worktree.
+TESLA_HOST_ARDUINOJSON="$(python3 -B "$repo_root/software/tests/tesla_vehicle/r13_host_dependency.py")" || exit 2
+[[ -n "$TESLA_HOST_ARDUINOJSON" ]] || { printf 'Empty host dependency\n' >&2; exit 2; }
+export TESLA_HOST_ARDUINOJSON
+mbed_build="${TESLA_CLEAN_MBEDTLS_BUILD:-${build_dir%/module-helpers}/mbedtls}"
+TESLA_CLEAN_TEST_OUT="${build_dir%/module-helpers}" python3 -B "$repo_root/software/tests/tesla_vehicle/materialize_cmake_sources.py" "$mbed_build"
+python3 "$repo_root/software/tools/bench_confinement.py" outputs "${build_dir%/module-helpers}" "$mbed_build"
 mkdir -p "$build_dir"
 
 # Explicit preserved module-only entries; excluded private-coupled sources were

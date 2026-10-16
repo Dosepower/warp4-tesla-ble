@@ -2,10 +2,25 @@
 import { h } from "preact";
 let x = {
     "tesla_vehicle": {
-        "navbar": {"tesla_vehicle": "Tesla Bluetooth"},
+        "navbar": {"tesla_vehicle": "Bluetooth"},
+        "bluetooth": {
+            "title": "Bluetooth",
+            "tesla_title": "Tesla state of charge",
+            "enable": "Enable Bluetooth",
+            "desired": "Desired general permission (saved, not runtime status)",
+            "help": "Bluetooth can be enabled to read the Tesla state of charge (SoC). The vehicle must be configured separately and paired using its key card. This is not a general Bluetooth device manager. Changes to general permission take effect only after saving and an explicitly confirmed restart. No different firmware is needed. Disabling deletes neither the local key nor authorization in the Tesla.",
+            "runtime": "Actual Bluetooth status",
+            "disabled": "Disabled", "starting": "Starting", "active": "Active", "stopping": "Stopping", "error": "Error / restart locked",
+            "unsupported": "Bluetooth is unavailable with this SDK/hardware configuration. Activation and Bluetooth restart are disabled. Reason",
+            "legacy": "An existing Tesla service configuration is retained. It does not automatically enable Bluetooth. Save the general permission separately and confirm restart.",
+            "save_failed": "Bluetooth configuration commit was not confirmed. No restart through this action. The last confirmed configuration is retained; check the error and save again.",
+            "pending": "Restart pending: saved permission and runtime may differ, or the safe lifecycle latch requires a restart. The saved permission is applied only afterwards.",
+            "restart": "Restart now",
+            "restart_confirm": "Restart WARP now and apply the confirmed saved Bluetooth permission? Charging control will be interrupted."
+        },
         "content": {
             "title": "Tesla Bluetooth",
-            "enable": "Enable Tesla Bluetooth",
+            "enable": "Enable Tesla SoC service",
             "enable_desc": "Read state of charge over Bluetooth; WARP starts normal AC charging itself",
             "vehicle_profile": "WARP vehicle profile",
             "vehicle_profile_help": "The profile MAC measured by WARP through SLAC is permanently bound to the Tesla key.",
@@ -26,7 +41,7 @@ let x = {
             "pair_step_5": "WARP checks approval within a bounded verification window. A sent request or a local key is not proof of approval. If verification times out, check the vehicle and retry deliberately. Read SoC now can also verify an existing local key.",
             "pair_confirm": "Send a key-enrollment request to the connected Tesla? Have the key card ready and approve it in the vehicle. This does not start charging.",
             "poll_confirm": "Verify the local key and read SoC? This manual request may wake the vehicle even when automatic waking is disabled. It does not start charging.",
-            "lifecycle_help": "Saved configuration and active Bluetooth runtime are separate. First enable after a disabled boot starts without reboot. Saving any change while running stops the runtime; after Bluetooth controller use, restart_required requires a WARP reboot before reuse. Stopping preserves the local key. No automatic reboot is performed.",
+            "lifecycle_help": "The Tesla service requires the general Bluetooth permission applied at boot above. Changing Tesla configuration while running safely stops the runtime; after controller use, restart stays locked until reboot. Disabling preserves the local key and Tesla authorization. No automatic reboot is performed.",
             "vehicle_ready": "The selected WARP vehicle profile is active. Firmware rechecks the connected SLAC identity and key binding before every operation.",
             "vehicle_not_ready": "Pairing and reading require the selected Tesla to be plugged into this WARP with its vehicle profile active. BLE connectivity alone is not sufficient.",
             "save_first": "Save configuration changes before pairing or reading.",

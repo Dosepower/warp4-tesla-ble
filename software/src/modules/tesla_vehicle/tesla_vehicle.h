@@ -6,10 +6,13 @@
 #include <vector>
 
 #include <functional>
+#include "bluetooth_support.h"
 #ifdef TESLA_BLE_MODULE_HOST_TEST
 #include "module_platform.h"
 #else
+#if WARP_BLUETOOTH_COMPILED
 #include <esp_gattc_api.h>
+#endif
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 #include <freertos/task.h>
@@ -26,6 +29,7 @@
 #include "tesla_ble_command_outcome.h"
 #include "tesla_ble_storage.h"
 #include "tesla_ble_transport.h"
+#include "bluetooth_config_store.h"
 
 class TeslaBleStorageAdapter;
 class TeslaBleTransportAdapter;
@@ -105,12 +109,22 @@ private:
 
     enum GattOperation : uint8_t { Register = 1, Open, Discover, Cache, Subscribe, Descriptor, Write, Close };
     bool gatt_operation(GattOperation kind, uint16_t handle, tesla_warp::FunctionRef<bool()> submit);
+#if WARP_BLUETOOTH_COMPILED
     static void gatt_callback(esp_gattc_cb_event_t event, esp_gatt_if_t interface, esp_ble_gattc_cb_param_t *param);
+#endif
     static std::atomic<TeslaVehicle *> gatt_owner;
 
     ConfigRoot config;
     ConfigRoot state;
     ConfigRoot empty_command;
+    // This module remains the SOLE controller/host lifecycle owner. These are
+    // separate from the legacy Tesla service config and never grant VIN access.
+    ConfigRoot bluetooth_config, bluetooth_update, bluetooth_state;
+    BluetoothConfigStore bluetooth_store;
+    bool bluetooth_boot_enabled = false;
+    bool bluetooth_commit_ok = true;
+    void publish_bluetooth_state();
+    void register_bluetooth_urls();
 
     // Every worker-owned allocation and request flag lives in this optional
     // RAII aggregate, not in the permanent module. Vehicle's adapter pointers
@@ -147,7 +161,9 @@ private:
         TeslaBleOperation operation;
         TeslaBleOperation retirement_operation;
         TeslaBleWorkWatch worker_watch;
+#if WARP_BLUETOOTH_COMPILED
         std::atomic<esp_gatt_if_t> gatt_if{ESP_GATT_IF_NONE};
+#endif
         std::atomic<uint16_t> gatt_connection{UINT16_MAX};
         std::atomic<bool> link_open{false};
         std::atomic<bool> closing_link{false};
@@ -181,6 +197,7 @@ private:
         uint64_t epoch = 0;
         bool controller_used = false; // Read by main only after worker ACK.
         bool storage_only = false;
+        bool service_enabled = false;
         bool supervision_failed = false; // Main-only terminal latch.
         TeslaBleSession session;
         std::atomic<uint64_t> bound_vehicle_mac{0};
