@@ -1,0 +1,57 @@
+interface TeslaProfile {
+    enable: boolean;
+    vin: string;
+    ble_address: string;
+    ble_address_type: number;
+    discovery_revision: number;
+    ev_index: number;
+    ev_mac: string;
+    poll_interval: number;
+    wake_once: boolean;
+}
+export interface profiles { entries: TeslaProfile[]; }
+export interface state {
+    profile_ev_index: number;
+    active_ev_index: number;
+    legacy_blocked: boolean;
+    running: boolean;
+    action_busy: boolean;
+    stopping: boolean;
+    connected: boolean;
+    key_present: boolean;
+    key_presence: 'unknown' | 'present' | 'absent' | 'cleanup';
+    paired: boolean;
+    pairing_pending: boolean;
+    pair_request_sent: boolean;
+    restart_required: boolean;
+    last_soc: number;
+    last_update: number;
+    last_error: string;
+}
+export type start = {ev_index: number};
+export type pair = {ev_index: number};
+export type poll = {ev_index: number};
+export type forget_key = {ev_index: number};
+export type scan = {vin: string; ev_index: number; ev_mac: string};
+export interface discovery {
+    status: 'idle' | 'searching' | 'complete' | 'error';
+    busy: boolean;
+    error: string;
+    truncated: boolean;
+    revision: number;
+    ev_index: number;
+    targets: {name: string; ble_address: string; ble_address_type: number; matches_vin: boolean; rssi: number}[];
+}
+
+//APIPath:bluetooth/
+export interface config___bluetooth { enable: boolean; }
+export interface state___bluetooth {
+    supported: boolean;
+    unsupported_reason: '' | 'sdk_disabled' | 'hardware_unsupported' | 'bench_only' | 'storage_backend_unverified';
+    phase: 'disabled' | 'starting' | 'active' | 'stopping' | 'error';
+    restart_required: boolean;
+    restart_reason: '' | 'configuration_changed' | 'lifecycle_latched';
+    persistence_error: boolean;
+    legacy_tesla_enabled: boolean;
+}
+export type restart = {};

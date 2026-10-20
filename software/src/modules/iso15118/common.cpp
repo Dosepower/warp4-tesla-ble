@@ -98,12 +98,21 @@ void Common::set_evcc_vendor(EVCCVendor vendor)
 
 void Common::detect_evcc_vendor_from_mac(const uint8_t *mac)
 {
+    if (evcc_vendor_mac_valid && memcmp(evcc_vendor_mac, mac, sizeof(evcc_vendor_mac)) == 0) {
+        return; // A retry cannot downgrade protocol-learned Tesla to its OUI.
+    }
+
+    reset_evcc_vendor();
+    memcpy(evcc_vendor_mac, mac, sizeof(evcc_vendor_mac));
+    evcc_vendor_mac_valid = true;
+
     for (const EVCCVendorOUI &entry : evcc_vendor_ouis) {
         if (memcmp(entry.oui, mac, sizeof(entry.oui)) == 0) {
             set_evcc_vendor(entry.vendor);
             return;
         }
     }
+    // A genuinely new unrecognized PEV remains Unknown.
 }
 
 void Common::detect_evcc_vendor_from_protocol(const char *protocol_namespace, size_t len)
@@ -120,7 +129,7 @@ void Common::pre_setup()
 
     api_state = Config::Object({
         {"state", Config::Enum(CommonState::Idle)},
-        {"supported_protocols", Config::Array({}, &supported_protocols_prototype, 0, 4, Config::type_id<Config::ConfString>())},
+        {"supported_protocols", Config::Array({}, &supported_protocols_prototype, 0, SUPPORTED_APP_PROTOCOL_CAPACITY, Config::type_id<Config::ConfString>())},
         {"protocol", Config::Str("", 0, 32)},
         {"encryption", Config::Enum(Encryption::Unencrypted)},
         {"evcc_vendor", Config::Enum(EVCCVendor::Unknown)}
@@ -398,11 +407,11 @@ void Common::send_exi(ExiType type)
 
 void Common::decode(uint8_t *data, const size_t length)
 {
-    // A short frame would underflow the payload size below (exi_bitstream_init).
-    // The header checks that follow might not catch it as exi_data is a shared buffer
-    // and the bytes might hold valid data from a previous response we sent.
-    if (length < sizeof(V2GTP_Header)) {
-        iso15118.trace("Common: Truncated V2GTP header: %zu bytes", length);
+    // Require a complete header and at least one encoded byte for every decoder.
+    // The codec's initial bit read requires non-empty input. Check the received
+    // size, not stale bytes in the shared buffer, before any bitstream setup.
+    if (length <= sizeof(V2GTP_Header)) {
+        iso15118.trace("Common: Missing V2GTP header or EXI payload: %zu bytes", length);
         return;
     }
 
@@ -503,8 +512,13 @@ void Common::handle_supported_app_protocol_req()
     const bool force_nonegotiation = iso15118.nonegotiation_pending ||
                                      (iso15118.is_autocharge_only() && iso15118.use_nonegotiation_autocharge());
 
-    if (no_protocol_match || force_nonegotiation) {
-        if (no_protocol_match) {
+    // Namespace recognition can learn Tesla only now, after SLAC MATCH.CNF.
+    // Reject before selecting any DIN/ISO decoder, independent of all options.
+    const bool incompatible_ev = !iso15118.is_soc_compatible();
+    if (incompatible_ev || no_protocol_match || force_nonegotiation) {
+        if (incompatible_ev) {
+            iso15118.trace("EV incompatible with PLC SoC, forcing Failed_NoNegotiation");
+        } else if (no_protocol_match) {
             iso15118.trace("EV does not support DIN 70121, ISO 15118-2 or ISO 15118-20:AC");
         } else {
             iso15118.trace("Forcing Failed_NoNegotiation (%s)", iso15118.nonegotiation_pending ? "after SoC" : "autocharge");

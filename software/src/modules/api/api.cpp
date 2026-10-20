@@ -963,12 +963,28 @@ void API::register_urls()
 }
 
 void API::register_events() {
-    this->states = make_permanent(std::move(reg_collector->states), IRAM);
-    this->commands = make_permanent(std::move(reg_collector->commands), IRAM);
-    this->responses = make_permanent(std::move(reg_collector->responses), DRAM);
+    auto migrate = []<typename T>(std::vector<T> &source, RAM ram, const char *kind) {
+        auto result = make_permanent(std::move(source), ram);
+        if (!source.empty()) {
+            // A failed permanent allocation leaves the collected registrations
+            // untouched. Keep their existing storage instead of dropping API
+            // entries or attempting another allocation from a pressured heap.
+            logger.printfln("Permanent API %s allocation failed: count=%zu bytes=%zu RAM=%u; retaining collected storage",
+                           kind, source.size(), source.size() * sizeof(T), static_cast<unsigned>(ram));
+            return std::span<T>{source.data(), source.size()};
+        }
+        return result;
+    };
+    this->states = migrate(reg_collector->states, IRAM, "states");
+    this->commands = migrate(reg_collector->commands, IRAM, "commands");
+    this->responses = migrate(reg_collector->responses, DRAM, "responses");
 
-    delete reg_collector;
-    reg_collector = nullptr;
+    // Spans are non-owning: any fallback vector must remain alive for the API's
+    // lifetime. Successful migrations still release the collector as before.
+    if (reg_collector->states.empty() && reg_collector->commands.empty() && reg_collector->responses.empty()) {
+        delete reg_collector;
+        reg_collector = nullptr;
+    }
 }
 
 size_t API::registerBackend(IAPIBackend *backend)
