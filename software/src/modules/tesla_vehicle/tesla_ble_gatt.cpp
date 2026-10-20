@@ -14,7 +14,7 @@ static constexpr uint16_t TESLA_GATT_APP = 0x5742;
 
 void TeslaVehicle::process_disconnect()
 {
-    Runtime *r = runtime_owner.get();
+    Runtime *r = tesla->runtime_owner.get();
     const auto generation = r->pending_disconnect.take();
     if (generation && *generation == r->session.connection()) {
         // Includes local RX overflow: the link may still physically be open.
@@ -25,17 +25,29 @@ void TeslaVehicle::process_disconnect()
 
 bool TeslaVehicle::gatt_operation(GattOperation kind, uint16_t handle, tesla_warp::FunctionRef<bool()> submit)
 {
-    Runtime *r = runtime_owner.get();
+    Runtime *r = tesla->runtime_owner.get();
     const auto identity = r->session.identity();
     if (!identity) { return false; } // No submission against unavailable identity.
+#if TESLA_BLE_MANUAL_VEHICLE_UI
+    if (kind != Close && (!active_identity_matches(*identity) || !runtime_binding_matches())) { return false; }
+#endif
     const auto generation = r->connection_generation.load();
     const auto connection = kind == Register || kind == Open ? 0 : r->gatt_connection.load();
     auto &slot = kind == Close ? r->retirement_operation : r->operation;
-    const bool ok = slot.run(kind, connection, handle, []() { return millis(); }, submit,
+    const auto gated_submit = [this, identity, kind, &submit]() {
+#if TESLA_BLE_MANUAL_VEHICLE_UI
+        if (kind != Close && (!active_identity_matches(*identity) || !runtime_binding_matches())) { return false; }
+#endif
+        return submit();
+    };
+    const bool ok = slot.run(kind, connection, handle, []() { return millis(); }, gated_submit,
         [r, kind, connection]() {
             if (kind == Discover && r->discovery_ready.load()) { r->operation.complete(kind, connection, 0, true); }
             vTaskDelay(pdMS_TO_TICKS(10));
-        }, [r, identity, generation, kind]() {
+        }, [this, r, identity, generation, kind]() {
+#if TESLA_BLE_MANUAL_VEHICLE_UI
+            if (kind != Close && !active_identity_matches(*identity)) { return TeslaBleCancellation::Cancel; }
+#endif
             if (r->stop_requested.load() || (kind != Close && r->connection_generation.load() != generation)) {
                 return TeslaBleCancellation::Cancel;
             }
@@ -54,9 +66,12 @@ bool TeslaVehicle::gatt_operation(GattOperation kind, uint16_t handle, tesla_war
 
 bool TeslaVehicle::ensure_connected()
 {
-    Runtime *r = runtime_owner.get();
+    Runtime *r = tesla->runtime_owner.get();
     process_disconnect(); // Consume current cleanup before any replacement readiness.
     if (r->stop_requested.load()) { return false; }
+#if TESLA_BLE_MANUAL_VEHICLE_UI
+    if (!runtime_binding_matches()) { return false; }
+#endif
     if (r->connected.load() && r->link_open.load()) { return true; }
     // Initial connection cleanup is not loss of an accepted pairing's link.
     disconnect_internal(false);
@@ -67,7 +82,13 @@ bool TeslaVehicle::ensure_connected()
         return false;
     }
     bool opened = false;
-    for (uint8_t type = 0; type <= 1 && !opened && !r->stop_requested.load(); ++type) {
+    for (uint8_t type =
+#if TESLA_BLE_MANUAL_VEHICLE_UI
+         r->remote_address_type; type == r->remote_address_type &&
+#else
+         0; type <= 1 &&
+#endif
+         !opened && !r->stop_requested.load(); ++type) {
         r->discovery_ready.store(false);
         opened = gatt_operation(Open, 0, [r, type]() {
             return esp_ble_gattc_open(r->gatt_if.load(), r->remote_address,
@@ -139,9 +160,10 @@ bool TeslaVehicle::ensure_connected()
 
 void TeslaVehicle::disconnect_internal(bool cancel_pair)
 {
-    Runtime *r = runtime_owner.get();
+    Runtime *r = tesla->runtime_owner.get();
     if (r == nullptr) { return; }
     r->command_outcome.begin_worker_cleanup();
+    const bool interrupted_poll = r->in_flight_started_ms != 0;
     // Invalidate approval/submission before close callbacks, but expose terminal
     // cancellation only after all old stream cleanup has finished.
     const auto cancelled = cancel_pair ? r->command_outcome.retire_pair() : 0;
@@ -153,6 +175,7 @@ void TeslaVehicle::disconnect_internal(bool cancel_pair)
     r->advance_connection();
     r->policy.on_transport_disconnected();
     r->in_flight_started_ms = 0;
+    if (interrupted_poll) { r->manual_poll_pending.store(false); }
     xQueueReset(r->queues.rx());
     // At stop, host shutdown owns the physical link; do not wait for a callback
     // after admission has closed. Never submit any IDF work from the main loop.
@@ -179,24 +202,27 @@ void TeslaVehicle::disconnect_internal(bool cancel_pair)
 
 bool TeslaVehicle::transport_owns(uint64_t generation) const
 {
-    const Runtime *r = runtime_owner.get();
+    const Runtime *r = tesla->runtime_owner.get();
     if (!r || r->stop_requested.load() || !r->connected.load() || !r->link_open.load() ||
         generation != r->connection_generation.load() || generation != r->physical_generation.load()) { return false; }
     const auto identity = r->session.identity();
+#if TESLA_BLE_MANUAL_VEHICLE_UI
+    if (!identity || !active_identity_matches(*identity)) { return false; }
+#endif
     return identity && *identity == r->observed_identity;
 }
 
 bool TeslaVehicle::transport_recover_frame(uint64_t generation)
 {
     // Never assert a peer frame reset on the same physical link.
-    Runtime *r = runtime_owner.get();
+    Runtime *r = tesla->runtime_owner.get();
     if (r && generation == r->physical_generation.load()) { disconnect_internal(); }
     return false;
 }
 
 bool TeslaVehicle::transport_write_bytes(const uint8_t *data, size_t size)
 {
-    Runtime *r = runtime_owner.get();
+    Runtime *r = tesla->runtime_owner.get();
     if (!r || !r->connected.load() || !r->write_handle) { return false; }
     const auto generation = r->connection_generation.load();
     // Default ATT MTU 23: no optimistic MTU assignment from Arduino setMTU.
@@ -219,9 +245,9 @@ void TeslaVehicle::gatt_callback(esp_gattc_cb_event_t event, esp_gatt_if_t inter
 {
     auto *owner = gatt_owner.load();
     if (!owner || !param) { return; }
-    auto lease = owner->callback_gate.enter();
+    auto lease = owner->tesla->callback_gate.enter();
     if (!lease) { return; }
-    Runtime *r = owner->runtime_owner.get();
+    Runtime *r = owner->tesla->runtime_owner.get();
     if (!r || r->stop_requested.load()) { return; }
     if (event == ESP_GATTC_REG_EVT) {
         if (param->reg.app_id == TESLA_GATT_APP) {

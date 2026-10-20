@@ -58,31 +58,49 @@ struct Config {
     void updateBool(bool v) {boolean=v;}
 };
 struct Runtime {
-    std::atomic<bool> pair_requested{false}, poll_requested{false}, forget_requested{false};
+    std::atomic<bool> pair_requested{false}, poll_requested{false}, forget_requested{false}, manual_poll_pending{false};
     TeslaBleSession session;
     TeslaBleCommandOutcome command_outcome;
     int configured_ev_index=2;
     Runtime() {session.publish({1,2,1});}
 };
-struct RuntimeOwner {Runtime *pointer=nullptr; Runtime *get() const {return pointer;}};
+struct RuntimeOwner {
+    Runtime *pointer=nullptr;
+    bool restart=false;
+    Runtime *get() const {return pointer;}
+    bool restart_required() const {return restart;}
+};
 struct HostAPI {
-    std::array<std::function<void(Language, String &)>,3> commands;
+    std::array<std::function<void(Language, String &)>,4> commands;
+    std::array<const char *,4> topics{};
     unsigned count=0;
     void addPersistentConfig(const char *,Config *,std::initializer_list<int>,std::initializer_list<const char *>) {}
     void addState(const char *,Config *) {}
-    template<class F> void addCommand(const char *,Config *,std::initializer_list<int>,F f,bool) {commands.at(count++)=std::move(f);}
+    template<class F> void addCommand(const char *topic,Config *,std::initializer_list<int>,F f,bool) {
+        topics.at(count)=topic; commands.at(count++)=std::move(f);
+    }
 } api;
 struct TeslaVehicle {
-    std::array<Config,6> live;
-    std::array<Config,2> state_leaves;
-    Config config, state, empty_command;
-    RuntimeOwner runtime_owner;
-    std::atomic<bool> runtime_update_requested{false};
+    struct Tesla {
+        std::array<Config,6> live;
+        std::array<Config,2> state_leaves;
+        Config config, state;
+        RuntimeOwner runtime_owner;
+        std::atomic<bool> runtime_update_requested{false};
+        Tesla() {config.leaves=live.data();state.leaves=state_leaves.data();}
+    };
+    std::unique_ptr<Tesla> tesla;
+    Config empty_command;
+    struct Bluetooth {bool enabled=true; bool active() const {return enabled;}} bluetooth;
+    bool bluetooth_restart_pending=false, service_start_requested=false;
     bool accepting=false, start_result=false;
-    TeslaVehicle() {config.leaves=live.data();state.leaves=state_leaves.data();}
+    // This projection tests an explicitly prepared service. Full-module tests
+    // exercise allocation and OFF boot; the null fixture checks URL admission.
+    explicit TeslaVehicle(bool prepared=true) {if(prepared) tesla.reset(new Tesla);}
     bool accepts_commands() const {return accepting;}
     bool start_runtime(bool) {return start_result;}
     void register_urls();
+    void register_tesla_urls();
     void register_bluetooth_urls() {} // Separate R13 full-module/POSIX harness covers this API.
     String validate(Config &update, ConfigSource source);
 };
@@ -90,6 +108,7 @@ struct TeslaVehicle {
 header += definition(source, 'static String checked_error_string') + '\n'
 validator = definition(source, '[this](Config &update, ConfigSource source) -> String')
 header += 'String TeslaVehicle::validate(Config &update, ConfigSource source) ' + validator[validator.index('{'):] + '\n'
+header += definition(source, 'void TeslaVehicle::register_tesla_urls()') + '\n'
 header += definition(source, 'void TeslaVehicle::register_urls()') + '\n'
 (out / 'module_validation_definitions.inc').write_text(header)
 inputs = [module, core / 'WString.cpp', core / 'WString.h', repo / 'software/src/config.cpp', repo / 'software/src/config.h']

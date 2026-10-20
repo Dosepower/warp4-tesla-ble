@@ -174,7 +174,7 @@ def capture_firmware(env, build, sdk, builder, project):
     if proof["variant"] != variant:
         raise ValueError("cross-variant SDK identity substitution")
     roots = [project / name for name in ("src", "lib", "boards", "tools", "platformio.ini", "warp4_tesla_ble.ini",
-                                         "pio_hooks.py", "bench_guard_hook.py", "bench_image_hook.py", "boot_app0.bin")]
+                                         "pio_hooks.py", "bench_guard_hook.py", "bench_image_hook.py", "r13_vfs_guard.py", "boot_app0.bin")]
     roots += [Path(env.GetProjectOption("board_build.partitions")), build / "metadata.json"]
     roots += [Path(env.PioPlatform().get_package_dir(p)) for p in (
         "framework-arduinoespressif32", "toolchain-xtensa-esp-elf")]

@@ -1,38 +1,50 @@
-export interface config {
+interface TeslaProfile {
     enable: boolean;
     vin: string;
     ble_address: string;
+    ble_address_type: number;
+    discovery_revision: number;
     ev_index: number;
+    ev_mac: string;
     poll_interval: number;
     wake_once: boolean;
 }
-
+export interface profiles { entries: TeslaProfile[]; }
 export interface state {
+    profile_ev_index: number;
+    active_ev_index: number;
+    legacy_blocked: boolean;
     running: boolean;
+    action_busy: boolean;
     stopping: boolean;
     connected: boolean;
     key_present: boolean;
-    // Bounded wire token "cleanup" maps to cleanup-required UI wording.
     key_presence: 'unknown' | 'present' | 'absent' | 'cleanup';
     paired: boolean;
     pairing_pending: boolean;
-    // True only after PairRequestSent, while approval is still pending.
     pair_request_sent: boolean;
     restart_required: boolean;
     last_soc: number;
-
     last_update: number;
     last_error: string;
 }
-
-export type pair = {};
-export type poll = {};
-export type forget_key = {};
+export type start = {ev_index: number};
+export type pair = {ev_index: number};
+export type poll = {ev_index: number};
+export type forget_key = {ev_index: number};
+export type scan = {vin: string; ev_index: number; ev_mac: string};
+export interface discovery {
+    status: 'idle' | 'searching' | 'complete' | 'error';
+    busy: boolean;
+    error: string;
+    truncated: boolean;
+    revision: number;
+    ev_index: number;
+    targets: {name: string; ble_address: string; ble_address_type: number; matches_vin: boolean; rssi: number}[];
+}
 
 //APIPath:bluetooth/
-export interface config___bluetooth {
-    enable: boolean;
-}
+export interface config___bluetooth { enable: boolean; }
 export interface state___bluetooth {
     supported: boolean;
     unsupported_reason: '' | 'sdk_disabled' | 'hardware_unsupported' | 'bench_only' | 'storage_backend_unverified';

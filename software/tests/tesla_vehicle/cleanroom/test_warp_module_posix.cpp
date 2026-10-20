@@ -31,10 +31,10 @@ extern "C" int __wrap_close(int fd) {
     return rc;
 }
 void TeslaBleModuleTest::ui_r3_posix(bool guard_refusal, bool deletion_failure, bool close_failure, bool session_failure) {
-        auto *r=module.runtime_owner.get();
+        auto *r=module.tesla->runtime_owner.get();
         assert(r->storage->forget_material()); r->bound_vehicle_mac.store(0); r->session.bind(0);
         ui_with_worker_guard([&]() {
-            module.process_module_events(); assert(module.state.get("key_presence")->asString()=="absent");
+            module.process_module_events(); assert(module.tesla->state.get("key_presence")->asString()=="absent");
             TeslaBleStorageIO::Paths key; assert(key.initialize("/config/tesla_ble_private_key"));
             bool refused=false;
 
@@ -46,9 +46,9 @@ void TeslaBleModuleTest::ui_r3_posix(bool guard_refusal, bool deletion_failure, 
             assert(!guard_refusal || refused);
             assert(std::filesystem::exists(key.temporary) && !std::filesystem::exists(key.canonical) && !std::filesystem::exists(key.backup));
             module.process_module_events();
-            assert(!module.state.get("key_present")->asBool());
-            assert(module.state.get("key_presence")->asString()=="cleanup");
-            std::printf("R3_STORAGE_STATE {\"running\":true,\"key_present\":false,\"key_presence\":\"%s\",\"restart_required\":false}\n",module.state.get("key_presence")->asString().c_str());
+            assert(!module.tesla->state.get("key_present")->asBool());
+            assert(module.tesla->state.get("key_presence")->asString()=="cleanup");
+            std::printf("R3_STORAGE_STATE {\"running\":true,\"key_present\":false,\"key_presence\":\"%s\",\"restart_required\":false}\n",module.tesla->state.get("key_presence")->asString().c_str());
             module.update_active_vehicle();
             const uint8_t fixture[]={1};
             for(const char *name : {"session_vcsec","session_infotainment","warp_ev_mac"}) {
@@ -76,10 +76,10 @@ void TeslaBleModuleTest::ui_r3_posix(bool guard_refusal, bool deletion_failure, 
                     assert(restarted.forget_material());
                     assert(restarted.private_key_presence()==TeslaBleStorageAdapter::KeyPresence::Absent);
                 } else { assert(std::filesystem::exists(key.temporary)); }
-                module.loop(); assert(module.state.get("restart_required")->asBool());
-                assert(module.state.get("key_presence")->asString()!="absent");
+                module.loop(); assert(module.tesla->state.get("restart_required")->asBool());
+                assert(module.tesla->state.get("key_presence")->asString()!="absent");
             } else {
-                assert(module.state.get("key_presence")->asString()=="absent");
+                assert(module.tesla->state.get("key_presence")->asString()=="absent");
                 assert(std::filesystem::is_empty(TESLA_CLEAN_STORAGE_PREFIX "/config"));
             }
             assert(sent.empty());

@@ -45,7 +45,7 @@ class BluedroidMemoryTests(unittest.TestCase):
 
     def test_bench_only_default_malloc_policy_preserves_internal_capability(self):
         tool = self.load_tool()
-        result = tool.check_policy(ROOT / "software/.pio/bench-idf",
+        result = tool.check_policy(Path(os.environ.get("TESLA_BLE_MEMORY_TEST_IDF", ROOT / "software/.pio/bench-idf")),
                                    sanitize=os.environ.get("TESLA_BLE_SMOKE_SANITIZE") == "1")
         self.assertTrue(result["external_preferred_internal_unchanged"])
         bench = (ROOT / "software/lib-builder/defconfig.warp4-ble-bench").read_text()

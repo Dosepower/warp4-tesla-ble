@@ -1,7 +1,7 @@
 #include "tesla_ble_bench_smoke.h"
 #include "tesla_ble_bench_admission.h"
 
-#if defined(TESLA_BLE_BENCH_ONLY) && TESLA_BLE_BENCH_ONLY && defined(TESLA_BLE_IRAM_DIAGNOSTICS) && TESLA_BLE_IRAM_DIAGNOSTICS
+#if defined(TESLA_BLE_BENCH_ONLY) && TESLA_BLE_BENCH_ONLY && defined(TESLA_BLE_IRAM_DIAGNOSTICS) && TESLA_BLE_IRAM_DIAGNOSTICS && (!defined(TESLA_BLE_R13_MASTER_BENCH) || !TESLA_BLE_R13_MASTER_BENCH)
 #include <esp_bt.h>
 #include <esp_bt_main.h>
 #include <cstring>

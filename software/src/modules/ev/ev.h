@@ -20,6 +20,7 @@
 #pragma once
 
 #include <math.h>
+#include <atomic>
 
 #include "module.h"
 #include "config.h"
@@ -75,10 +76,29 @@ public:
     uint64_t get_session_generation() const { return session_generation; }
     bool session_exhausted() const { return session_generation_exhausted; }
     uint64_t get_active_ev_mac() const { return active_ev_mac; }
+    // Tesla identities require an exact existing profile, never a wildcard.
+    uint64_t get_profile_mac(int index) const;
+    struct LiveIdentity { uint64_t generation; int index; uint64_t mac; };
+    LiveIdentity get_live_identity() const {
+        for (unsigned tries = 0; tries < 2; ++tries) {
+            const auto revision = live_revision.load();
+            if (revision & 1) { continue; }
+            LiveIdentity value{live_generation.load(), live_index.load(), live_mac.load()};
+            if (revision == live_revision.load()) { return value; }
+        }
+        return {UINT64_MAX, -1, 0}; // Transition/contention is never authorization.
+    }
 
     EVSession session;
 
 private:
+    void publish_live_identity() {
+        live_generation.store(session_generation); live_mac.store(active_ev_mac); live_index.store(active_ev_index);
+        live_revision.fetch_add(1); // odd -> even, writer is the EV main task only.
+    }
+    std::atomic<uint32_t> live_revision{0};
+    std::atomic<uint64_t> live_generation{0}, live_mac{0};
+    std::atomic<int> live_index{-1};
     float get_session_energy_kwh();
     void clear_session();
     int find_matching_ev_index(const uint8_t mac[EV_MAC_ADDRESS_LENGTH]);

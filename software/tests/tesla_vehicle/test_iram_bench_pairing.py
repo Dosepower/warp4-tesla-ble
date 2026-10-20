@@ -8,8 +8,9 @@ import unittest
 from test_iram_bench_smoke import MODULE
 ROOT=MODULE.parents[3]
 E=ROOT/'software/.pio/bench-evidence/pairing'
-MBED=ROOT/'software/.pio/bench-idf/components/mbedtls/mbedtls'
-LIB=ROOT/'software/.pio/bench-evidence/discovery-local-name/host-normal/mbedtls'
+MBED=Path(os.environ.get('TESLA_BLE_HOST_MBEDTLS_SOURCE', ROOT/'software/.pio/bench-idf/components/mbedtls/mbedtls'))
+LIB=Path(os.environ.get('TESLA_CLEAN_MBEDTLS_BUILD', ROOT/'software/.pio/bench-evidence/discovery-local-name/host-normal/mbedtls'))
+SANITIZED_LIB=Path(os.environ.get('TESLA_CLEAN_MBEDTLS_SANITIZED_BUILD', LIB.parents[1]/'host-sanitize/mbedtls'))
 HARNESS=r'''
 #include "tesla_ble_bench_pairing.h"
 #include <tesla_clean/protobuf.hpp>
@@ -59,7 +60,7 @@ class BenchPairingTests(unittest.TestCase):
                 code=original.read_text().replace('namespace tesla_clean {','extern bool bench_test_challenge_inflight;\nnamespace tesla_clean {',1).replace('const bool accepted=transport.send(transport.context,view);','bench_test_challenge_inflight=true;\n    const bool accepted=transport.send(transport.context,view);\n    bench_test_challenge_inflight=false;')
                 (t/'auth-instrumented.cpp').write_text(code)
                 sources=[t/'auth-instrumented.cpp' if p==original else p for p in sources]
-            lib=LIB if os.environ.get('TESLA_BLE_SMOKE_SANITIZE')!='1' else LIB.parents[1]/'host-sanitize/mbedtls'
+            lib=LIB if os.environ.get('TESLA_BLE_SMOKE_SANITIZE')!='1' else SANITIZED_LIB
             cmd=['g++','-std=c++17','-Wall','-Wextra','-Werror','-fno-exceptions','-fno-rtti','-DTESLA_BLE_BENCH_ONLY=1','-DTESLA_BLE_IRAM_DIAGNOSTICS=1','-DTESLA_CLEAN_STORAGE_PREFIX="'+str(t/'store')+'"','-I'+str(MODULE),'-I'+str(ROOT/'software/lib/TeslaBLEClean/include'),'-I'+str(MBED/'include'),str(t/'test.cpp'),*[str(p) for p in sources+list(extra_sources)],str(lib/'library/libmbedcrypto.a'),str(lib/'3rdparty/everest/libeverest.a'),str(lib/'3rdparty/p256-m/libp256m.a'),'-o',str(t/'test')]
             if os.environ.get('TESLA_BLE_SMOKE_SANITIZE')=='1': cmd+=['-fsanitize=address,undefined','-fno-omit-frame-pointer','-g','-no-pie']
             if forbidden_symbols: cmd+=['-ffunction-sections','-fdata-sections','-Wl,--gc-sections']

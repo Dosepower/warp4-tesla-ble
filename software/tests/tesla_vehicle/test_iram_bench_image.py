@@ -303,7 +303,14 @@ class BenchImageTests(unittest.TestCase):
         self.assertIn("TESLA_BLE_BENCH_ONLY", ini)
         self.assertIn("TESLA_BLE_BENCH_FRAMEWORK_LIBS", ini)
         self.assertIn("TESLA_BLE_BENCH_MINIMAL_FRAMEWORK_LIBS", ini)
-        self.assertIn("post:bench_image_hook.py", ini)
+        # Current raw-build profile deliberately performs no merge/export.
+        # It must still enforce exact SDK identity before accepting the build.
+        self.assertIn("post:r13_lean_bench.py", ini)
+        self.assertNotIn("post:bench_image_hook.py", ini)
+        gate = (ROOT / "software/r13_lean_bench.py").read_text()
+        self.assertIn("from bench_build_identity import verify_sdk", gate)
+        self.assertIn("verify_sdk(sdk, env.GetProjectOption('custom_bench_builder'))", gate)
+        self.assertNotIn("bench_image_report", gate)
         self.assertIn("board_build.arduino.custom_bootloader = ${sysenv.TESLA_BLE_BENCH_FRAMEWORK_LIBS}/esp32/bin/bootloader_qio_80m.bin", ini)
         bench = (ROOT / "software/lib-builder/defconfig.warp4-ble-bench").read_text()
         self.assertIn("CONFIG_PARTITION_TABLE_OFFSET=0xe000", bench)

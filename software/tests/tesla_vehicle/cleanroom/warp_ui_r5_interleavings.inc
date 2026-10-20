@@ -11,7 +11,7 @@ void ui_r5_main_pass() {
 #endif
 }
 TeslaBleRequestIdentity ui_r5_auth_queue(bool queued=true) {
- auto *r=module.runtime_owner.get(); module.request_soc(true); tick();
+ auto *r=module.tesla->runtime_owner.get(); module.request_soc(true); tick();
  if(last().hello) { inject(peer.hello(last())); tick(); }
  inject(peer.response(last(),{awake,sizeof(awake)},2)); tick();
  if(last().hello) { inject(peer.hello(last())); tick(); }
@@ -20,15 +20,15 @@ TeslaBleRequestIdentity ui_r5_auth_queue(bool queued=true) {
  assert(r->session.matches(request)==queued); return request;
 }
 void ui_r5_finish_stop() {
- module.config.get("enable")->updateBool(false); ui_r5_main_pass();
- auto *r=module.runtime_owner.get(); assert(r && r->worker_stopped.load());
+ module.tesla->config.get("enable")->updateBool(false); ui_r5_main_pass();
+ auto *r=module.tesla->runtime_owner.get(); assert(r && r->worker_stopped.load());
  assert(r->teardown_handle); run_task(r->teardown_handle); ui_r5_main_pass();
- assert(!module.runtime_owner.get() && !module.state.get("running")->asBool());
- assert(!module.state.get("stopping")->asBool());
+ assert(!module.tesla->runtime_owner.get() && !module.tesla->state.get("running")->asBool());
+ assert(!module.tesla->state.get("stopping")->asBool());
 }
 void ui_r5_delete_delayed(bool disconnect_first, bool contend=false) {
  ui_with_worker_guard([&]() {
-  auto *r=module.runtime_owner.get(); ui_r5_auth_queue(); module.register_urls();String error;
+  auto *r=module.tesla->runtime_owner.get(); ui_r5_auth_queue(); module.register_urls();String error;
   api.commands.at("tesla_vehicle/forget_key")(0,error); assert(error.length()==0);
   unsigned passes=0; std::atomic<bool> held{false},release{false};std::thread holder;
   on_gatt_close=[&]() { if(contend) {
@@ -37,7 +37,7 @@ void ui_r5_delete_delayed(bool disconnect_first, bool contend=false) {
   }};
   on_delay=[&]() {
    ui_r5_main_pass(); ++passes;
-   assert(ev.applied==0 && !module.state.get("restart_required")->asBool());
+   assert(ev.applied==0 && !module.tesla->state.get("restart_required")->asBool());
    assert(!r->deferred_soc && r->deferred_attempts==0);
    if(passes==12) {
     if(contend){release=true;holder.join();}
@@ -52,15 +52,15 @@ void ui_r5_delete_delayed(bool disconnect_first, bool contend=false) {
   ui_r5_main_pass(); assert(ev.applied==0 && !r->deferred_soc && r->deferred_attempts==0);
   assert(!r->pair_requested.load() && !r->poll_requested.load() && !r->forget_requested.load());
   assert(r->storage->private_key_presence()==TeslaBleStorageAdapter::KeyPresence::Absent);
-  assert(module.state.get("key_presence")->asString()=="absent");
-  assert(!r->stop_requested.load() && !module.state.get("restart_required")->asBool());
-  assert(!r->command_outcome.forgetting() && !module.state.get("key_present")->asBool());
+  assert(module.tesla->state.get("key_presence")->asString()=="absent");
+  assert(!r->stop_requested.load() && !module.tesla->state.get("restart_required")->asBool());
+  assert(!r->command_outcome.forgetting() && !module.tesla->state.get("key_present")->asBool());
  });
- ui_r5_finish_stop(); assert(module.state.get("key_presence")->asString()=="absent" && ev.applied==0);
+ ui_r5_finish_stop(); assert(module.tesla->state.get("key_presence")->asString()=="absent" && ev.applied==0);
 }
 void ui_r5_bounded_stop(unsigned mode) {
  ui_with_worker_guard([&]() {
-  auto *r=module.runtime_owner.get();
+  auto *r=module.tesla->runtime_owner.get();
   // Cancellation has an actual command and storage probe, never synthetic state.
   if(mode==3){queue_pair();module.process_commands();tick();ui_approve_without_main();}
   else {ui_r5_auth_queue(); queue_pair();}
@@ -93,7 +93,7 @@ void ui_r5_bounded_stop(unsigned mode) {
    }
   }
   const auto start=std::chrono::steady_clock::now();
-  if(mode==3)module.config.get("enable")->updateBool(false);
+  if(mode==3)module.tesla->config.get("enable")->updateBool(false);
   for(unsigned i=0;i<10;++i) { ui_r5_main_pass(); }
   const bool before_release=!release.load();
   const auto elapsed=std::chrono::steady_clock::now()-start;
@@ -103,22 +103,22 @@ void ui_r5_bounded_stop(unsigned mode) {
       static_cast<long long>(std::chrono::duration_cast<std::chrono::microseconds>(elapsed).count()));
   if(mode)assert(outcome_held);
   ui_r5_main_pass(); assert(ev.applied==0 && !r->deferred_soc);
-  assert(module.state.get("restart_required")->asBool()==(mode!=3));
+  assert(module.tesla->state.get("restart_required")->asBool()==(mode!=3));
  });
  ui_r5_finish_stop(); assert(ev.applied==0 && !module.accepts_commands());
 }
 void ui_r5_final_presence(unsigned variant, bool consume_first) {
  ui_with_worker_guard([&]() {
-  auto *r=module.runtime_owner.get(); module.process_module_events();
-  assert(module.state.get("key_presence")->asString()=="present");
+  auto *r=module.tesla->runtime_owner.get(); module.process_module_events();
+  assert(module.tesla->state.get("key_presence")->asString()=="present");
   // Prior authenticated display fact: completed erasure must retire it even
   // when the final storage probe itself returns unknown.
-  module.state.get("paired")->updateBool(true);
+  module.tesla->state.get("paired")->updateBool(true);
   module.register_urls();String error;api.commands.at("tesla_vehicle/forget_key")(0,error);assert(error.length()==0);
   r->command_outcome.sequence=UINT64_MAX-1;
   module.process_commands();assert(r->storage->private_key_presence()==TeslaBleStorageAdapter::KeyPresence::Absent);
   assert(r->command_outcome.sequence==UINT64_MAX);
-  if(consume_first){ui_r5_main_pass();assert(module.state.get("key_presence")->asString()=="absent");}
+  if(consume_first){ui_r5_main_pass();assert(module.tesla->state.get("key_presence")->asString()=="absent");}
   // Final probe can differ from the last sequenced snapshot; it must remain
   // truthful even if no further publication identity can be allocated.
 #ifdef TESLA_BLE_MODULE_POSIX_TEST
@@ -131,26 +131,26 @@ void ui_r5_final_presence(unsigned variant, bool consume_first) {
 #endif
   r->stop_requested.store(true);
  });
- fs_fault={};auto *r=module.runtime_owner.get();assert(r->worker_stopped.load());
+ fs_fault={};auto *r=module.tesla->runtime_owner.get();assert(r->worker_stopped.load());
  ui_r5_main_pass();
  const char *expected=variant==1?"cleanup":variant==2?"unknown":"absent";
- assert(module.state.get("key_presence")->asString()==expected);
- assert(!module.state.get("key_present")->asBool());
- assert(!module.state.get("paired")->asBool());
- assert(module.state.get("restart_required")->asBool());
- assert(module.state.get("last_error")->asString().length()!=0);
+ assert(module.tesla->state.get("key_presence")->asString()==expected);
+ assert(!module.tesla->state.get("key_present")->asBool());
+ assert(!module.tesla->state.get("paired")->asBool());
+ assert(module.tesla->state.get("restart_required")->asBool());
+ assert(module.tesla->state.get("last_error")->asString().length()!=0);
  assert(r->command_outcome.sequence==UINT64_MAX && !module.accepts_commands());
- ui_r5_finish_stop();assert(module.state.get("key_presence")->asString()==expected);
- assert(module.state.get("restart_required")->asBool() && !module.accepts_commands());
+ ui_r5_finish_stop();assert(module.tesla->state.get("key_presence")->asString()==expected);
+ assert(module.tesla->state.get("restart_required")->asBool() && !module.accepts_commands());
 }
 void ui_r5_queue_recovery() {
  ui_with_worker_guard([&]() {
-  auto *r=module.runtime_owner.get();const auto capacity=r->queues.events()->capacity;
+  auto *r=module.tesla->runtime_owner.get();const auto capacity=r->queues.events()->capacity;
   r->queues.events()->capacity=0; const auto old=ui_r5_auth_queue(false);
   assert(!r->session.matches(old));
   r->queues.events()->capacity=capacity;ui_r5_main_pass();assert(ev.applied==0);
   const auto fresh=ui_r5_auth_queue();assert(fresh.request!=old.request && fresh.request!=0);
   ui_r5_main_pass();assert(ev.applied==1 && !r->session.matches(fresh));
-  assert(module.state.get("last_error")->asString().length()==0);
+  assert(module.tesla->state.get("last_error")->asString().length()==0);
  });ui_r5_finish_stop();assert(ev.applied==1);
 }

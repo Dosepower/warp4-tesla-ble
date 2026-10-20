@@ -6,17 +6,18 @@
 #include <new>
 #include <cctype>
 #include "tesla_ble_iram_diagnostics.h"
+#if !TESLA_BLE_R13_MASTER_BENCH
 #include "tesla_ble_bench_smoke.h"
 #include "tesla_ble_bench_discovery.h"
+#endif
+#if TESLA_BLE_R13_MASTER_BENCH && !defined(TESLA_BLE_MODULE_HOST_TEST)
+#include <esp_rom_sys.h>
+#endif
 
 #ifndef TESLA_BLE_MODULE_HOST_TEST
 #if WARP_BLUETOOTH_COMPILED
-#include <BLEAddress.h>
-#include <BLEDevice.h>
-
 #include <esp_bt.h>
 #include <esp_bt_main.h>
-#include <esp32-hal-bt.h>
 #endif
 
 #include "event_log_prefix.h"
@@ -33,6 +34,16 @@
 
 
 static constexpr uint32_t RESPONSE_TIMEOUT_MS = 40000;
+
+static TeslaBleIdentity current_ev_identity()
+{
+#if TESLA_BLE_MANUAL_VEHICLE_UI
+    const auto live = ev.get_live_identity();
+    return {live.generation, live.index, live.mac};
+#else
+    return {ev.get_session_generation(), ev.get_active_ev_index(), ev.get_active_ev_mac()};
+#endif
+}
 
 static String checked_error_string(const char *message)
 {
@@ -51,6 +62,8 @@ static std::array<uint8_t, 6> encode_vehicle_mac(uint64_t mac)
     return bytes;
 }
 
+#include "tesla_profiles.inc"
+
 
 void TeslaVehicle::pre_setup()
 {
@@ -65,7 +78,30 @@ void TeslaVehicle::pre_setup()
         {"persistence_error", Config::Bool(false)},
         {"legacy_tesla_enabled", Config::Bool(false)},
     });
-    config = ConfigRoot{Config::Object({
+    empty_command = Config::Object({});
+#if TESLA_BLE_R13_MASTER_BENCH
+    bench_state = Config::Object({{"running", Config::Bool(false)}, {"key_presence", Config::Str("unknown", 0, 16)}});
+#endif
+}
+
+bool TeslaVehicle::prepare_tesla()
+{
+#if TESLA_BLE_R13_MASTER_BENCH
+    return false;
+#else
+    if (tesla) { return true; }
+    tesla.reset(new (std::nothrow) Tesla);
+    if (!tesla) { return false; }
+#if TESLA_BLE_MANUAL_VEHICLE_UI
+    tesla->profile = make_profile();
+    tesla->config = make_profile(); // Volatile startup snapshot, never an API or config file.
+    tesla->profiles = ConfigRoot{Config::Object({
+        {"entries", Config::Array({}, &tesla->profile, 0, EV_MAX_EVS)},
+    }), [this](Config &update, ConfigSource source) { return validate_profiles(update, source); }};
+    tesla->profile_command = Config::Object({{"ev_index", Config::Int(-1, -1, EV_MAX_EVS - 1)}});
+    tesla->legacy_blocked = TeslaBleStorageAdapter::legacy_material_present();
+#else
+    tesla->config = ConfigRoot{Config::Object({
         {"enable", Config::Bool(false)},
         {"vin", Config::Str("", 0, 17)},
         {"ble_address", Config::Str("", 0, 17)},
@@ -73,6 +109,9 @@ void TeslaVehicle::pre_setup()
         {"poll_interval", Config::Uint(300, 30, 3600)},
         {"wake_once", Config::Bool(false)},
     }), [this](Config &update, ConfigSource source) -> String {
+#if TESLA_BLE_MANUAL_VEHICLE_UI
+        if(source!=ConfigSource::File && bluetooth.discovery_busy()) { return String("Search in progress"); }
+#endif
         char vin[18]{}, address[18]{};
         const auto &vin_text = update.get("vin")->asString();
         const auto &address_text = update.get("ble_address")->asString();
@@ -100,22 +139,28 @@ void TeslaVehicle::pre_setup()
             }
         }
 
-        const bool changed = update.get("enable")->asBool() != config.get("enable")->asBool() ||
-                             update.get("vin")->asString() != config.get("vin")->asString() ||
-                             update.get("ble_address")->asString() != config.get("ble_address")->asString() ||
-                             update.get("ev_index")->asInt() != config.get("ev_index")->asInt() ||
-                             update.get("poll_interval")->asUint() != config.get("poll_interval")->asUint() ||
-                             update.get("wake_once")->asBool() != config.get("wake_once")->asBool();
+        const bool changed = update.get("enable")->asBool() != tesla->config.get("enable")->asBool() ||
+                             update.get("vin")->asString() != tesla->config.get("vin")->asString() ||
+                             update.get("ble_address")->asString() != tesla->config.get("ble_address")->asString() ||
+                             update.get("ev_index")->asInt() != tesla->config.get("ev_index")->asInt() ||
+                             update.get("poll_interval")->asUint() != tesla->config.get("poll_interval")->asUint() ||
+                             update.get("wake_once")->asBool() != tesla->config.get("wake_once")->asBool();
         const auto action = tesla_ble_config_update_action(source == ConfigSource::File,
-                                                            runtime_owner.get() != nullptr,
+                                                            tesla->runtime_owner.get() != nullptr,
                                                             changed);
         if (action == TeslaBleConfigUpdateAction::ApplyInLoop) {
-            runtime_update_requested.store(true);
+            tesla->runtime_update_requested.store(true);
         }
         return "";
     }};
 
-    state = Config::Object({
+#endif
+    tesla->state = Config::Object({
+#if TESLA_BLE_MANUAL_VEHICLE_UI
+        {"profile_ev_index", Config::Int(-1, -1, EV_MAX_EVS - 1)},
+        {"active_ev_index", Config::Int(-1, -1, EV_MAX_EVS - 1)},
+        {"legacy_blocked", Config::Bool(tesla->legacy_blocked)},
+#endif
         {"running", Config::Bool(false)},
         {"stopping", Config::Bool(false)},
         {"connected", Config::Bool(false)},
@@ -127,40 +172,134 @@ void TeslaVehicle::pre_setup()
         {"pair_request_sent", Config::Bool(false)},
         {"restart_required", Config::Bool(false)},
         {"last_soc", Config::Float(NAN)},
+        {"action_busy", Config::Bool(false)},
         {"last_update", Config::Uptime()},
         {"last_error", Config::Str("", 0, 96)},
     });
 
-    empty_command = Config::Object({});
-#if defined(TESLA_BLE_BENCH_ONLY) && TESLA_BLE_BENCH_ONLY && defined(TESLA_BLE_IRAM_DIAGNOSTICS) && TESLA_BLE_IRAM_DIAGNOSTICS
+#if defined(TESLA_BLE_BENCH_ONLY) && TESLA_BLE_BENCH_ONLY && defined(TESLA_BLE_IRAM_DIAGNOSTICS) && TESLA_BLE_IRAM_DIAGNOSTICS && !TESLA_BLE_R13_MASTER_BENCH && !TESLA_BLE_PSRAM_POLICY_DIAGNOSTIC
     tesla_ble_bench_smoke_pre_setup();
+#endif
+#if TESLA_BLE_MANUAL_VEHICLE_UI
+    tesla->discovery_target=Config::Object({
+        {"name",Config::Str("",0,18)}, {"ble_address",Config::Str("",0,17)}, {"rssi",Config::Int(0,-127,20)},
+        {"ble_address_type",Config::Uint(0,0,1)}, {"matches_vin",Config::Bool(false)},
+    });
+    tesla->discovery_state=Config::Object({
+        {"status",Config::Str("idle",0,9)}, {"busy",Config::Bool(false)},
+        {"error",Config::Str("",0,16)}, {"truncated",Config::Bool(false)},
+        {"revision",Config::Uint(0,0,UINT32_MAX)}, {"ev_index",Config::Int(-1,-1,EV_MAX_EVS-1)},
+        {"targets",Config::Array({},&tesla->discovery_target,0,TeslaBleDiscovery::LIMIT)},
+    });
+    tesla->scan_command=Config::Object({
+        {"vin",Config::Str("",0,17)}, {"ev_index",Config::Int(-1,-1,EV_MAX_EVS-1)}, {"ev_mac",Config::Str("",0,17)},
+    });
+#endif
+#if TESLA_BLE_MANUAL_VEHICLE_UI
+    const bool saved_profiles = TeslaBleStorageAdapter::profiles_config_present();
+    if (!api.restorePersistentConfig("tesla_vehicle/profiles", &tesla->profiles) && saved_profiles) {
+        tesla->legacy_blocked = true; // An unreadable/new-schema mapping is not a blank identity store.
+        tesla->state.get("legacy_blocked")->updateBool(true);
+    }
+    if (tesla->legacy_blocked) {
+        publish_error("Legacy Tesla storage retained; verified offline migration required; actions blocked");
+    }
+#else
+    if (!api.restorePersistentConfig("tesla_vehicle/config", &tesla->config)) {
+        api.restorePersistentConfig("tesla_ble/config", &tesla->config);
+    }
+#endif
+    return true;
 #endif
 }
 
 void TeslaVehicle::setup()
 {
     bool desired = false;
-    bluetooth_commit_ok = bluetooth_store.load(desired);
+    bluetooth_commit_ok = load_bluetooth(desired);
     bluetooth_config.get("enable")->updateBool(desired);
     bluetooth_boot_enabled = bluetooth_supported() && bluetooth_commit_ok && desired;
-    if (!api.restorePersistentConfig("tesla_vehicle/config", &config)) {
-        // Retain the legacy fallback: never delete it after an unchecked write.
-        api.restorePersistentConfig("tesla_ble/config", &config);
-    }
-
-    // Unknown until a worker explicitly inspects storage. Disabled setup must
-    // neither probe the filesystem nor allocate Tesla runtime resources.
-    pairing_policy.on_key_loaded(false);
-    state.get("key_present")->updateBool(pairing_policy.key_present());
-    state.get("paired")->updateBool(pairing_policy.paired());
-
-    tesla_ble_iram_snapshot("module.setup", "boot");
+#if TESLA_BLE_PSRAM_POLICY_DIAGNOSTIC
+    // Exercise ordinary Tesla/API registration, but never start a vehicle or
+    // honor persisted activation. Only the separate no-peer UART lifecycle owns BT.
+    bluetooth_boot_enabled = false;
+    prepare_tesla();
+#endif
+#if !TESLA_BLE_PSRAM_POLICY_DIAGNOSTIC
     if (bluetooth_boot_enabled) {
-        start_runtime();
+#if TESLA_BLE_R13_MASTER_BENCH
+#if TESLA_BLE_MANUAL_WEB_BENCH
+        // Retry8 launched only after normal API/MQTT startup. Defer until the
+        // ordinary module loop, after the same complete boot/allocation probe.
+        service_start_requested = true;
+#else
+        tesla_ble_iram_snapshot("module.setup", "boot");
+        master_bench.start();
+#endif
+#else
+        prepare_tesla();
+#if WARP_BLUETOOTH_COMPILED
+        bluetooth.start(gatt_callback);
+#endif
+#endif
     }
+#endif
     publish_bluetooth_state();
     initialized = true;
+#if TESLA_BLE_R13_MASTER_BENCH
+    if (bluetooth_boot_enabled) { bench_emit("boot", true); }
+#endif
 }
+
+#if TESLA_BLE_R13_MASTER_BENCH
+void TeslaVehicle::bench_emit(const char *request, bool ok)
+{
+    publish_bluetooth_state();
+    const auto boolean = [](bool v) { return v ? "true" : "false"; };
+#ifdef TESLA_BLE_MODULE_HOST_TEST
+    std::printf(
+#else
+    esp_rom_printf(
+#endif
+        "R13_STATE {\"request\":\"%s\",\"ok\":%s,\"supported\":%s,\"unsupported_reason\":\"%s\","
+        "\"desired\":%s,\"boot_enabled\":%s,\"phase\":\"%s\",\"restart_required\":%s,"
+        "\"persistence_error\":%s,\"controller\":%d,\"host\":%d,\"gatt_ready\":%s,"
+        "\"worker_stack_min\":%u,\"tesla_running\":false,\"key_presence\":\"unknown\"}\n",
+        request, boolean(ok), boolean(bluetooth_supported()), bluetooth_unsupported_reason(),
+        boolean(bluetooth_config.get("enable")->asBool()), boolean(bluetooth_boot_enabled),
+        (strcmp(request, "teardown") == 0 && master_bench.stopped()) ? "stopped" : bluetooth_state.get("phase")->asString().c_str(), boolean(bluetooth_state.get("restart_required")->asBool()),
+        boolean(bluetooth_state.get("persistence_error")->asBool()), master_bench.controller(), master_bench.host(),
+        boolean(master_bench.gatt_ready()), static_cast<unsigned>(master_bench.stack_min()));
+}
+#if !TESLA_BLE_MANUAL_WEB_BENCH
+void TeslaVehicle::bench_serial()
+{
+    for (unsigned i = 0; i < 32 && Serial.available(); ++i) {
+        const char c = static_cast<char>(Serial.read());
+        if (c != '\n' && (static_cast<unsigned char>(c) < 32 || static_cast<unsigned char>(c) > 126)) {
+            bench_line_overflow = true; continue;
+        }
+        if (c != '\n') {
+            if (bench_line_size + 1 < sizeof(bench_line)) { bench_line[bench_line_size++] = c; }
+            else { bench_line_overflow = true; }
+            continue;
+        }
+        bench_line[bench_line_size] = '\0';
+        String error;
+        bool ok = false;
+        const char *name = "invalid";
+        if (!bench_line_overflow) {
+            if (strcmp(bench_line, "r13:state") == 0) { name = "state"; ok = true; }
+            else if (strcmp(bench_line, "r13:on") == 0) { name = "on"; ok = save_bluetooth(true, error); }
+            else if (strcmp(bench_line, "r13:off") == 0) { name = "off"; ok = save_bluetooth(false, error); }
+            else if (strcmp(bench_line, "r13:restart") == 0) { name = "restart"; ok = restart_bluetooth(error); }
+        }
+        bench_emit(name, ok);
+        bench_line_size = 0; bench_line_overflow = false;
+    }
+}
+#endif
+#endif
 
 void TeslaVehicle::register_bluetooth_urls()
 {
@@ -168,50 +307,169 @@ void TeslaVehicle::register_bluetooth_urls()
     api.addState("bluetooth/config", &bluetooth_config);
     api.addState("bluetooth/state", &bluetooth_state);
     api.addCommand("bluetooth/config_update", &bluetooth_update, {}, [this](Language, String &errmsg) {
-        const bool desired = bluetooth_update.get("enable")->asBool();
-        if (desired && !bluetooth_supported()) {
-            errmsg = checked_error_string("Bluetooth unavailable: SDK or hardware does not support this service");
-            return;
-        }
-        bluetooth_commit_ok = bluetooth_store.save(desired);
-        if (!bluetooth_commit_ok) {
-            errmsg = checked_error_string("Bluetooth configuration commit failed; not saved; no restart permitted");
-        } else {
-            bluetooth_config.get("enable")->updateBool(desired);
-        }
-        publish_bluetooth_state();
+        save_bluetooth(bluetooth_update.get("enable")->asBool(), errmsg);
     }, false);
     api.addCommand("bluetooth/restart", &empty_command, {}, [this](Language, String &errmsg) {
-        bool saved = false;
-        publish_bluetooth_state();
-        if (!bluetooth_supported() || !bluetooth_commit_ok ||
-            !bluetooth_state.get("restart_required")->asBool() ||
-            !bluetooth_store.load(saved) || saved != bluetooth_config.get("enable")->asBool()) {
-            bluetooth_commit_ok = false;
-            publish_bluetooth_state();
-            errmsg = checked_error_string("No verified Bluetooth commit available for restart");
-            return;
-        }
-        trigger_reboot("Bluetooth configuration");
+        restart_bluetooth(errmsg);
     }, true);
+}
+
+bool TeslaVehicle::load_bluetooth(bool &desired)
+{
+    BluetoothConfigStore store(BLUETOOTH_CONFIG_PATH, bluetooth_storage_quarantined);
+    const bool ok = store.load(desired);
+    bluetooth_storage_quarantined = store.io_quarantined();
+    return ok;
+}
+
+bool TeslaVehicle::persist_bluetooth(bool desired)
+{
+    BluetoothConfigStore store(BLUETOOTH_CONFIG_PATH, bluetooth_storage_quarantined);
+    const bool ok = store.save(desired);
+    bluetooth_storage_quarantined = store.io_quarantined();
+    return ok;
+}
+
+bool TeslaVehicle::save_bluetooth(bool desired, String &errmsg)
+{
+#if TESLA_BLE_MANUAL_VEHICLE_UI
+    if(bluetooth.discovery_busy()) { errmsg=checked_error_string("Search in progress");return false; }
+#endif
+    if (bluetooth_restart_pending) { errmsg = checked_error_string("Restart pending"); return false; }
+#if TESLA_BLE_R13_MASTER_BENCH
+    if (bench_restart_pending) { errmsg = checked_error_string("Restart pending"); return false; }
+#endif
+    if (desired && !bluetooth_supported()) {
+        errmsg = checked_error_string("Bluetooth unavailable: SDK or hardware does not support this service");
+        return false;
+    }
+    bluetooth_commit_ok = persist_bluetooth(desired);
+    if (!bluetooth_commit_ok) {
+        errmsg = checked_error_string("Bluetooth configuration commit failed; not saved; no restart permitted");
+    } else { bluetooth_config.get("enable")->updateBool(desired); }
+    publish_bluetooth_state();
+    return bluetooth_commit_ok;
+}
+
+bool TeslaVehicle::restart_bluetooth(String &errmsg)
+{
+#if TESLA_BLE_MANUAL_VEHICLE_UI
+    if(bluetooth.discovery_busy()) { errmsg=checked_error_string("Search in progress");return false; }
+#endif
+    bool saved = false;
+    publish_bluetooth_state();
+    if (!bluetooth_supported() || !bluetooth_commit_ok ||
+        !bluetooth_state.get("restart_required")->asBool() ||
+        !load_bluetooth(saved) || saved != bluetooth_config.get("enable")->asBool()) {
+        bluetooth_commit_ok = false;
+        publish_bluetooth_state();
+        errmsg = checked_error_string("No verified Bluetooth commit available for restart");
+        return false;
+    }
+#if TESLA_BLE_R13_MASTER_BENCH
+#if TESLA_BLE_MANUAL_WEB_BENCH
+    if (service_start_requested) { errmsg = checked_error_string("Bluetooth boot startup pending"); return false; }
+#endif
+    if (master_bench.failed()) { errmsg = checked_error_string("Bench lifecycle failed"); return false; }
+    if (master_bench.active()) {
+        bench_restart_pending = true; return true;
+    }
+    if (strcmp(master_bench.phase(), "disabled") != 0) {
+        errmsg = checked_error_string("Bench lifecycle not quiescent"); return false;
+    }
+#endif
+    if (bluetooth_boot_enabled && !bluetooth.stopped()) {
+        if (bluetooth.failed()) { errmsg = checked_error_string("Bluetooth lifecycle failed; ownership retained"); return false; }
+        bluetooth_restart_pending = true; service_start_requested = false; return true;
+    }
+    trigger_reboot("Bluetooth configuration");
+    return true;
 }
 
 void TeslaVehicle::register_urls()
 {
     register_bluetooth_urls();
-    api.addPersistentConfig("tesla_vehicle/config", &config, {}, {"vin", "ble_address"});
-    api.addState("tesla_vehicle/state", &state);
-#if defined(TESLA_BLE_BENCH_ONLY) && TESLA_BLE_BENCH_ONLY && defined(TESLA_BLE_IRAM_DIAGNOSTICS) && TESLA_BLE_IRAM_DIAGNOSTICS
+#if TESLA_BLE_R13_MASTER_BENCH
+    // Never expose Tesla commands/config or old active bench routes here.
+#if !TESLA_BLE_MANUAL_WEB_BENCH
+    api.addState("tesla_vehicle/state", &bench_state);
+#endif
+    return;
+#endif
+    if (!tesla) { return; } // Core registration is boot-only: reboot ON exposes service APIs.
+    register_tesla_urls();
+}
+
+void TeslaVehicle::register_tesla_urls()
+{
+#if TESLA_BLE_MANUAL_VEHICLE_UI
+    api.addPersistentConfig("tesla_vehicle/profiles", &tesla->profiles, {}, {"entries"});
+#else
+    api.addPersistentConfig("tesla_vehicle/config", &tesla->config, {}, {"vin", "ble_address"});
+#endif
+    api.addState("tesla_vehicle/state", &tesla->state);
+#if TESLA_BLE_MANUAL_VEHICLE_UI
+    // Volatile state only: never addPersistentConfig, log, or write identities.
+    api.addState("tesla_vehicle/discovery",&tesla->discovery_state,{}, {"targets"});
+    api.addCommand("tesla_vehicle/scan",&tesla->scan_command,{"vin","ev_mac"},[this](Language,String &errmsg) {
+        TeslaBleDiscovery::Scope scope;
+        scope.index=tesla->scan_command.get("ev_index")->asInt();
+        scope.mac=profile_mac_value(tesla->scan_command.get("ev_mac")->asString().c_str());
+        if(scope.index<0 || !scope.mac || ev.get_profile_mac(scope.index)!=scope.mac ||
+            !tesla_ble_vehicle_name(tesla->scan_command.get("vin")->asString().c_str(),scope.name)) {
+            errmsg=checked_error_string("Valid VIN and exact existing WARP profile required for search");return;
+        }
+        if(!discovery_allowed() || !bluetooth.request_discovery(scope)) {
+            errmsg=checked_error_string("Tesla search unavailable: Bluetooth inactive, restart pending, or action busy");return;
+        }
+        publish_discovery();publish_bluetooth_state();
+    },true);
+#endif
+#if defined(TESLA_BLE_BENCH_ONLY) && TESLA_BLE_BENCH_ONLY && defined(TESLA_BLE_IRAM_DIAGNOSTICS) && TESLA_BLE_IRAM_DIAGNOSTICS && !TESLA_BLE_R13_MASTER_BENCH && !TESLA_BLE_PSRAM_POLICY_DIAGNOSTIC
     tesla_ble_bench_smoke_register_urls();
     tesla_ble_bench_discovery_register_urls();
 #endif
 
-    api.addCommand("tesla_vehicle/pair", &empty_command, {}, [this](Language, String &errmsg) {
+#if TESLA_BLE_MANUAL_VEHICLE_UI
+    api.addCommand("tesla_vehicle/start", &tesla->profile_command, {}, [this](Language, String &errmsg) {
+        select_profile(tesla->profile_command.get("ev_index")->asInt(), false, errmsg);
+    }, true);
+#else
+    api.addCommand("tesla_vehicle/start", &empty_command, {}, [this](Language, String &errmsg) {
+        if (!bluetooth.active() || bluetooth_restart_pending || !tesla->config.get("enable")->asBool() ||
+            service_start_requested ||
+#if TESLA_BLE_MANUAL_VEHICLE_UI
+            bluetooth.discovery_busy() ||
+            !bluetooth_commit_ok || bluetooth_config.get("enable")->asBool() != bluetooth_boot_enabled ||
+#endif
+            tesla->runtime_owner.restart_required() || tesla->runtime_owner.get()) {
+            errmsg = checked_error_string("Tesla service unavailable, disabled, or already started"); return;
+        }
+        service_start_requested = true; // Consent is volatile; no pairing or vehicle command here.
+    }, true);
+#endif
+    api.addCommand("tesla_vehicle/pair",
+#if TESLA_BLE_MANUAL_VEHICLE_UI
+        &tesla->profile_command,
+#else
+        &empty_command,
+#endif
+        {}, [this](Language, String &errmsg) {
+#if TESLA_BLE_MANUAL_VEHICLE_UI
+        if (!live_profile(tesla->profile_command.get("ev_index")->asInt())) {
+            errmsg = checked_error_string("Selected WARP profile is inactive or its SLAC binding changed"); return;
+        }
+#endif
         if (!accepts_commands()) {
             errmsg = checked_error_string("Tesla BLE is not enabled");
             return;
         }
-        Runtime *r = runtime_owner.get();
+        Runtime *r = tesla->runtime_owner.get();
+#if TESLA_BLE_MANUAL_VEHICLE_UI
+        if (r->authorized.load()) { errmsg = checked_error_string("Profile already authorized; no re-pairing needed"); return; }
+        if (!runtime_binding_matches()) { errmsg=checked_error_string("Fresh VIN search match expired or changed; scan and select again");return; }
+#endif
+        if (r->manual_poll_pending.load()) { errmsg = checked_error_string("Tesla poll is pending"); return; }
         const auto identity = r->session.identity();
         if (!identity || identity->index != r->configured_ev_index || identity->mac == 0) {
             errmsg = checked_error_string("Configured Tesla is not currently connected");
@@ -222,20 +480,52 @@ void TeslaVehicle::register_urls()
             return;
         }
         r->pair_requested.store(true);
-        state.get("pair_request_sent")->updateBool(false);
-        state.get("pairing_pending")->updateBool(true);
+        tesla->state.get("pair_request_sent")->updateBool(false);
+        tesla->state.get("pairing_pending")->updateBool(true);
     }, true);
 
-    api.addCommand("tesla_vehicle/poll", &empty_command, {}, [this](Language, String &errmsg) {
-        if (!accepts_commands() || !runtime_owner.get()->command_outcome.forward_available()) {
+    api.addCommand("tesla_vehicle/poll",
+#if TESLA_BLE_MANUAL_VEHICLE_UI
+        &tesla->profile_command,
+#else
+        &empty_command,
+#endif
+        {}, [this](Language, String &errmsg) {
+#if TESLA_BLE_MANUAL_VEHICLE_UI
+        if (!live_profile(tesla->profile_command.get("ev_index")->asInt())) {
+            errmsg = checked_error_string("Selected WARP profile is inactive or its SLAC binding changed"); return;
+        }
+#endif
+        if (!accepts_commands() || !tesla->runtime_owner.get()->command_outcome.forward_available()) {
             errmsg = checked_error_string("Tesla BLE is not enabled");
             return;
         }
-        runtime_owner.get()->poll_requested.store(true);
+        Runtime *r = tesla->runtime_owner.get();
+#if TESLA_BLE_MANUAL_VEHICLE_UI
+        const auto identity = r->session.identity();
+        if (!r->profile_key_present.load()) { errmsg = checked_error_string("This profile has no known local key; first setup requires key-card pairing"); return; }
+        if (!runtime_binding_matches()) { errmsg=checked_error_string("Verified VIN transport binding required");return; }
+        if (tesla->state.get("pairing_pending")->asBool() || !identity || identity->index != r->configured_ev_index || identity->mac == 0 ||
+            r->manual_poll_pending.exchange(true)) {
+            errmsg = checked_error_string("Tesla poll pending or configured vehicle not active"); return;
+        }
+#endif
+        r->poll_requested.store(true);
     }, true);
 
+#if TESLA_BLE_MANUAL_VEHICLE_UI
+    api.addCommand("tesla_vehicle/forget_key", &tesla->profile_command, {}, [this](Language, String &errmsg) {
+        select_profile(tesla->profile_command.get("ev_index")->asInt(), true, errmsg);
+    }, true);
+#else
     api.addCommand("tesla_vehicle/forget_key", &empty_command, {}, [this](Language, String &errmsg) {
-        if (runtime_owner.get() == nullptr) {
+#if TESLA_BLE_MANUAL_VEHICLE_UI
+        if (bluetooth.discovery_busy() || service_start_requested || tesla->state.get("pairing_pending")->asBool() ||
+            (tesla->runtime_owner.get() && tesla->runtime_owner.get()->manual_poll_pending.load())) {
+            errmsg = checked_error_string("Tesla action is pending; wait before local deletion"); return;
+        }
+#endif
+        if (tesla->runtime_owner.get() == nullptr) {
             if (!start_runtime(true)) { errmsg = checked_error_string("Could not start Tesla storage worker; reboot may be required"); }
             return;
         }
@@ -243,12 +533,12 @@ void TeslaVehicle::register_urls()
             // A general Bluetooth-only worker is intentionally alive even when
             // the Tesla service is OFF. Do not misreport that as teardown, or
             // loosen the existing deletion/worker ownership gates.
-            errmsg = checked_error_string(!config.get("enable")->asBool() ?
+            errmsg = checked_error_string(!tesla->config.get("enable")->asBool() ?
                 "Tesla service is disabled; disable Bluetooth and restart before deleting the local key, or enable the Tesla service" :
                 "Tesla BLE is stopping; retry after teardown");
             return;
         }
-        Runtime *r = runtime_owner.get();
+        Runtime *r = tesla->runtime_owner.get();
         if (!r->command_outcome.accept_forget()) {
             errmsg = checked_error_string("Tesla key deletion is already active");
             return;
@@ -257,29 +547,82 @@ void TeslaVehicle::register_urls()
         r->poll_requested.store(false);
         r->forget_requested.store(true);
     }, true);
+#endif
 }
+
+#if TESLA_BLE_MANUAL_VEHICLE_UI
+bool TeslaVehicle::discovery_allowed() const
+{
+    if(!tesla || !bluetooth.active() || !bluetooth_boot_enabled || !bluetooth_commit_ok ||
+       !bluetooth_config.get("enable")->asBool() || bluetooth_restart_pending || bluetooth.discovery_busy() ||
+       tesla->legacy_blocked || service_start_requested || tesla->runtime_update_requested.load() || tesla->runtime_owner.restart_required() ||
+       tesla->runtime_owner.is_stopping() || tesla->state.get("pairing_pending")->asBool()) { return false; }
+    auto *r=tesla->runtime_owner.get();
+    return !r || (!r->profile_pending.load() && !r->storage_only && r->ble_ready.load() && !r->stop_requested.load() &&
+        !r->manual_poll_pending.load() && !r->pair_requested.load() && !r->poll_requested.load() &&
+        !r->forget_requested.load() && !r->pair_approval_waiting.load() &&
+        r->command_outcome.forward_state()==TeslaBleCommandOutcome::Forward::Available);
+}
+
+void TeslaVehicle::publish_discovery()
+{
+    if(!tesla) { return; }
+    TeslaBleDiscovery::Snapshot s;
+    if(!bluetooth.discovery_snapshot(s) || s.revision==tesla->discovery_revision) { return; }
+    auto &state=tesla->discovery_state;
+    auto rows=state.get("targets");rows->removeAll();
+    bool ok=true;
+    if(s.status==TeslaBleDiscovery::Status::Complete) {
+        ok=rows->setCount(s.count);
+        for(unsigned i=0;ok && i<s.count;++i) {
+            char address[18];const auto &t=s.targets[i];
+            snprintf(address,sizeof(address),"%02X:%02X:%02X:%02X:%02X:%02X",t.address[0],t.address[1],t.address[2],t.address[3],t.address[4],t.address[5]);
+            auto row=rows->get(i);
+            ok=row->get("name")->updateStringChecked(t.name) && row->get("ble_address")->updateStringChecked(address);
+            row->get("rssi")->updateInt(t.rssi);
+            row->get("ble_address_type")->updateUint(t.address_type);
+            row->get("matches_vin")->updateBool(bluetooth.discovery_matches(s.scope,s.revision,t.address,t.address_type));
+        }
+    }
+    if(!ok) { rows->removeAll(); }
+    state.get("busy")->updateBool(s.busy);
+    state.get("truncated")->updateBool(s.truncated);
+    state.get("revision")->updateUint(s.revision);
+    state.get("ev_index")->updateInt(s.scope.index);
+    state.get("status")->updateString(!ok?"error":s.status==TeslaBleDiscovery::Status::Idle?"idle":
+        s.status==TeslaBleDiscovery::Status::Searching?"searching":s.status==TeslaBleDiscovery::Status::Complete?"complete":"error");
+    state.get("error")->updateString(ok?s.error:"memory");
+    tesla->discovery_revision=s.revision;
+}
+#endif
 
 bool TeslaVehicle::accepts_commands() const
 {
-    const Runtime *r = runtime_owner.get();
-    return bluetooth_boot_enabled && !runtime_owner.restart_required() && !ev.session_exhausted() && config.get("enable")->asBool() && r != nullptr &&
+    if (!tesla || bluetooth_restart_pending || !bluetooth.active()) { return false; }
+#if TESLA_BLE_MANUAL_VEHICLE_UI
+    if (tesla->legacy_blocked || bluetooth.discovery_busy() || !bluetooth_commit_ok || bluetooth_config.get("enable")->asBool() != bluetooth_boot_enabled) { return false; }
+    auto *active = tesla->runtime_owner.get();
+    if (!active || active->profile_pending.load() || !active->profile_ready.load() || !active->profile_actionable.load()) { return false; }
+#endif
+    const Runtime *r = tesla->runtime_owner.get();
+    return bluetooth_boot_enabled && !tesla->runtime_owner.restart_required() && !ev.session_exhausted() && tesla->config.get("enable")->asBool() && r != nullptr &&
            r->service_enabled &&
            !r->identity_exhausted.load() &&
-           !runtime_update_requested.load() && !r->stop_requested.load();
+           !tesla->runtime_update_requested.load() && !r->stop_requested.load();
 }
 
 bool TeslaVehicle::start_runtime(bool storage_only)
 {
-    if (!storage_only && (!bluetooth_boot_enabled || !bluetooth_supported())) { return false; }
+    if (!tesla || bluetooth_restart_pending || (!storage_only && (!bluetooth_boot_enabled || !bluetooth.active() || !bluetooth_supported()))) { return false; }
     if (ev.session_exhausted()) {
-        runtime_owner.require_restart(); state.get("restart_required")->updateBool(true); return false;
+        tesla->runtime_owner.require_restart(); tesla->state.get("restart_required")->updateBool(true); return false;
     }
 #if defined(TESLA_BLE_BENCH_ONLY) && TESLA_BLE_BENCH_ONLY && defined(TESLA_BLE_IRAM_DIAGNOSTICS) && TESLA_BLE_IRAM_DIAGNOSTICS
     (void)storage_only;
     return false; // Bench smoke must never create a Tesla runtime.
 #else
-    start_attempted = true;
-    return runtime_owner.start(storage_only || bluetooth_boot_enabled, [this, storage_only]() -> std::unique_ptr<Runtime> {
+    tesla->start_attempted = true;
+    return tesla->runtime_owner.start(storage_only || bluetooth_boot_enabled, [this, storage_only]() -> std::unique_ptr<Runtime> {
         auto r = std::unique_ptr<Runtime>(new (std::nothrow) Runtime(this));
         if (!r) {
             publish_error("Failed to allocate Tesla runtime");
@@ -299,32 +642,44 @@ bool TeslaVehicle::start_runtime(bool storage_only)
             publish_error("Failed to allocate BLE queues");
             return nullptr;
         }
-        const auto &vin = config.get("vin")->asString();
-        const auto &address = config.get("ble_address")->asString();
-        const bool service = !storage_only && config.get("enable")->asBool();
-        if (service && (!tesla_ble_valid_vin(vin.c_str()) || !tesla_ble_valid_address(address.c_str()))) {
+        const auto &vin = tesla->config.get("vin")->asString();
+        const auto &address = tesla->config.get("ble_address")->asString();
+        const bool service =
+#if TESLA_BLE_MANUAL_VEHICLE_UI
+            true; // One reusable local worker; deletion never constructs a protocol vehicle.
+#else
+            !storage_only && tesla->config.get("enable")->asBool();
+#endif
+        if (service && !storage_only && (!tesla_ble_valid_vin(vin.c_str()) || !tesla_ble_valid_address(address.c_str()))) {
             publish_error("Invalid or unavailable Tesla BLE identity");
             return nullptr;
         }
         r->vin.assign(vin.c_str());
-        if (service) {
+        if (service && !storage_only) {
             unsigned bytes[6]{};
             if (sscanf(address.c_str(), "%2x:%2x:%2x:%2x:%2x:%2x", &bytes[0], &bytes[1], &bytes[2],
                        &bytes[3], &bytes[4], &bytes[5]) != 6) { return nullptr; }
             for (size_t i = 0; i < 6; ++i) { r->remote_address[i] = static_cast<uint8_t>(bytes[i]); }
         }
-        r->configured_ev_index = config.get("ev_index")->asInt();
-        r->poll_interval_seconds = config.get("poll_interval")->asUint();
-        r->wake_once = config.get("wake_once")->asBool();
+        r->configured_ev_index = tesla->config.get("ev_index")->asInt();
+#if TESLA_BLE_MANUAL_VEHICLE_UI
+        if (!r->storage_adapter.select_profile(r->configured_ev_index.load(),
+                profile_mac_value(tesla->config.get("ev_mac")->asString().c_str()))) { return nullptr; }
+#endif
+        r->poll_interval_seconds = tesla->config.get("poll_interval")->asUint();
+        r->wake_once = tesla->config.get("wake_once")->asBool();
         r->storage_only = storage_only;
+#if TESLA_BLE_MANUAL_VEHICLE_UI
+        r->storage_only = false; // Profile deletion is scoped in ProfileRequest, not global worker mode.
+#endif
         r->service_enabled = service;
         return r;
     }, [this](Runtime &r) {
-        r.epoch = runtime_owner.epoch();
-        r.session.publish({ev.get_session_generation(), ev.get_active_ev_index(), ev.get_active_ev_mac()});
-        callback_gate.open();
+        r.epoch = tesla->runtime_owner.epoch();
+        r.session.publish(current_ev_identity());
+        tesla->callback_gate.open();
         if (xTaskCreatePinnedToCore(task_entry, "tesla_ble", 12288, this, 1, &r.task_handle, 0) != pdPASS) {
-            callback_gate.close();
+            tesla->callback_gate.close();
             r.task_handle = nullptr;
             publish_error("Failed to start Tesla BLE task");
             return false;
@@ -336,7 +691,7 @@ bool TeslaVehicle::start_runtime(bool storage_only)
 
 bool TeslaVehicle::create_vehicle()
 {
-    Runtime *r = runtime_owner.get();
+    Runtime *r = tesla->runtime_owner.get();
     r->vehicle.reset();
     r->keys.reset(new (std::nothrow) tesla_clean::IdentityStore);
     if (!r->keys || !r->storage->initialize_identity(*r->keys, {TeslaBleTransportAdapter::random, nullptr}, false) ||
@@ -354,7 +709,7 @@ void TeslaVehicle::task_entry(void *context)
 
 void TeslaVehicle::task_loop()
 {
-    Runtime *r = runtime_owner.get();
+    Runtime *r = tesla->runtime_owner.get();
     if (!r->stop_requested.load()) {
         r->worker_watch.begin(millis());
         const auto initial = r->session.identity();
@@ -362,11 +717,22 @@ void TeslaVehicle::task_loop()
         if (!r->storage->set_mutation_guard([r]() {
             const auto identity = r->session.identity();
             return !r->stop_requested.load() && !r->operation.retired() &&
-                (r->storage_only || (identity && *identity == r->observed_identity));
+                (r->storage_only ||
+#if TESLA_BLE_MANUAL_VEHICLE_UI
+                 r->deleting_profile ||
+#endif
+                 (identity && *identity == r->observed_identity));
         })) {
             post_event(EventType::Error, "Failed to allocate Tesla storage guard");
             r->stop_requested.store(true);
         }
+#if TESLA_BLE_MANUAL_VEHICLE_UI
+        if (!r->stop_requested.load()) {
+            r->controller_used = true;
+            gatt_owner.store(this);
+            r->ble_ready.store(bluetooth.active());
+        }
+#else
         if (!r->stop_requested.load() && r->storage_only) {
             if (!r->storage->forget_material()) { post_event(EventType::Error, "Could not remove Tesla key material"); }
             r->stop_requested.store(true);
@@ -396,9 +762,8 @@ void TeslaVehicle::task_loop()
         if (!r->stop_requested.load() && !r->storage_only) {
 #if WARP_BLUETOOTH_COMPILED
             r->controller_used = true;
-            if (BLEDevice::init("WARP4")) {
+            if (bluetooth.active()) {
                 gatt_owner.store(this);
-                BLEDevice::setCustomGattcHandler(gatt_callback);
                 r->ble_ready.store(true);
             } else {
                 post_event(EventType::Error, "Failed to initialize Bluetooth");
@@ -406,6 +771,7 @@ void TeslaVehicle::task_loop()
             }
 #endif
         }
+#endif
         r->worker_watch.finish();
     }
 
@@ -420,6 +786,12 @@ void TeslaVehicle::task_loop()
         }
         process_disconnect();
         update_active_vehicle();
+#if TESLA_BLE_MANUAL_VEHICLE_UI
+        apply_profile();
+        if (!r->vehicle || !r->profile_ready.load()) {
+            r->worker_watch.finish(); vTaskDelay(pdMS_TO_TICKS(20)); continue;
+        }
+#endif
         process_rx();
         process_commands();
         process_pair_verification();
@@ -432,14 +804,17 @@ void TeslaVehicle::task_loop()
 
         if (r->in_flight_started_ms != 0 && millis() - r->in_flight_started_ms > RESPONSE_TIMEOUT_MS) {
             r->in_flight_started_ms = 0;
+            r->manual_poll_pending.store(false);
             post_event(EventType::Error, "Tesla SoC request timed out");
         }
 
+#if !TESLA_BLE_MANUAL_VEHICLE_UI
         const auto identity = r->session.identity();
         const bool matching_vehicle = identity && identity->index == r->configured_ev_index;
         if (matching_vehicle && static_cast<int32_t>(millis() - r->next_poll_ms) >= 0 && r->in_flight_started_ms == 0) {
             request_soc(false);
         }
+#endif
 
         r->worker_watch.finish();
         vTaskDelay(pdMS_TO_TICKS(20));
@@ -468,40 +843,18 @@ void TeslaVehicle::task_loop()
 bool TeslaVehicle::release_bluetooth(Runtime &r)
 {
 #if WARP_BLUETOOTH_COMPILED
-    if (!r.controller_used) {
-        return true;
+    if (!r.controller_used) { return true; }
+    // Controller/host APIs execute only on the separately owned lifecycle task.
+    // This teardown task is supervised by main; never reclaim either context
+    // after a timeout or SDK failure without the existing ACK/drain barrier.
+    bluetooth.request_stop();
+    const auto begin = millis();
+    while (!bluetooth.stopped() && !bluetooth.failed() && millis() - begin < 15000) { vTaskDelay(pdMS_TO_TICKS(10)); }
+    if (!bluetooth.stopped()) {
+        strlcpy(r.teardown_error, "Bluetooth teardown failed; ownership retained; reboot required", sizeof(r.teardown_error)); return false;
     }
-
-    // The pinned Arduino fork deletes clients BEFORE stopping Bluedroid in
-    // BLEDevice::deinit. Quiesce the IDF host first so copied raw client and
-    // characteristic pointers in GATT dispatch cannot outlive those objects.
-    if (esp_bluedroid_get_status() == ESP_BLUEDROID_STATUS_ENABLED && esp_bluedroid_disable() != ESP_OK) {
-        strlcpy(r.teardown_error, "Bluetooth host disable failed; restart required", sizeof(r.teardown_error));
-        return false;
-    }
-    if (esp_bluedroid_get_status() != ESP_BLUEDROID_STATUS_UNINITIALIZED && esp_bluedroid_deinit() != ESP_OK) {
-        strlcpy(r.teardown_error, "Bluetooth host teardown failed; restart required", sizeof(r.teardown_error));
-        return false;
-    }
-    if (esp_bt_controller_get_status() == ESP_BT_CONTROLLER_STATUS_ENABLED && esp_bt_controller_disable() != ESP_OK) {
-        strlcpy(r.teardown_error, "Bluetooth controller disable failed; restart required", sizeof(r.teardown_error));
-        return false;
-    }
-    if (esp_bt_controller_get_status() != ESP_BT_CONTROLLER_STATUS_IDLE && esp_bt_controller_deinit() != ESP_OK) {
-        strlcpy(r.teardown_error, "Bluetooth controller teardown failed; restart required", sizeof(r.teardown_error));
-        return false;
-    }
-    // This owns/deletes the single BLEDevice client; do not delete it twice.
-    BLEDevice::deinit(false);
-    BLEDevice::setCustomGattcHandler(nullptr);
     gatt_owner.store(nullptr);
-    // Also covers a partially failed BLEDevice::init, where deinit returns
-    // early because its private 'initialized' flag was never set.
-    if (!btMemRelease(BT_MODE_BLE)) {
-        strlcpy(r.teardown_error, "Bluetooth BLE memory release failed; restart required", sizeof(r.teardown_error));
-        return false;
-    }
-    return btMemReleased(BT_MODE_BLE);
+    return true;
 #else
     (void)r;
     return true; // Unsupported builds cannot acquire the controller.
@@ -511,7 +864,7 @@ bool TeslaVehicle::release_bluetooth(Runtime &r)
 void TeslaVehicle::teardown_entry(void *context)
 {
     auto *owner = static_cast<TeslaVehicle *>(context);
-    Runtime *r = owner->runtime_owner.get();
+    Runtime *r = owner->tesla->runtime_owner.get();
     const bool ok = owner->release_bluetooth(*r);
     r->teardown.complete(ok);
     // No runtime/BLE access after completion; only an acknowledged task is deleted.
@@ -520,17 +873,17 @@ void TeslaVehicle::teardown_entry(void *context)
 
 void TeslaVehicle::stop_runtime()
 {
-    runtime_owner.begin_stop([this](Runtime &r) {
-        callback_gate.close();
+    tesla->runtime_owner.begin_stop([this](Runtime &r) {
+        tesla->callback_gate.close();
         r.stop_requested.store(true);
         r.deferred_soc.reset(); r.deferred_attempts = 0;
         r.teardown.begin(millis());
-        state.get("stopping")->updateBool(true);
-        state.get("connected")->updateBool(false);
-        state.get("pairing_pending")->updateBool(false);
-        state.get("pair_request_sent")->updateBool(false);
+        tesla->state.get("stopping")->updateBool(true);
+        tesla->state.get("connected")->updateBool(false);
+        tesla->state.get("pairing_pending")->updateBool(false);
+        tesla->state.get("pair_request_sent")->updateBool(false);
     });
-    Runtime *r = runtime_owner.get();
+    Runtime *r = tesla->runtime_owner.get();
     if (r == nullptr) {
         return;
     }
@@ -539,50 +892,50 @@ void TeslaVehicle::stop_runtime()
     // Unknown classification stays pending, but teardown supervision continues.
     const auto stop_state = r->command_outcome.stop_state();
     if (r->storage->restart_required() || (stop_state && (stop_state->deletion_incomplete || stop_state->exhausted))) {
-        runtime_owner.require_restart();
-        state.get("restart_required")->updateBool(true);
+        tesla->runtime_owner.require_restart();
+        tesla->state.get("restart_required")->updateBool(true);
     }
     if (stopped) {
         // Completed erase is an authoritative negative pairing fact even when
         // MAX-order KeyRemoved was not consumed and the final probe is unknown.
         if (stop_state && stop_state->deletion_complete) {
-            state.get("paired")->updateBool(false);
+            tesla->state.get("paired")->updateBool(false);
         }
         const auto *outcome = r->shutdown_result.read();
         if (outcome && !r->shutdown_presence_applied &&
             (outcome->final_presence || tesla_ble_publication_newer(outcome->presence_order, r->pairing_order))) {
             r->shutdown_presence_applied = true;
             if (outcome->presence_order > r->pairing_order) { r->pairing_order = outcome->presence_order; }
-            state.get("key_present")->updateBool(outcome->key_present);
-            tesla_ble_publish_presence(state.get("key_presence"), outcome->key_present, outcome->key_known, outcome->cleanup_required);
+            tesla->state.get("key_present")->updateBool(outcome->key_present);
+            tesla_ble_publish_presence(tesla->state.get("key_presence"), outcome->key_present, outcome->key_known, outcome->cleanup_required);
             // Final negative material authority invalidates possession now,
             // even if erase/reconstruction or retained teardown later fails.
             // Present/Unknown cannot revoke an authenticated pairing fact.
             if (outcome->cleanup_required || (outcome->key_known && !outcome->key_present)) {
-                pairing_policy.on_key_loaded(false);
-                state.get("paired")->updateBool(false);
+                tesla->pairing_policy.on_key_loaded(false);
+                tesla->state.get("paired")->updateBool(false);
             }
         }
         if (outcome && !r->supervision_failed && tesla_ble_publication_newer(outcome->error_order, r->error_order)) {
             r->error_order = outcome->error_order; publish_error(outcome->error);
         }
         if (outcome && outcome->publication_exhausted) {
-            runtime_owner.require_restart(); state.get("restart_required")->updateBool(true);
+            tesla->runtime_owner.require_restart(); tesla->state.get("restart_required")->updateBool(true);
             if (!r->supervision_failed) {
                 r->error_order = UINT64_MAX; // Terminal fence, not an emitted identity.
                 publish_error("Tesla identity/publication sequence exhausted; reboot required");
             }
         }
     }
-    const auto completion = r->teardown.poll(millis(), stopped, callback_gate.drained(), [this, r]() {
+    const auto completion = r->teardown.poll(millis(), stopped, tesla->callback_gate.drained(), [this, r]() {
         vTaskDelete(r->task_handle);
         r->task_handle = nullptr;
         return xTaskCreatePinnedToCore(teardown_entry, "tesla_teardown", 4096, this, 1,
                                        &r->teardown_handle, 0) == pdPASS;
     });
     if (completion == TeslaBleTeardown::Result::Failed) {
-        runtime_owner.require_restart();
-        state.get("restart_required")->updateBool(true);
+        tesla->runtime_owner.require_restart();
+        tesla->state.get("restart_required")->updateBool(true);
         if (r->teardown.completed_result() == TeslaBleTeardown::Result::Failed && r->teardown_error[0] != '\0') {
             // Producer is quiescent. Main teardown failure needs no mailbox lock.
             r->error_order = UINT64_MAX;
@@ -603,21 +956,21 @@ void TeslaVehicle::stop_runtime()
         vTaskDelete(r->teardown_handle);
         r->teardown_handle = nullptr;
     }
-    if (runtime_owner.finish_stop(stopped, callback_gate.drained(), r->controller_used || r->supervision_failed,
+    if (tesla->runtime_owner.finish_stop(stopped, tesla->callback_gate.drained(), r->controller_used || r->supervision_failed,
                                   [](Runtime &runtime) { return runtime.teardown.succeeded(); })) {
         // Destroying Runtime releases protocol, adapter references, strings,
         // flags and both queues. Keys/configuration remain on disk untouched.
-        pairing_policy.on_key_loaded(state.get("key_present")->asBool());
-        state.get("paired")->updateBool(false);
-        state.get("running")->updateBool(false);
-        state.get("stopping")->updateBool(false);
-        state.get("restart_required")->updateBool(runtime_owner.restart_required());
+        tesla->pairing_policy.on_key_loaded(tesla->state.get("key_present")->asBool());
+        tesla->state.get("paired")->updateBool(false);
+        tesla->state.get("running")->updateBool(false);
+        tesla->state.get("stopping")->updateBool(false);
+        tesla->state.get("restart_required")->updateBool(tesla->runtime_owner.restart_required());
     }
 }
 
 void TeslaVehicle::update_active_vehicle()
 {
-    Runtime *r = runtime_owner.get();
+    Runtime *r = tesla->runtime_owner.get();
     const auto identity = r->session.identity();
     if (!identity) { return; } // Contention is not unplugging; retry next iteration.
     if (identity == r->observed_identity) {
@@ -626,6 +979,10 @@ void TeslaVehicle::update_active_vehicle()
 
     r->observed_identity = *identity;
     r->policy.on_vehicle_changed(identity->generation, identity->index);
+#if TESLA_BLE_MANUAL_VEHICLE_UI
+    r->manual_poll_pending.store(false);
+    r->poll_requested.store(false);
+#endif
     r->in_flight_started_ms = 0;
     r->next_poll_ms = millis();
 
@@ -635,8 +992,12 @@ void TeslaVehicle::update_active_vehicle()
 
 void TeslaVehicle::process_commands()
 {
+#if TESLA_BLE_MANUAL_VEHICLE_UI
+    refresh_live_session();
+    update_active_vehicle(); // Recheck even when main has not yet run since SLAC changed.
+#endif
     if (check_worker_exhaustion()) { return; }
-    Runtime *r = runtime_owner.get();
+    Runtime *r = tesla->runtime_owner.get();
     if (!r->session.identity()) { return; } // Leave command flags pending on contention.
     if (r->forget_requested.exchange(false)) {
         r->pair_requested.store(false);
@@ -672,12 +1033,36 @@ void TeslaVehicle::process_commands()
         const auto accepted = r->command_outcome.claim_pair();
         if (!accepted) { return; }
         r->pair_command = accepted->command;
+#if TESLA_BLE_MANUAL_VEHICLE_UI
+        if (!active_identity_matches(*captured) || *captured != accepted->vehicle || captured->index != r->configured_ev_index ||
+            captured->mac != r->profile_mac || !captured->mac) {
+            cancel_pairing("SLAC identity changed before profile/key mutation", r->pair_command); return;
+        }
+#endif
         const uint64_t current_mac = captured->mac;
         tesla_clean::IdentityLease current_key;
         const auto encoded_mac = encode_vehicle_mac(current_mac);
+#if TESLA_BLE_MANUAL_VEHICLE_UI
+        if (r->authorized.load()) {
+            cancel_pairing("This profile is already authorized; use manual SoC query, not re-pairing", r->pair_command); return;
+        }
+        if (!runtime_binding_matches()) {
+            cancel_pairing("Fresh VIN search match changed before key generation",r->pair_command);return;
+        }
+        if (!tesla_clean::KeyStorage::committed(r->storage->save_transaction("vehicle_vin",
+                reinterpret_cast<const uint8_t *>(r->vin.c_str()), 17))) {
+            cancel_pairing("Could not persist profile VIN", r->pair_command); return;
+        }
+#endif
         if (*captured != accepted->vehicle || captured->index != r->configured_ev_index || current_mac == 0) {
             cancel_pairing("Configured Tesla is not currently connected", r->pair_command);
-        } else if (!r->keys || (!r->keys->acquire(current_key) &&
+        }
+#if TESLA_BLE_MANUAL_VEHICLE_UI
+        else if (!runtime_binding_matches()) {
+            cancel_pairing("VIN search or active profile changed before key generation",r->pair_command);
+        }
+#endif
+        else if (!r->keys || (!r->keys->acquire(current_key) &&
                    !r->storage->initialize_identity(*r->keys, {TeslaBleTransportAdapter::random, nullptr}))) {
             cancel_pairing("Could not durably initialize Tesla pairing key", r->pair_command);
         } else if (!ensure_connected()) {
@@ -714,7 +1099,11 @@ void TeslaVehicle::process_commands()
                     r->pair_started_ms = millis(); r->pair_next_ms = millis() + 1000;
                 } else { cancel_pairing("Tesla pairing transmission failed; approval not authenticated", command); }
             });
-            r->pair_sending = ready && r->vehicle->pair(true, request.request, std::move(completion));
+            r->pair_sending = ready &&
+#if TESLA_BLE_MANUAL_VEHICLE_UI
+                runtime_binding_matches() &&
+#endif
+                r->vehicle->pair(true, request.request, std::move(completion));
             if (!r->pair_sending) {
                 r->session.disarm(request);
                 cancel_pairing("Tesla pairing command refused; no pairing is pending", command);
@@ -731,7 +1120,7 @@ void TeslaVehicle::process_commands()
 void TeslaVehicle::request_soc(bool manual)
 {
     if (check_worker_exhaustion()) { return; }
-    Runtime *r = runtime_owner.get();
+    Runtime *r = tesla->runtime_owner.get();
     if (!r->command_outcome.forward_available()) { if (manual) { r->poll_requested.store(true); } return; }
     if (r->in_flight_started_ms != 0 || r->pair_sending || r->pair_verifying || r->pair_status_active || r->pair_approval_waiting.load()) {
         if (manual) { r->poll_requested.store(true); }
@@ -739,12 +1128,18 @@ void TeslaVehicle::request_soc(bool manual)
     }
     const auto captured = r->session.identity();
     if (!captured) { if (manual) { r->poll_requested.store(true); } return; }
+#if TESLA_BLE_MANUAL_VEHICLE_UI
+    if (!active_identity_matches(*captured)) {
+        r->manual_poll_pending.store(false); post_event(EventType::Error, "SLAC identity changed before SoC action"); return;
+    }
+#endif
     if (captured->mac == 0 || captured->mac != r->bound_vehicle_mac.load() ||
         captured->index != r->configured_ev_index) {
         if (manual) {
             post_event(EventType::Error, "Connected vehicle MAC is not bound to this Tesla key");
         }
         r->next_poll_ms = millis() + r->poll_interval_seconds * 1000U;
+        r->manual_poll_pending.store(false);
         return;
     }
     r->in_flight = tesla_ble_prepare_request(r->session, r->epoch, *captured, r->configured_ev_index,
@@ -753,6 +1148,7 @@ void TeslaVehicle::request_soc(bool manual)
         if (check_worker_exhaustion()) { return; }
         post_event(EventType::Error, "Could not connect to current Tesla over BLE");
         r->next_poll_ms = millis() + r->poll_interval_seconds * 1000U;
+        r->manual_poll_pending.store(false);
         return;
     }
     TeslaBleSocRequestDecision decision = r->policy.begin_request(captured->generation, r->configured_ev_index, manual || r->wake_once);
@@ -764,6 +1160,7 @@ void TeslaVehicle::request_soc(bool manual)
             post_event(EventType::Error, "Configured EV profile is not currently connected");
         }
         r->next_poll_ms = millis() + r->poll_interval_seconds * 1000U;
+        r->manual_poll_pending.store(false);
         return;
     }
 
@@ -783,6 +1180,7 @@ void TeslaVehicle::request_soc(bool manual)
             if (result.code != tesla_clean::VehicleResultCode::SkippedAsleep) { post_event(EventType::Error, "Tesla authenticated SoC request failed"); }
         }
         r->in_flight_started_ms = 0;
+        r->manual_poll_pending.store(false);
     });
     const bool accepted = ready && r->vehicle->charge_state_poll(decision.allow_wake ? tesla_clean::WakePolicy::WakeIfNeeded
                                                    : tesla_clean::WakePolicy::NoWakeSkip, r->in_flight.request, std::move(completion),
@@ -794,6 +1192,7 @@ void TeslaVehicle::request_soc(bool manual)
         r->in_flight = {};
         r->in_flight_started_ms = 0;
         post_event(EventType::Error, "Tesla SoC command refused; no request is in flight");
+        r->manual_poll_pending.store(false);
     }
     r->next_poll_ms = millis() + r->poll_interval_seconds * 1000U;
 }
@@ -806,8 +1205,13 @@ void TeslaVehicle::transport_disconnect()
 void TeslaVehicle::process_pair_verification()
 {
     if (check_worker_exhaustion()) { return; }
-    Runtime *r = runtime_owner.get();
+    Runtime *r = tesla->runtime_owner.get();
     if (!r->pair_verifying) { return; }
+#if TESLA_BLE_MANUAL_VEHICLE_UI
+    if (!active_identity_matches(r->pair_request.vehicle)) {
+        cancel_pairing("SLAC identity changed before pairing verification", r->pair_command); return;
+    }
+#endif
     if (r->stop_requested.load() || !r->session.matches(r->pair_request) ||
         millis() - r->pair_started_ms >= 60000) {
         // Retire queued/in-flight status before terminal ACK reopens admission.
@@ -830,6 +1234,13 @@ void TeslaVehicle::process_pair_verification()
         }
         r->pair_status_active = false;
         if (result.code == tesla_clean::VehicleResultCode::Status && result.authenticated) {
+#if TESLA_BLE_MANUAL_VEHICLE_UI
+            const uint8_t authorized = 1;
+            if (!tesla_clean::KeyStorage::committed(r->storage->save_transaction("authorized", &authorized, 1))) {
+                cancel_pairing("Authenticated approval could not be persisted; key retained", command); return;
+            }
+            r->authorized.store(true);
+#endif
             r->pair_verifying = false;
             r->pair_approval_waiting.store(true);
             post_event(EventType::PairApproved, nullptr, NAN, request, true, true);
@@ -848,8 +1259,11 @@ void TeslaVehicle::process_pair_verification()
 
 void TeslaVehicle::cancel_pairing(const char *message, uint64_t command)
 {
-    Runtime *r = runtime_owner.get();
+    Runtime *r = tesla->runtime_owner.get();
     const auto presence = r->storage->private_key_presence();
+#if TESLA_BLE_MANUAL_VEHICLE_UI
+    r->profile_key_present.store(presence == TeslaBleStorageAdapter::KeyPresence::Present);
+#endif
     const auto order = r->command_outcome.cancel_pair(command, message,
         presence == TeslaBleStorageAdapter::KeyPresence::Present,
         presence != TeslaBleStorageAdapter::KeyPresence::Unknown,
@@ -865,10 +1279,10 @@ void TeslaVehicle::cancel_pairing(const char *message, uint64_t command)
 
 void TeslaVehicle::publish_pairing_state()
 {
-    Runtime *r = runtime_owner.get();
+    Runtime *r = tesla->runtime_owner.get();
     const auto pair = r->command_outcome.take_pair_state([r](const TeslaBleRequestIdentity &approval) {
         return r->session.consume(approval,
-            {ev.get_session_generation(), ev.get_active_ev_index(), ev.get_active_ev_mac()},
+            current_ev_identity(),
             r->configured_ev_index, true, true, 50, [](float) {});
     });
     if (!pair) { return; } // Contention never means idle.
@@ -880,12 +1294,12 @@ void TeslaVehicle::publish_pairing_state()
         // undo a newer authenticated SoC already consumed from the event queue.
         if (tesla_ble_publication_newer(pair->order, r->pairing_order)) {
             r->pairing_order = pair->order;
-            pairing_policy.on_key_loaded(pair->key_present);
-            if (approved) { pairing_policy.on_authenticated_response(); }
-            else { pairing_policy.on_pairing_error(); }
-            state.get("key_present")->updateBool(pair->key_present);
-            tesla_ble_publish_presence(state.get("key_presence"), pair->key_present, pair->key_known, pair->cleanup_required);
-            state.get("paired")->updateBool(approved);
+            tesla->pairing_policy.on_key_loaded(pair->key_present);
+            if (approved) { tesla->pairing_policy.on_authenticated_response(); }
+            else { tesla->pairing_policy.on_pairing_error(); }
+            tesla->state.get("key_present")->updateBool(pair->key_present);
+            tesla_ble_publish_presence(tesla->state.get("key_presence"), pair->key_present, pair->key_known, pair->cleanup_required);
+            tesla->state.get("paired")->updateBool(approved);
         }
         if (tesla_ble_publication_newer(pair->order, r->error_order)) {
             r->error_order = pair->order;
@@ -895,22 +1309,22 @@ void TeslaVehicle::publish_pairing_state()
         r->pair_approval_waiting.store(false);
     }
     const bool pending = pair->command && !terminal;
-    state.get("pairing_pending")->updateBool(pending);
-    state.get("pair_request_sent")->updateBool(pending && pair->sent);
+    tesla->state.get("pairing_pending")->updateBool(pending);
+    tesla->state.get("pair_request_sent")->updateBool(pending && pair->sent);
     if (r->command_outcome.take_deleted()) {
-        pairing_policy.on_key_removed();
-        state.get("key_present")->updateBool(false);
-        state.get("key_presence")->updateString("absent");
-        state.get("paired")->updateBool(false);
-        state.get("pairing_pending")->updateBool(false);
-        state.get("pair_request_sent")->updateBool(false);
+        tesla->pairing_policy.on_key_removed();
+        tesla->state.get("key_present")->updateBool(false);
+        tesla->state.get("key_presence")->updateString("absent");
+        tesla->state.get("paired")->updateBool(false);
+        tesla->state.get("pairing_pending")->updateBool(false);
+        tesla->state.get("pair_request_sent")->updateBool(false);
     }
 }
 
 
 void TeslaVehicle::process_rx()
 {
-    Runtime *r = runtime_owner.get();
+    Runtime *r = tesla->runtime_owner.get();
     RxFragment fragment;
     for (size_t batch = 0; batch < 8 && xQueueReceive(r->queues.rx(), &fragment, 0) == pdTRUE; ++batch) {
         if (r->stop_requested.load() || fragment.connection_generation != r->connection_generation.load()) {
@@ -923,7 +1337,7 @@ void TeslaVehicle::process_rx()
 
 bool TeslaVehicle::check_worker_exhaustion()
 {
-    Runtime *r = runtime_owner.get();
+    Runtime *r = tesla->runtime_owner.get();
     if (!r) { return true; }
     if (r->session.exhausted() || r->command_outcome.publication_exhausted() ||
         (r->vehicle && r->vehicle->exhausted())) { r->identity_exhausted.store(true); }
@@ -935,7 +1349,7 @@ bool TeslaVehicle::check_worker_exhaustion()
 void TeslaVehicle::post_event(EventType type, const char *message, float soc,
                           TeslaBleRequestIdentity request, bool authenticated, bool correlated)
 {
-    Runtime *r = runtime_owner.get();
+    Runtime *r = tesla->runtime_owner.get();
     if (r == nullptr) {
         return;
     }
@@ -953,6 +1367,9 @@ void TeslaVehicle::post_event(EventType type, const char *message, float soc,
         return;
     }
     if (type == EventType::KeyRemoved || type == EventType::PairStarted) {
+#if TESLA_BLE_MANUAL_VEHICLE_UI
+        r->profile_key_present.store(type == EventType::PairStarted);
+#endif
         r->terminal_error[0] = '\0';
         r->command_outcome.publish(type == EventType::KeyRemoved ? OutcomeKind::KeyRemoved : OutcomeKind::PairStarted,
                                    type == EventType::PairStarted);
@@ -989,36 +1406,82 @@ void TeslaVehicle::post_event(EventType type, const char *message, float soc,
 
 void TeslaVehicle::publish_error(const char *message)
 {
-    strlcpy(pending_error, message ? message : "", sizeof(pending_error));
-    error_pending = true;
+    strlcpy(tesla->pending_error, message ? message : "", sizeof(tesla->pending_error));
+    tesla->error_pending = true;
     flush_error();
 }
 
 void TeslaVehicle::flush_error()
 {
-    if (error_pending && state.get("last_error")->updateStringChecked(pending_error)) { error_pending = false; }
+    if (tesla->error_pending && tesla->state.get("last_error")->updateStringChecked(tesla->pending_error)) { tesla->error_pending = false; }
 }
 
 void TeslaVehicle::loop()
 {
+#if TESLA_BLE_R13_MASTER_BENCH
+#if TESLA_BLE_MANUAL_WEB_BENCH
+    if (service_start_requested) {
+        service_start_requested = false;
+        tesla_ble_iram_snapshot("module.loop", "boot");
+        master_bench.start(nullptr); // Exactly one shared lifecycle; no peer handler.
+    }
+#endif
+    master_bench.supervise();
     publish_bluetooth_state();
-#if defined(TESLA_BLE_BENCH_ONLY) && TESLA_BLE_BENCH_ONLY && defined(TESLA_BLE_IRAM_DIAGNOSTICS) && TESLA_BLE_IRAM_DIAGNOSTICS
+#if !TESLA_BLE_MANUAL_WEB_BENCH
+    bench_serial();
+#endif
+    // Dispatch stop only AFTER the USB/API handler returns and its ACK is
+    // printed; no half-torn-down controller state can race into the restart ACK.
+    if (bench_restart_pending && master_bench.active()) { master_bench.request_stop(); }
+    if (bench_restart_pending && master_bench.stopped()) {
+        bench_restart_pending = false;
+        bench_emit("teardown", true);
+        trigger_reboot("Bluetooth bench verified teardown");
+    }
+    return; // No Tesla runtime, EV/session, key/storage or old bench operations.
+#endif
+    bluetooth.supervise();
+#if TESLA_BLE_MANUAL_VEHICLE_UI
+    publish_discovery();
+#endif
+    publish_bluetooth_state();
+#if TESLA_BLE_PSRAM_POLICY_DIAGNOSTIC
+    return; // Registration is ordinary; no Tesla runtime/callback/peer call closure.
+#endif
+#if defined(TESLA_BLE_BENCH_ONLY) && TESLA_BLE_BENCH_ONLY && defined(TESLA_BLE_IRAM_DIAGNOSTICS) && TESLA_BLE_IRAM_DIAGNOSTICS && !TESLA_BLE_R13_MASTER_BENCH && !TESLA_BLE_PSRAM_POLICY_DIAGNOSTIC
     tesla_ble_bench_smoke_loop();
     tesla_ble_bench_discovery.supervise();
 #endif
-    flush_error();
-    const bool changed = runtime_update_requested.exchange(false);
-    if (changed) {
-        start_attempted = false;
+    if (bluetooth_restart_pending) {
+        if (tesla && tesla->runtime_owner.get()) { stop_runtime(); return; }
+        bluetooth.request_stop();
+        if (bluetooth.stopped()) {
+            bluetooth_restart_pending = false;
+            trigger_reboot("Bluetooth verified teardown");
+        }
+        return; // Failure/timeout retains ownership, never acknowledges reboot.
     }
-    Runtime *r = runtime_owner.get();
-    if (ev.session_exhausted()) { runtime_owner.require_restart(); }
-    if (runtime_owner.restart_required()) { state.get("restart_required")->updateBool(true); }
+    if (!tesla) { return; }
+    flush_error();
+#if TESLA_BLE_MANUAL_VEHICLE_UI
+    publish_profile();
+#endif
+    const bool changed = tesla->runtime_update_requested.exchange(false);
+    if (changed) {
+        tesla->start_attempted = false;
+    }
+    Runtime *r = tesla->runtime_owner.get();
+    if (ev.session_exhausted()) { tesla->runtime_owner.require_restart(); }
+    if (r && !r->storage_only && !bluetooth.active()) {
+        tesla->runtime_owner.require_restart(); r->stop_requested.store(true);
+    }
+    if (tesla->runtime_owner.restart_required()) { tesla->state.get("restart_required")->updateBool(true); }
     if (r && (r->command_outcome.publication_exhausted() || r->session.exhausted() ||
               r->identity_exhausted.load() || ev.session_exhausted())) {
-        runtime_owner.require_restart();
+        tesla->runtime_owner.require_restart();
         r->stop_requested.store(true);
-        state.get("restart_required")->updateBool(true);
+        tesla->state.get("restart_required")->updateBool(true);
         if (!r->supervision_failed) {
             publish_error("Tesla identity/publication sequence exhausted; reboot required");
         }
@@ -1026,57 +1489,84 @@ void TeslaVehicle::loop()
     if (r != nullptr && (r->operation.supervise(millis()) || r->retirement_operation.supervise(millis()) ||
                          r->worker_watch.expired(millis(), 30000))) {
         // Detect/quarantine only: this cannot interrupt an SDK queue/future wait.
-        runtime_owner.require_restart();
+        tesla->runtime_owner.require_restart();
         r->supervision_failed = true;
         r->stop_requested.store(true);
-        state.get("restart_required")->updateBool(true);
+        tesla->state.get("restart_required")->updateBool(true);
         publish_error("Tesla BLE worker/submission timed out; ownership retained; reboot required");
     }
-    if (r != nullptr && (changed || (!config.get("enable")->asBool() && r->service_enabled) ||
-                         r->stop_requested.load() || runtime_owner.is_stopping())) {
+    if (r != nullptr && (changed || (!tesla->config.get("enable")->asBool() && r->service_enabled) ||
+                         r->stop_requested.load() || tesla->runtime_owner.is_stopping())) {
 
         stop_runtime();
         return;
     }
-    if (r == nullptr && bluetooth_boot_enabled && !start_attempted && !runtime_owner.restart_required()) {
+    if (r == nullptr && service_start_requested && bluetooth.active() && !tesla->start_attempted && !tesla->runtime_owner.restart_required()) {
+        service_start_requested = false;
         start_runtime();
-        r = runtime_owner.get();
+        r = tesla->runtime_owner.get();
     }
     if (r == nullptr) {
         return;
     }
-    const auto generation = ev.get_session_generation();
-    const int index = ev.get_active_ev_index();
-    r->session.publish({generation, index, ev.get_active_ev_mac()});
+    r->session.publish(current_ev_identity());
     process_module_events();
 }
 
 void TeslaVehicle::publish_bluetooth_state()
 {
-    const Runtime *r = runtime_owner.get();
-    const bool restart = bluetooth_supported() && (runtime_owner.restart_required() ||
+#if TESLA_BLE_R13_MASTER_BENCH
+    const bool bench_restart = bluetooth_supported() && (master_bench.failed() ||
         bluetooth_config.get("enable")->asBool() != bluetooth_boot_enabled);
-    const char *phase = !bluetooth_supported() ? "disabled" : runtime_owner.restart_required() ? "error" :
-        r && (runtime_owner.is_stopping() || r->stop_requested.load()) ? "stopping" :
-        r && !r->storage_only ? (r->ble_ready.load() ? "active" : "starting") :
-        bluetooth_boot_enabled && start_attempted ? "error" : "disabled";
+    bluetooth_state.get("phase")->updateString(master_bench.phase());
+    bluetooth_state.get("restart_required")->updateBool(bench_restart);
+    bluetooth_state.get("restart_reason")->updateString(!bench_restart ? "" : master_bench.failed() ? "lifecycle_latched" : "configuration_changed");
+    bluetooth_state.get("persistence_error")->updateBool(!bluetooth_commit_ok);
+    bluetooth_state.get("legacy_tesla_enabled")->updateBool(false);
+    bench_state.get("running")->updateBool(false);
+    return;
+#endif
+    Runtime *r = tesla ? tesla->runtime_owner.get() : nullptr;
+    const bool latched = bluetooth.failed() || (bluetooth_boot_enabled && bluetooth.stopped()) ||
+        (tesla && tesla->runtime_owner.restart_required());
+    const bool restart = bluetooth_supported() && (latched ||
+        bluetooth_config.get("enable")->asBool() != bluetooth_boot_enabled);
+    const char *phase = !bluetooth_supported() ? "disabled" : latched ? "error" :
+        r && (tesla->runtime_owner.is_stopping() || r->stop_requested.load()) ? "stopping" : bluetooth.phase();
     bluetooth_state.get("phase")->updateString(phase);
     bluetooth_state.get("restart_required")->updateBool(restart);
-    bluetooth_state.get("restart_reason")->updateString(!restart ? "" : runtime_owner.restart_required() ?
+    bluetooth_state.get("restart_reason")->updateString(!restart ? "" : latched ?
         "lifecycle_latched" : "configuration_changed");
     bluetooth_state.get("persistence_error")->updateBool(!bluetooth_commit_ok);
-    bluetooth_state.get("legacy_tesla_enabled")->updateBool(config.get("enable")->asBool() && !bluetooth_boot_enabled);
-    state.get("running")->updateBool(r && r->service_enabled && r->ble_ready.load() && !runtime_owner.is_stopping());
+    bluetooth_state.get("legacy_tesla_enabled")->updateBool(tesla && tesla->config.get("enable")->asBool() && !bluetooth_boot_enabled);
+    if (tesla) {
+        tesla->state.get("running")->updateBool(r && r->service_enabled && r->ble_ready.load() && !tesla->runtime_owner.is_stopping()
+#if TESLA_BLE_MANUAL_VEHICLE_UI
+            && r->profile_ready.load() && !r->profile_pending.load() && r->profile_actionable.load()
+#endif
+        );
+        tesla->state.get("action_busy")->updateBool(
+#if TESLA_BLE_MANUAL_VEHICLE_UI
+            bluetooth.discovery_busy() ||
+#endif
+            service_start_requested || (r &&
+            (
+#if TESLA_BLE_MANUAL_VEHICLE_UI
+             r->profile_pending.load() ||
+#endif
+             (!r->ble_ready.load() && !r->storage_only) || r->manual_poll_pending.load() || r->forget_requested.load() ||
+             r->command_outcome.forward_state() != TeslaBleCommandOutcome::Forward::Available)));
+    }
 }
 
 void TeslaVehicle::process_module_events()
 {
-    Runtime *r = runtime_owner.get();
+    Runtime *r = tesla->runtime_owner.get();
     ModuleEvent event;
     for (size_t batch = 0; r != nullptr && batch < 8; ++batch) {
         if (r->deferred_soc) { event = *r->deferred_soc; r->deferred_soc.reset(); }
         else { r->deferred_attempts = 0; if (xQueueReceive(r->queues.events(), &event, 0) != pdTRUE) { break; } }
-        if (!runtime_owner.accepts_event(event.runtime_epoch) || !accepts_commands()) {
+        if (!tesla->runtime_owner.accepts_event(event.runtime_epoch) || !accepts_commands()) {
             continue;
         }
         switch (event.type) {
@@ -1084,29 +1574,29 @@ void TeslaVehicle::process_module_events()
             // Authenticated status proves possession/approval, not SoC. Keep the
             // same final SLAC/runtime/request gate without invoking ev.set_soc.
             if (r->session.consume(event.request,
-                    {ev.get_session_generation(), ev.get_active_ev_index(), ev.get_active_ev_mac()},
+                    current_ev_identity(),
                     r->configured_ev_index, event.authenticated, event.correlated, 50,
                     [](float) {}) && tesla_ble_publication_newer(event.order, r->pairing_order)) {
                 r->pairing_order = event.order;
                 // Correlated authenticated possession may precede main's first
                 // coalesced key-presence notification. Do not lose that proof.
-                if (!pairing_policy.key_present()) { pairing_policy.on_key_loaded(true); }
-                pairing_policy.on_authenticated_response();
-                state.get("key_present")->updateBool(pairing_policy.key_present());
-                state.get("key_presence")->updateString("present");
-                state.get("paired")->updateBool(pairing_policy.paired());
-                state.get("pairing_pending")->updateBool(pairing_policy.pairing_pending());
+                if (!tesla->pairing_policy.key_present()) { tesla->pairing_policy.on_key_loaded(true); }
+                tesla->pairing_policy.on_authenticated_response();
+                tesla->state.get("key_present")->updateBool(tesla->pairing_policy.key_present());
+                tesla->state.get("key_presence")->updateString("present");
+                tesla->state.get("paired")->updateBool(tesla->pairing_policy.paired());
+                tesla->state.get("pairing_pending")->updateBool(tesla->pairing_policy.pairing_pending());
             }
             break;
         case EventType::KeyPresence:
-            pairing_policy.on_key_loaded(event.soc == 1.0f);
-            state.get("key_present")->updateBool(pairing_policy.key_present());
+            tesla->pairing_policy.on_key_loaded(event.soc == 1.0f);
+            tesla->state.get("key_present")->updateBool(tesla->pairing_policy.key_present());
             break;
         case EventType::Connected:
         case EventType::Disconnected:
             if (tesla_ble_publication_newer(event.order, r->connection_order)) {
                 r->connection_order = event.order;
-                state.get("connected")->updateBool(r->connected.load());
+                tesla->state.get("connected")->updateBool(r->connected.load());
             }
             if (event.type == EventType::Connected && tesla_ble_publication_newer(event.order, r->error_order)) {
                 r->error_order = event.order;
@@ -1123,21 +1613,21 @@ void TeslaVehicle::process_module_events()
                 r->deferred_attempts = 0;
                 break;
             } else if (r->session.consume(event.request,
-                    {ev.get_session_generation(), ev.get_active_ev_index(), ev.get_active_ev_mac()},
+                    current_ev_identity(),
                     r->configured_ev_index, event.authenticated, event.correlated, event.soc,
                     [](float soc) { ev.set_soc(soc); }, &retry)) {
                 ev.session_updated(EVDataSource::Tesla);
                 if (tesla_ble_publication_newer(event.order, r->pairing_order)) {
                     r->pairing_order = event.order;
-                    if (!pairing_policy.key_present()) { pairing_policy.on_key_loaded(true); }
-                    pairing_policy.on_authenticated_response();
-                    state.get("key_present")->updateBool(pairing_policy.key_present());
-                    state.get("key_presence")->updateString("present");
-                    state.get("paired")->updateBool(pairing_policy.paired());
-                    state.get("pairing_pending")->updateBool(pairing_policy.pairing_pending());
+                    if (!tesla->pairing_policy.key_present()) { tesla->pairing_policy.on_key_loaded(true); }
+                    tesla->pairing_policy.on_authenticated_response();
+                    tesla->state.get("key_present")->updateBool(tesla->pairing_policy.key_present());
+                    tesla->state.get("key_presence")->updateString("present");
+                    tesla->state.get("paired")->updateBool(tesla->pairing_policy.paired());
+                    tesla->state.get("pairing_pending")->updateBool(tesla->pairing_policy.pairing_pending());
                 }
-                state.get("last_soc")->updateFloat(event.soc);
-                state.get("last_update")->updateUptime(now_us());
+                tesla->state.get("last_soc")->updateFloat(event.soc);
+                tesla->state.get("last_update")->updateUptime(now_us());
                 if (tesla_ble_publication_newer(event.order, r->error_order)) {
                     r->error_order = event.order;
                     publish_error("");
@@ -1148,8 +1638,8 @@ void TeslaVehicle::process_module_events()
                 else {
                     // Do not block main disarming a held session lock. Close
                     // admission and retain ownership for worker stop instead.
-                    runtime_owner.require_restart(); r->stop_requested.store(true);
-                    state.get("restart_required")->updateBool(true);
+                    tesla->runtime_owner.require_restart(); r->stop_requested.store(true);
+                    tesla->state.get("restart_required")->updateBool(true);
                     if (tesla_ble_publication_newer(event.order, r->error_order)) {
                         r->error_order = event.order;
                         publish_error("Tesla result consumption unavailable; reboot required");
@@ -1160,41 +1650,41 @@ void TeslaVehicle::process_module_events()
             break;
         }
         case EventType::Error:
-            pairing_policy.on_pairing_error();
+            tesla->pairing_policy.on_pairing_error();
             publish_error(event.message);
-            state.get("pairing_pending")->updateBool(pairing_policy.pairing_pending());
+            tesla->state.get("pairing_pending")->updateBool(tesla->pairing_policy.pairing_pending());
             break;
         case EventType::PairStarted:
-            pairing_policy.on_pair_request_sent();
-            state.get("key_present")->updateBool(pairing_policy.key_present());
-            state.get("paired")->updateBool(pairing_policy.paired());
-            state.get("pairing_pending")->updateBool(pairing_policy.pairing_pending());
+            tesla->pairing_policy.on_pair_request_sent();
+            tesla->state.get("key_present")->updateBool(tesla->pairing_policy.key_present());
+            tesla->state.get("paired")->updateBool(tesla->pairing_policy.paired());
+            tesla->state.get("pairing_pending")->updateBool(tesla->pairing_policy.pairing_pending());
             publish_error("");
             break;
         case EventType::KeyRemoved:
-            pairing_policy.on_key_removed();
-            state.get("key_present")->updateBool(pairing_policy.key_present());
-            state.get("paired")->updateBool(pairing_policy.paired());
-            state.get("connected")->updateBool(false);
-            state.get("pairing_pending")->updateBool(pairing_policy.pairing_pending());
+            tesla->pairing_policy.on_key_removed();
+            tesla->state.get("key_present")->updateBool(tesla->pairing_policy.key_present());
+            tesla->state.get("paired")->updateBool(tesla->pairing_policy.paired());
+            tesla->state.get("connected")->updateBool(false);
+            tesla->state.get("pairing_pending")->updateBool(tesla->pairing_policy.pairing_pending());
             break;
         }
     }
-    if (r == nullptr || !runtime_owner.accepts_event(r->epoch) || !accepts_commands()) { return; }
+    if (r == nullptr || !tesla->runtime_owner.accepts_event(r->epoch) || !accepts_commands()) { return; }
     if (const auto outcome = r->command_outcome.take()) {
         using Kind = TeslaBleCommandOutcome::Kind;
         if (outcome->kind == Kind::PairApproved) {
             if (r->session.consume(outcome->request,
-                    {ev.get_session_generation(), ev.get_active_ev_index(), ev.get_active_ev_mac()},
+                    current_ev_identity(),
                     r->configured_ev_index, true, true, 50, [](float) {}) &&
                 tesla_ble_publication_newer(outcome->order, r->pairing_order)) {
                 r->pairing_order = outcome->order;
-                if (!pairing_policy.key_present()) { pairing_policy.on_key_loaded(true); }
-                pairing_policy.on_authenticated_response();
-                state.get("key_present")->updateBool(pairing_policy.key_present());
-                state.get("key_presence")->updateString("present");
-                state.get("paired")->updateBool(pairing_policy.paired());
-                state.get("pairing_pending")->updateBool(pairing_policy.pairing_pending());
+                if (!tesla->pairing_policy.key_present()) { tesla->pairing_policy.on_key_loaded(true); }
+                tesla->pairing_policy.on_authenticated_response();
+                tesla->state.get("key_present")->updateBool(tesla->pairing_policy.key_present());
+                tesla->state.get("key_presence")->updateString("present");
+                tesla->state.get("paired")->updateBool(tesla->pairing_policy.paired());
+                tesla->state.get("pairing_pending")->updateBool(tesla->pairing_policy.pairing_pending());
             }
             r->pair_approval_waiting.store(false);
             publish_pairing_state();
@@ -1202,21 +1692,21 @@ void TeslaVehicle::process_module_events()
         }
         if (outcome->kind == Kind::KeyRemoved && tesla_ble_publication_newer(outcome->order, r->connection_order)) {
             r->connection_order = outcome->order;
-            state.get("connected")->updateBool(false);
+            tesla->state.get("connected")->updateBool(false);
         }
         if (tesla_ble_publication_newer(outcome->order, r->pairing_order)) {
             r->pairing_order = outcome->order;
             if (outcome->kind == Kind::KeyRemoved) {
-                pairing_policy.on_key_removed();
+                tesla->pairing_policy.on_key_removed();
             } else if (outcome->kind == Kind::PairStarted) {
-                pairing_policy.on_pair_request_sent();
+                tesla->pairing_policy.on_pair_request_sent();
             } else {
-                pairing_policy.on_key_loaded(outcome->key_present);
+                tesla->pairing_policy.on_key_loaded(outcome->key_present);
             }
-            state.get("key_present")->updateBool(pairing_policy.key_present());
-            state.get("paired")->updateBool(pairing_policy.paired());
-            state.get("pairing_pending")->updateBool(pairing_policy.pairing_pending());
-            tesla_ble_publish_presence(state.get("key_presence"), outcome->key_present, outcome->key_known, outcome->cleanup_required);
+            tesla->state.get("key_present")->updateBool(tesla->pairing_policy.key_present());
+            tesla->state.get("paired")->updateBool(tesla->pairing_policy.paired());
+            tesla->state.get("pairing_pending")->updateBool(tesla->pairing_policy.pairing_pending());
+            tesla_ble_publish_presence(tesla->state.get("key_presence"), outcome->key_present, outcome->key_known, outcome->cleanup_required);
         }
         if (tesla_ble_publication_newer(outcome->order, r->error_order)) {
             r->error_order = outcome->order;
@@ -1224,4 +1714,9 @@ void TeslaVehicle::process_module_events()
         }
     }
     publish_pairing_state();
+#if TESLA_BLE_MANUAL_VEHICLE_UI
+    if (r->profile_ready.load() && !r->profile_pending.load()) {
+        tesla->state.get("paired")->updateBool(r->authorized.load());
+    }
+#endif
 }

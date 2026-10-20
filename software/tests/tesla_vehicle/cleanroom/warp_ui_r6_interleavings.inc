@@ -6,7 +6,7 @@ void ui_r6_command(const char *name) {
  String error;api.commands.at(name)(0,error);assert(error.length()==0);
 }
 void ui_r6_notify(const Frame &frame) {
- auto *r=module.runtime_owner.get();std::vector<uint8_t> bytes{uint8_t(frame.length>>8),uint8_t(frame.length)};
+ auto *r=module.tesla->runtime_owner.get();std::vector<uint8_t> bytes{uint8_t(frame.length>>8),uint8_t(frame.length)};
  bytes.insert(bytes.end(),frame.data.begin(),frame.data.begin()+frame.length);
  assert(bytes.size()<=sizeof(TeslaVehicle::RxFragment::data));
  esp_ble_gattc_cb_param_t p;p.notify.conn_id=4;p.notify.handle=20;
@@ -18,7 +18,7 @@ void ui_r6_run(unsigned scenario) {
  // 5 real event-queue-full recovery; 6 one defer then disable; 7/8 split close;
  // 9/10 authoritative present/unknown controls; 11 teardown-only timeout
  // after exhaustion (same diagnostic-precedence rule, no worker-watch failure).
- auto *r=module.runtime_owner.get();host_gatt_success=true;module.register_urls();
+ auto *r=module.tesla->runtime_owner.get();host_gatt_success=true;module.register_urls();
  assert(!sdk_init && !r->vehicle && !r->connected.load());
  ui_r6_command("tesla_vehicle/poll");assert(r->poll_requested.load());
  unsigned iterations=0,handled=0,completions=0;uint32_t vc=0,info=0;
@@ -33,8 +33,8 @@ void ui_r6_run(unsigned scenario) {
    // Actual worker is inside storage erasure under worker_watch. Main runs at
    // the stalled syscall boundary; no manually manufactured timeout outcome.
    clock_ms.fetch_add(31001);ui_r5_main_pass();
-   assert(r->supervision_failed && module.runtime_owner.get()==r);
-   authoritative_error=module.state.get("last_error")->asString();
+   assert(r->supervision_failed && module.tesla->runtime_owner.get()==r);
+   authoritative_error=module.tesla->state.get("last_error")->asString();
    assert(authoritative_error.find("timed out")!=std::string::npos);
    clock_ms.fetch_add(31001);ui_r5_main_pass();retained=true;
    r->command_outcome.sequence=UINT64_MAX-1;
@@ -61,22 +61,22 @@ void ui_r6_run(unsigned scenario) {
     refused=r->in_flight;assert(!r->session.matches(refused));
     assert(r->queues.events()->capacity==8 && r->queues.events()->data.size()==8);
     ui_r5_main_pass();assert(ev.applied==0);
-    assert(module.state.get("last_error")->asString().find("event queue full")!=std::string::npos);
+    assert(module.tesla->state.get("last_error")->asString().find("event queue full")!=std::string::npos);
     fill=false;ui_r6_command("tesla_vehicle/poll");return;
    }
    if(scenario==6) {
     holder=std::thread([&](){tesla_warp::CheckedMutex::Guard lock(r->session.mutex);held=true;while(!release){std::this_thread::yield();}});
     while(!held){std::this_thread::yield();}
     ui_r5_main_pass();assert(r->deferred_soc && r->deferred_attempts==1 && ev.applied==0);
-    module.config.get("enable")->updateBool(false);ui_r5_main_pass();
-    assert(!r->deferred_soc && r->deferred_attempts==0 && !module.state.get("restart_required")->asBool());
+    module.tesla->config.get("enable")->updateBool(false);ui_r5_main_pass();
+    assert(!r->deferred_soc && r->deferred_attempts==0 && !module.tesla->state.get("restart_required")->asBool());
     release=true;holder.join();action=true;return;
    }
-   ui_r5_main_pass();assert(ev.applied==1 && module.state.get("paired")->asBool());
+   ui_r5_main_pass();assert(ev.applied==1 && module.tesla->state.get("paired")->asBool());
    if(scenario==5) {
     assert(completions==10 && completed_request!=refused.request && !r->session.matches(refused));
-    assert(module.state.get("last_error")->asString().length()==0);
-    module.config.get("enable")->updateBool(false);ui_r5_main_pass();action=true;return;
+    assert(module.tesla->state.get("last_error")->asString().length()==0);
+    module.tesla->config.get("enable")->updateBool(false);ui_r5_main_pass();action=true;return;
    }
    if(scenario>=9) {
     if(scenario==10)r6_unknown_probe();
@@ -105,8 +105,8 @@ void ui_r6_run(unsigned scenario) {
    ++closes;esp_ble_gattc_cb_param_t p;p.close.conn_id=p.disconnect.conn_id=4;
    TeslaVehicle::gatt_callback(scenario==7?ESP_GATTC_CLOSE_EVT:ESP_GATTC_DISCONNECT_EVT,1,&p);
    assert(r->closing_link.load() && !r->retirement_operation.retired());
-   module.config.get("enable")->updateBool(false);ui_r5_main_pass();
-   assert(module.runtime_owner.is_stopping());
+   module.tesla->config.get("enable")->updateBool(false);ui_r5_main_pass();
+   assert(module.tesla->runtime_owner.is_stopping());
    TeslaVehicle::gatt_callback(scenario==7?ESP_GATTC_DISCONNECT_EVT:ESP_GATTC_CLOSE_EVT,1,&p);
    // Callback admission is now closed. Stale duplicates cannot reopen state.
    TeslaVehicle::gatt_callback(ESP_GATTC_CLOSE_EVT,1,&p);TeslaVehicle::gatt_callback(ESP_GATTC_DISCONNECT_EVT,1,&p);
@@ -123,37 +123,37 @@ void ui_r6_run(unsigned scenario) {
    assert(r->command_outcome.sequence==UINT64_MAX && r->command_outcome.publication_exhausted());
   }
   ui_r5_main_pass();
-  assert(!module.state.get("paired")->asBool()); // R5 BLOCKER 1 RED.
-  assert(module.state.get("key_presence")->asString()==(scenario<2?"absent":"cleanup"));
+  assert(!module.tesla->state.get("paired")->asBool()); // R5 BLOCKER 1 RED.
+  assert(module.tesla->state.get("key_presence")->asString()==(scenario<2?"absent":"cleanup"));
  } else ui_r5_main_pass();
  if(scenario==4) {
   assert(retained && r->command_outcome.publication_exhausted());
-  assert(module.state.get("last_error")->asString()==authoritative_error); // R5 BLOCKER 2 RED.
+  assert(module.tesla->state.get("last_error")->asString()==authoritative_error); // R5 BLOCKER 2 RED.
  }
  if(scenario==9 || scenario==10) {
-  assert(module.state.get("key_presence")->asString()==(scenario==9?"present":"unknown"));
-  assert(module.state.get("paired")->asBool());cleanup_result=false;
+  assert(module.tesla->state.get("key_presence")->asString()==(scenario==9?"present":"unknown"));
+  assert(module.tesla->state.get("paired")->asBool());cleanup_result=false;
  }
  if(scenario==11) {
   assert(!r->supervision_failed && r->teardown_handle);
-  assert(module.state.get("last_error")->asString().find("exhausted")!=std::string::npos);
+  assert(module.tesla->state.get("last_error")->asString().find("exhausted")!=std::string::npos);
   clock_ms.fetch_add(31001);ui_r5_main_pass();
-  authoritative_error=module.state.get("last_error")->asString();
+  authoritative_error=module.tesla->state.get("last_error")->asString();
   assert(authoritative_error.find("stop failed or timed out")!=std::string::npos);
  } else if(r->teardown_handle)run_task(r->teardown_handle);
  for(unsigned i=0;i<4;++i) {
   ui_r5_main_pass();
-  if(scenario<=3)assert(!module.state.get("paired")->asBool());
+  if(scenario<=3)assert(!module.tesla->state.get("paired")->asBool());
   if(scenario==1 || scenario==3)assert(r->command_outcome.sequence==UINT64_MAX);
-  if(scenario==4 || scenario==11)assert(module.state.get("last_error")->asString()==authoritative_error);
+  if(scenario==4 || scenario==11)assert(module.tesla->state.get("last_error")->asString()==authoritative_error);
  }
  if(scenario<=4 || scenario>=9) {
-  assert(module.runtime_owner.get()==r && module.state.get("restart_required")->asBool() && !module.accepts_commands());
-  if(scenario==9 || scenario==10)assert(module.state.get("paired")->asBool());
+  assert(module.tesla->runtime_owner.get()==r && module.tesla->state.get("restart_required")->asBool() && !module.accepts_commands());
+  if(scenario==9 || scenario==10)assert(module.tesla->state.get("paired")->asBool());
  } else {
-  assert(!module.runtime_owner.get() && !module.state.get("running")->asBool());
+  assert(!module.tesla->runtime_owner.get() && !module.tesla->state.get("running")->asBool());
   assert(ev.applied==(scenario==6?0:1));
  }
  assert(iterations>0 && !sdk_init);
- std::printf("R6_ORDINARY_TASK scenario=%u worker_delays=%u authenticated_completions=%u retained=%s passed\n",scenario,iterations,completions,module.runtime_owner.get()?"true":"false");
+ std::printf("R6_ORDINARY_TASK scenario=%u worker_delays=%u authenticated_completions=%u retained=%s passed\n",scenario,iterations,completions,module.tesla->runtime_owner.get()?"true":"false");
 }

@@ -93,7 +93,7 @@ if presence_probe:
     helper=repo/'software/src/modules/tesla_vehicle/tesla_ble_presence.h'
     if helper.exists():
         module=(repo/'software/src/modules/tesla_vehicle/tesla_vehicle.cpp').read_text()
-        assert module.count('tesla_ble_publish_presence(state.get("key_presence")') == 3
+        assert module.count('tesla_ble_publish_presence(tesla->state.get("key_presence")') == 3
         assert 'Config::Str("unknown", 0, TESLA_BLE_PRESENCE_MAX_LENGTH)' in module
         header += f'#include "{helper}"\n'
         header += 'void presence_site(Config &c,bool present,bool known,bool cleanup) { tesla_ble_publish_presence(&c,present,known,cleanup); }\n'

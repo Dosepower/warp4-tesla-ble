@@ -4,7 +4,7 @@ Only HTTP/Arduino/scheduler/config adapters are synthetic; no auth substitute.
 """
 from pathlib import Path
 import os, re, subprocess, tempfile, unittest
-from test_iram_bench_pairing import ROOT, MBED, LIB
+from test_iram_bench_pairing import ROOT, MBED, LIB, SANITIZED_LIB
 
 def function(text, signature):
     start=text.index(signature); opening=text.index('{',start); level=1; end=opening+1
@@ -149,7 +149,7 @@ class BenchHttpAuthTests(unittest.TestCase):
         shim=SHIM.replace('size_t count(){return entries.size();}','size_t count(){return entries.empty()?0:1;}').replace('Config *get(const char *name){return this+(!strcmp(name,"digest_hash")?1:0);}', 'Config *get(const char *name){return !strcmp(name,"users")?this:(this+(!strcmp(name,"digest_hash")?1:0));}')
         with tempfile.TemporaryDirectory() as d:
             t=Path(d);(t/'test.cpp').write_text(shim+'\n'+auth+'\n'+'\n'.join(parts)+'\n'+MAIN)
-            lib=LIB if os.environ.get('TESLA_BLE_SMOKE_SANITIZE')!='1' else LIB.parents[1]/'host-sanitize/mbedtls'
+            lib=LIB if os.environ.get('TESLA_BLE_SMOKE_SANITIZE')!='1' else SANITIZED_LIB
             cmd=['g++','-std=c++17','-Wall','-Wextra','-Werror','-I'+str(MBED/'include'),str(t/'test.cpp'),str(lib/'library/libmbedcrypto.a'),str(lib/'3rdparty/everest/libeverest.a'),str(lib/'3rdparty/p256-m/libp256m.a'),'-o',str(t/'test')]
             if os.environ.get('TESLA_BLE_SMOKE_SANITIZE')=='1':cmd+=['-fsanitize=address,undefined','-fno-omit-frame-pointer','-g','-no-pie']
             p=subprocess.run(cmd,capture_output=True,text=True);self.assertEqual(p.returncode,0,p.stderr)

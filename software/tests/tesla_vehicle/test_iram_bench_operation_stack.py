@@ -18,6 +18,30 @@ class OperationStackGateTests(unittest.TestCase):
         return cls._graph
     def test_linked_rehearsal_forbidden_symbols_are_unreachable(self):
         graph=self.linked_graph();root='BenchPairing::rehearse_local()'
+        owners=[n for n in graph if n.startswith('BluetoothLifecycle::run(')]
+        if owners:
+            # Current direct-IDF lifecycle has no rehearsal operation. Production
+            # Tesla crypto IS reachable and must not be confused with rehearsal.
+            self.assertEqual(len(owners),1)
+            self.assertFalse([n for n in graph if n.startswith(('BenchPairing::','BenchPairDisk::','TeslaBleBenchDiscovery::','TeslaBleBenchSmoke::','tesla_radio_spike','nimble_port_','ble_gap_','ble_gattc_','net_buf_'))])
+            row=graph[owners[0]]
+            self.assertTrue(row['coverage_complete'],row)
+            self.assertFalse(row['unknown'],row)
+            self.assertFalse(row['indirect_calls'],row)
+            self.assertFalse([n for n in row['calls'] if n.startswith(('esp_ble_gap_start_scanning','esp_ble_gap_start_advertising','esp_ble_gattc_open'))])
+            callback=next(n for n in graph if n.startswith('BluetoothLifecycle::gatt('))
+            self.assertTrue(graph[callback]['coverage_complete'])
+            # The application callback remains an unresolved edge, not zero cost.
+            self.assertEqual(len(graph[callback]['indirect_calls']),1)
+            self.assertTrue(graph[callback]['unknown'])
+            return
+        if 'BluetoothMasterBench::run()' in graph:
+            # The R13 master image deliberately removes, rather than exercises,
+            # all legacy rehearsal/pairing operations. Assert absence, not skip.
+            self.assertFalse([n for n in graph if n.startswith(('BenchPairing::','BenchPairDisk::','TeslaBleBenchDiscovery::','TeslaBleBenchSmoke::'))])
+            self.assertFalse([n for n in graph if n.startswith('tesla_clean::') and '::~' not in n])
+            self.assertFalse([n for n in graph if n.startswith('net_buf_')])
+            return
         row=audit_module().rehearsal_reachability(graph,root)
         self.assertFalse(row['forbidden_reachable'],row)
         self.assertTrue(graph[root]['coverage_complete'],graph[root])
@@ -47,6 +71,33 @@ class OperationStackGateTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,'not bound to exact ELF'):module.bound_worker_constants(header,manifest,'')
     def test_linked_known_critical_edges_are_not_silently_omitted(self):
         graph=self.linked_graph()
+        if any(n.startswith('BluetoothLifecycle::run(') for n in graph):
+            prefix='__wrap_' if '__wrap_esp_bt_controller_init' in graph else ''
+            expected={
+                'BluetoothLifecycle::run(':['BluetoothLifecycle::teardown(',
+                    *[prefix+n for n in ('esp_bt_controller_init','esp_bt_controller_enable','esp_bluedroid_init','esp_bluedroid_enable','esp_ble_gattc_register_callback','esp_ble_gattc_app_register')]],
+                'BluetoothLifecycle::teardown(':[prefix+n for n in ('esp_bluedroid_disable','esp_bluedroid_deinit','esp_bt_controller_disable','esp_bt_controller_deinit')],
+            }
+            for caller,callees in expected.items():
+                name=next(n for n in graph if n.startswith(caller))
+                self.assertTrue(graph[name]['coverage_complete'],(caller,graph[name]))
+                self.assertFalse(graph[name]['unknown'],(caller,graph[name]))
+                for callee in callees:
+                    self.assertTrue(any(c.startswith(callee) for c in graph[name]['calls']),(caller,callee,graph[name]))
+            return
+        if 'BluetoothMasterBench::run()' in graph:
+            expected={
+                'BluetoothMasterBench::run()':['BLEDevice::init(', '__wrap_esp_ble_gattc_app_register', 'BluetoothMasterBench::teardown('],
+                'BluetoothMasterBench::teardown(':['BLEDevice::deinit('],
+                'BLEDevice::deinit(':['__wrap_esp_bluedroid_disable', '__wrap_esp_bluedroid_deinit',
+                                     '__wrap_esp_bt_controller_disable', '__wrap_esp_bt_controller_deinit'],
+            }
+            for caller,callees in expected.items():
+                name=next(n for n in graph if n.startswith(caller))
+                self.assertTrue(graph[name]['coverage_complete'],(caller,graph[name]))
+                for callee in callees:
+                    self.assertTrue(any(c.startswith(callee) for c in graph[name]['calls']),(caller,callee,graph[name]))
+            return
         expected={
             'BenchPairing::verify(':['tesla_clean::DomainAuthentication::begin('],
             'BenchPairing::prepare()':['tesla_clean::IdentityStore::rotate(', 'tesla_clean::IdentityStore::import_pem('],

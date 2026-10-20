@@ -30,6 +30,8 @@
 #include "tesla_ble_storage.h"
 #include "tesla_ble_transport.h"
 #include "bluetooth_config_store.h"
+#include "bluetooth_master_bench.h"
+#include "bluetooth_lifecycle.h"
 
 class TeslaBleStorageAdapter;
 class TeslaBleTransportAdapter;
@@ -114,17 +116,51 @@ private:
 #endif
     static std::atomic<TeslaVehicle *> gatt_owner;
 
-    ConfigRoot config;
-    ConfigRoot state;
     ConfigRoot empty_command;
     // This module remains the SOLE controller/host lifecycle owner. These are
     // separate from the legacy Tesla service config and never grant VIN access.
     ConfigRoot bluetooth_config, bluetooth_update, bluetooth_state;
-    BluetoothConfigStore bluetooth_store;
+    // Path/transaction work buffers live on the caller stack, never in BSS.
+    // A failed close's quarantine remains permanent across those transactions.
+    bool bluetooth_storage_quarantined = false;
+    bool load_bluetooth(bool &desired);
+    bool persist_bluetooth(bool desired);
     bool bluetooth_boot_enabled = false;
     bool bluetooth_commit_ok = true;
     void publish_bluetooth_state();
     void register_bluetooth_urls();
+    bool save_bluetooth(bool desired, String &errmsg);
+    bool restart_bluetooth(String &errmsg);
+    BluetoothLifecycle bluetooth;
+    bool bluetooth_restart_pending = false;
+    bool service_start_requested = false; // Explicit action only; never restored.
+    bool prepare_tesla();
+    void register_tesla_urls();
+#if TESLA_BLE_MANUAL_VEHICLE_UI
+    void publish_discovery();
+    bool discovery_allowed() const;
+    bool fresh_binding(int index, uint64_t mac, const char *vin, const char *address, uint8_t type, uint32_t revision);
+    bool runtime_binding_matches();
+    Config make_profile();
+    String validate_profiles(Config &update, ConfigSource source);
+    Config *find_profile(int index) const;
+    bool select_profile(int index, bool deleting, String &errmsg);
+    bool live_profile(int index) const;
+    void apply_profile(); // Worker only, no connection or generation of keys.
+    void publish_profile(); // Main only, consumes worker acknowledgement.
+    bool active_identity_matches(const TeslaBleIdentity &identity) const;
+    void refresh_live_session();
+#endif
+#if TESLA_BLE_R13_MASTER_BENCH
+    BluetoothMasterBench master_bench;
+    ConfigRoot bench_state;
+    bool bench_restart_pending = false;
+    char bench_line[16]{};
+    unsigned bench_line_size = 0;
+    bool bench_line_overflow = false;
+    void bench_serial();
+    void bench_emit(const char *request, bool ok);
+#endif
 
     // Every worker-owned allocation and request flag lives in this optional
     // RAII aggregate, not in the permanent module. Vehicle's adapter pointers
@@ -173,11 +209,31 @@ private:
         std::atomic<uint16_t> notify_handle{0};
         uint8_t remote_address[6] = {};
         tesla_warp::FixedVin vin;
-        int configured_ev_index = -1;
+        std::atomic<int> configured_ev_index{-1};
+#if TESLA_BLE_MANUAL_VEHICLE_UI
+        struct ProfileRequest {
+            int index = -1;
+            uint64_t mac = 0;
+            char vin[18]{}, address[18]{};
+            uint32_t discovery_revision = 0;
+            uint8_t address_type = 0;
+            bool deleting = false;
+        } profile_request;
+        std::atomic<bool> profile_pending{false}, profile_ready{false};
+        std::atomic<bool> authorized{false};
+        std::atomic<bool> profile_key_present{false};
+        std::atomic<bool> profile_actionable{false};
+        uint64_t profile_mac = 0; // Immutable between acknowledged switches.
+        uint32_t binding_revision = 0; // Exact scan chosen, never replaced by a newer result.
+        uint8_t remote_address_type = 0;
+        bool deleting_profile = false; // Worker-only local erase scope.
+#endif
         uint32_t poll_interval_seconds = 300;
         bool wake_once = false;
         std::atomic<bool> pair_requested{false};
         std::atomic<bool> poll_requested{false};
+        // HTTP acceptance through terminal worker outcome, not HTTP latency.
+        std::atomic<bool> manual_poll_pending{false};
         std::atomic<bool> forget_requested{false};
         std::atomic<bool> stop_requested{false};
         std::atomic<bool> connected{false};
@@ -213,12 +269,30 @@ private:
         uint64_t pair_command = 0; // Worker-owned, not a UI/publication latch.
     };
 
-    TeslaBleRuntimeOwner<Runtime> runtime_owner;
-    TeslaBlePairingPolicy pairing_policy;
-    std::atomic<bool> runtime_update_requested{false};
-    TeslaBleCallbackGate callback_gate;
-    bool start_attempted = false;
-    // Main-only coalescing retains failed publication beyond Runtime lifetime.
-    char pending_error[96] = {};
-    bool error_pending = false;
+    struct Tesla {
+        ConfigRoot config, state;
+#if TESLA_BLE_MANUAL_VEHICLE_UI
+        Config profile;
+        ConfigRoot profiles, profile_command;
+        bool legacy_blocked = false;
+        int selected_index = -1; // Main's admitted profile, not a second EV registry.
+        int published_index = -1;
+        Config discovery_target;
+        ConfigRoot discovery_state, scan_command;
+        uint32_t discovery_revision=UINT32_MAX;
+#endif
+        TeslaBleRuntimeOwner<Runtime> runtime_owner;
+        TeslaBlePairingPolicy pairing_policy;
+        std::atomic<bool> runtime_update_requested{false};
+        TeslaBleCallbackGate callback_gate;
+        bool start_attempted = false;
+        // Coalescing retains failed publication beyond Runtime lifetime.
+        char pending_error[96] = {};
+        bool error_pending = false;
+    };
+#if TESLA_BLE_R13_MASTER_BENCH
+    Tesla *const tesla = nullptr; // No Tesla destructor/protocol closure in peer-free bench.
+#else
+    std::unique_ptr<Tesla> tesla; // OFF never constructs any Tesla object.
+#endif
 };

@@ -451,8 +451,8 @@ int main(int argc,char **) {
                 self.assertEqual(p.returncode,0,p.stderr)
 
 def pairing_link_args(temp):
-    from test_iram_bench_pairing import ROOT, MBED, LIB
-    if os.environ.get('TESLA_BLE_SMOKE_SANITIZE')=='1': LIB=LIB.parents[1]/'host-sanitize/mbedtls'
+    from test_iram_bench_pairing import ROOT, MBED, LIB, SANITIZED_LIB
+    if os.environ.get('TESLA_BLE_SMOKE_SANITIZE')=='1': LIB=SANITIZED_LIB
     (temp/'store/config').mkdir(parents=True)
     return ['-DTESLA_CLEAN_STORAGE_PREFIX="'+str(temp/'store')+'"', '-I'+str(ROOT/'software/lib/TeslaBLEClean/include'),'-I'+str(MBED/'include'),str(MODULE/'tesla_ble_bench_pairing.cpp'),str(MODULE/'tesla_ble_bench_pair_disk.cpp'),*[str(p) for p in (ROOT/'software/lib/TeslaBLEClean/src').glob('*.cpp') if p.name!='vehicle.cpp'],str(LIB/'library/libmbedcrypto.a'),str(LIB/'3rdparty/everest/libeverest.a'),str(LIB/'3rdparty/p256-m/libp256m.a')]
 

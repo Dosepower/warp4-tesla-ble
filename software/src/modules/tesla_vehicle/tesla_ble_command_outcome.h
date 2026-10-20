@@ -56,6 +56,14 @@ public:
         return lock && !deleting && !exhausted && command && command == pair.command &&
             (pair.phase == PairPhase::Working || pair.phase == PairPhase::Sent);
     }
+    // Pin consent to the accepted SLAC generation, including a reconnect of
+    // the same profile/MAC. Never let a fresh session inherit an older action.
+    bool binding_identity_current(TeslaBleIdentity identity)
+    {
+        tesla_warp::CheckedMutex::Guard lock(mutex, true);
+        return lock && !deleting && !exhausted && (!pair.command ||
+            (pair.vehicle == identity && pair.phase != PairPhase::Failed && pair.phase != PairPhase::Cancelling));
+    }
     void pair_sent(uint64_t command)
     {
         tesla_warp::CheckedMutex::Guard lock(mutex);

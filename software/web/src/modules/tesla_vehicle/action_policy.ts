@@ -1,4 +1,13 @@
-import type {state} from "./api";
+import type {state, state___bluetooth} from "./api";
+
+export function teslaBluetoothReady(bluetooth: Partial<state___bluetooth>) {
+    return !!bluetooth?.supported && bluetooth.phase === 'active' && !bluetooth.restart_required && !bluetooth.persistence_error;
+}
+
+export function teslaStartAllowed(enable: boolean, status: Partial<state>, bluetooth: Partial<state___bluetooth>, dirty: boolean, busy: boolean) {
+    return !!enable && !!status && teslaBluetoothReady(bluetooth) && !status.running &&
+        !status.stopping && !status.restart_required && !status.action_busy && !dirty && !busy;
+}
 
 type Status = Partial<state>;
 
@@ -15,14 +24,15 @@ export function teslaKeyStatus(status: Status) {
     return status.key_present ? 'key_only' : 'not_paired';
 }
 
-export function teslaActions(enable: boolean, status: Status, dirty: boolean, vehicleReady = false, busy = false) {
+export function teslaActions(enable: boolean, status: Status, dirty: boolean, vehicleReady = false, busy = false, bluetooth?: Partial<state___bluetooth>) {
     const stopping = !!status?.stopping;
-    const unavailable = stopping || !enable || !status?.running || !!status?.restart_required || dirty || busy || !vehicleReady || !!status?.pairing_pending;
+    const actionBusy = busy || !!status?.action_busy || !!status?.pairing_pending;
+    const unavailable = !teslaBluetoothReady(bluetooth) || stopping || !enable || !status?.running || !!status?.restart_required || dirty || actionBusy || !vehicleReady;
     return {
         transition: stopping,
-        pairDisabled: unavailable,
+        pairDisabled: unavailable || !!status?.paired,
         // Verification is precisely how a stored key becomes authenticated.
         pollDisabled: unavailable || !status?.key_present || status?.key_presence !== 'present',
-        deleteDisabled: busy || stopping || !!status?.restart_required || !status || status.key_presence === 'absent'
+        deleteDisabled: actionBusy || dirty || stopping || !!status?.restart_required || !status || status.key_presence === 'absent'
     };
 }

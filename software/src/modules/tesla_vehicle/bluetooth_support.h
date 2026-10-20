@@ -1,5 +1,15 @@
 #pragma once
 #include "bluetooth_littlefs_binding.h"
+#include "r13_psram_policy.h"
+#ifndef TESLA_BLE_R13_MASTER_BENCH
+#define TESLA_BLE_R13_MASTER_BENCH 0
+#endif
+#if TESLA_BLE_MANUAL_WEB_BENCH && (!TESLA_BLE_R13_MASTER_BENCH || TESLA_BLE_PSRAM_POLICY_DIAGNOSTIC)
+#error "Manual web bench requires master-only lifecycle, never UART diagnostic policy"
+#endif
+#if TESLA_BLE_R13_MASTER_BENCH && (!defined(TESLA_BLE_BENCH_ONLY) || !TESLA_BLE_BENCH_ONLY || !defined(TESLA_BLE_IRAM_DIAGNOSTICS) || !TESLA_BLE_IRAM_DIAGNOSTICS)
+#error "R13 master bench requires explicit non-production bench diagnostics"
+#endif
 #ifndef TESLA_BLE_MODULE_HOST_TEST
 #include <sdkconfig.h>
 #include <soc/soc_caps.h>
@@ -16,7 +26,7 @@
 inline const char *bluetooth_unsupported_reason() {
 #if defined(R13_UNSUPPORTED)
     return "sdk_disabled";
-#elif defined(TESLA_BLE_BENCH_ONLY) && TESLA_BLE_BENCH_ONLY
+#elif defined(TESLA_BLE_BENCH_ONLY) && TESLA_BLE_BENCH_ONLY && !TESLA_BLE_R13_MASTER_BENCH && !TESLA_BLE_PSRAM_POLICY_DIAGNOSTIC
     return "bench_only";
 #elif !WARP_BLUETOOTH_COMPILED
 #if !defined(SOC_BT_SUPPORTED) || !SOC_BT_SUPPORTED

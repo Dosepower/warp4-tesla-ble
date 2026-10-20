@@ -19,7 +19,7 @@
 
 import * as util from "../../ts/util";
 import * as API from "../../ts/api";
-import { h, Fragment, Component } from "preact";
+import { h, Fragment, Component, ComponentType } from "preact";
 import { __ } from "../../ts/translation";
 import { FormRow } from "../../ts/components/form_row";
 import { InputText, InputTextPatterned } from "../../ts/components/input_text";
@@ -86,6 +86,13 @@ function find_matching_ev(evs: EvProfile[], mac: string, ignoreIndex?: number): 
 
 
 type EvProfile = API.getType["ev/config"]["evs"][0];
+
+// Optional module-owned section; stock EV builds do not import Tesla or change
+// the profile schema. Registration has no API or radio side effects.
+let vehicleExtension: ComponentType<{}>;
+export function registerVehicleExtension(component: ComponentType<{}>) {
+    vehicleExtension = component;
+}
 
 // A seen EV MAC, optionally annotated with the name of the charger that saw it
 // (when it was received through central user management).
@@ -386,6 +393,7 @@ export class Ev extends Component<{}, EvState> {
                     }}
                     />
                 </FormRow>
+                {vehicleExtension ? h(vehicleExtension, {}) : undefined}
             </SubPage>
         );
     }

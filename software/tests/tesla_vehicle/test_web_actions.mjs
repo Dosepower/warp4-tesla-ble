@@ -8,11 +8,21 @@ const entry = fileURLToPath(new URL('../../web/src/modules/tesla_vehicle/action_
 const compiled = buildSync({entryPoints: [entry], bundle: true, write: false, platform: 'node', format: 'cjs'});
 const module = {exports: {}};
 vm.runInNewContext(compiled.outputFiles[0].text, {module, exports: module.exports});
-const {teslaActions, teslaKeyStatus, teslaVehicleReady} = module.exports;
+const {teslaActions, teslaKeyStatus, teslaVehicleReady, teslaStartAllowed} = module.exports;
+const bt = {supported: true, phase: 'active', restart_required: false, persistence_error: false};
+const idle = {running: false, stopping: false, restart_required: false};
+assert.equal(teslaStartAllowed(true, idle, bt, false, false), true);
+for (const status of [undefined, {...idle, running: true}, {...idle, stopping: true}, {...idle, restart_required: true}])
+    assert.equal(teslaStartAllowed(true, status, bt, false, false), false);
+for (const bluetooth of [undefined, {...bt, phase: 'starting'}, {...bt, phase: 'disabled'}, {...bt, restart_required: true}, {...bt, supported: false}, {...bt, persistence_error: true}])
+    assert.equal(teslaStartAllowed(true, idle, bluetooth, false, false), false);
+assert.equal(teslaStartAllowed(false, idle, bt, false, false), false);
+assert.equal(teslaStartAllowed(true, idle, bt, true, false), false);
+assert.equal(teslaStartAllowed(true, idle, bt, false, true), false);
 const active = {running: true, paired: true, key_present: true, key_presence: 'present'};
-const readyActions = (enable, status, dirty = false, busy = false) => teslaActions(enable, status, dirty, true, busy);
+const readyActions = (enable, status, dirty = false, busy = false) => teslaActions(enable, status, dirty, true, busy, bt);
 const normal = readyActions(true, active);
-assert.equal(normal.pairDisabled, false);
+assert.equal(normal.pairDisabled, true); // Established identities are not paired again on vehicle switches.
 assert.equal(normal.pollDisabled, false);
 assert.equal(normal.deleteDisabled, false);
 const stopping = readyActions(true, {...active, stopping: true});
@@ -34,9 +44,9 @@ for (const change of [{running: false}, {stopping: true}, {restart_required: tru
 assert.equal(readyActions(false, active).pollDisabled, true);
 for (const dirty of [false, true]) for (const busy of [false, true]) {
     const actions = readyActions(true, active, dirty, busy);
-    assert.equal(actions.pairDisabled, dirty || busy);
+    assert.equal(actions.pairDisabled, true);
     assert.equal(actions.pollDisabled, dirty || busy);
-    assert.equal(actions.deleteDisabled, busy);
+    assert.equal(actions.deleteDisabled, dirty || busy);
 }
 assert.equal(teslaActions(true, active, false, false).pairDisabled, true);
 assert.equal(teslaActions(true, active, false, false).pollDisabled, true);
@@ -57,4 +67,14 @@ for (const state of [undefined, {active_ev_index: -1, mac: ''}, {active_ev_index
     assert.equal(teslaVehicleReady(2, state), false);
 }
 assert.equal(teslaVehicleReady(-1, {active_ev_index: -1, mac: 'synthetic-nonzero'}), false);
+// Fail closed even when the Tesla status is stale and still claims running.
+for (const bluetooth of [undefined, {...bt,phase:'disabled'}, {...bt,phase:'starting'}, {...bt,restart_required:true}, {...bt,persistence_error:true}, {...bt,supported:false}]) {
+    const actions = teslaActions(true, active, false, true, false, bluetooth);
+    assert.equal(actions.pairDisabled,true);
+    assert.equal(actions.pollDisabled,true);
+}
+for (const change of [{action_busy:true}, {pairing_pending:true}]) {
+    const actions = teslaActions(true,{...active,...change},false,true,false,bt);
+    assert.equal(actions.pairDisabled,true); assert.equal(actions.pollDisabled,true); assert.equal(actions.deleteDisabled,true);
+}
 console.log('Tesla BLE web action tests passed.');

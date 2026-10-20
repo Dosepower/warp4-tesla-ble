@@ -69,13 +69,13 @@ class BenchMemoryTests(unittest.TestCase):
             run_result = subprocess.run([str(root / "test")], capture_output=True, text=True)
             self.assertEqual(run_result.returncode, 0, run_result.stderr)
 
-    def test_rtos_wrapper_is_absent_with_single_diagnostic_flag(self):
+    def test_rtos_wrapper_is_absent_from_c1_diagnostic_inputs(self):
         from test_iram_diagnostics import IramDiagnosticsTests
         IramDiagnosticsTests().compile_run(True)  # Existing heap/view behavior remains unchanged.
         ini = (Path(__file__).resolve().parents[3] / "software/warp4_tesla_ble.ini").read_text()
         production, bench = ini.split("[env:warp4_tesla_ble_iram_bench]", 1)
         self.assertNotIn("--wrap=pvPortMalloc", production)
-        self.assertIn("--wrap=pvPortMalloc", bench)
+        self.assertNotIn("--wrap=pvPortMalloc", bench)
 
     def test_disabled_and_single_flag_objects_exclude_new_instrumentation(self):
         with tempfile.TemporaryDirectory(prefix="warp-bench-memory-gates-") as temporary:

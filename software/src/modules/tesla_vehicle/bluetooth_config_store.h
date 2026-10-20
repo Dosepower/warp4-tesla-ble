@@ -16,11 +16,12 @@
 #endif
 class BluetoothConfigStore {
 public:
-    explicit BluetoothConfigStore(const char *path = BLUETOOTH_CONFIG_PATH) {
+    explicit BluetoothConfigStore(const char *path = BLUETOOTH_CONFIG_PATH, bool quarantine = false) : quarantined(quarantine) {
         valid = snprintf(canonical, sizeof(canonical), "%s", path) > 0 && strlen(path) < sizeof(canonical) &&
                 snprintf(temporary, sizeof(temporary), "%s.tmp", path) > 0 && strlen(path) + 4 < sizeof(temporary) &&
                 snprintf(backup, sizeof(backup), "%s.bak", path) > 0 && strlen(path) + 4 < sizeof(backup);
     }
+    bool io_quarantined() const { return quarantined; }
     bool load(bool &enabled) {
         enabled = false;
         Snapshot snapshot;

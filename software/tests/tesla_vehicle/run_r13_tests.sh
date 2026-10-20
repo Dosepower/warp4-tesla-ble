@@ -27,6 +27,7 @@ g++ "${flags[@]}" -DTESLA_BLE_MODULE_HOST_TEST -DTESLA_BLE_HOST_FILESYSTEM \
     "$root/software/src/modules/tesla_vehicle/tesla_ble_storage.cpp" \
     "$root/software/src/modules/tesla_vehicle/tesla_ble_transport.cpp" \
     "$root/software/src/modules/tesla_vehicle/tesla_ble_gatt.cpp" \
+    "$root/software/src/modules/tesla_vehicle/bluetooth_lifecycle.cpp" \
     "$root"/software/lib/TeslaBLEClean/src/*.cpp \
     "$libs/library/libmbedcrypto.a" "$libs/3rdparty/everest/libeverest.a" "$libs/3rdparty/p256-m/libp256m.a" \
     -Wl,--wrap=open,--wrap=write,--wrap=read,--wrap=fsync,--wrap=close,--wrap=rename,--wrap=unlink \

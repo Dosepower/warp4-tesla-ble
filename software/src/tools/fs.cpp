@@ -35,6 +35,14 @@
 
 static constexpr const char *DATA_MOUNTPOINT = "/data";
 
+#if TESLA_BLE_CANONICAL_LAYOUT_BENCH
+#include "canonical_bench_storage.h"
+#include "canonical_bench_vfs_guard.h"
+#endif
+
+bool should_factory_reset_bricklets = false;
+
+#if !TESLA_BLE_CANONICAL_LAYOUT_BENCH
 #if OPTIONS_MIN_DATA_PARTITION_FORMAT() == 0
 static bool is_spiffs_available(const char *part_label, const char *base_path)
 {
@@ -127,8 +135,6 @@ static bool mirror_filesystem(fs::FS &fromFS, fs::FS &toFS, const String &root_n
 
     return true;
 }
-
-bool should_factory_reset_bricklets = false;
 
 #if OPTIONS_MIN_DATA_PARTITION_FORMAT() == 0
 static void try_convert_spiffs(const char *partition_label)
@@ -260,9 +266,14 @@ static const char *find_data_partition_label()
 
     return nullptr;
 }
+#endif // !TESLA_BLE_CANONICAL_LAYOUT_BENCH
 
 bool mount_or_format_data_partition()
 {
+#if TESLA_BLE_CANONICAL_LAYOUT_BENCH
+    // Fail closed on any layout/mount error. No format, migration, or fallback.
+    return mount_canonical_bench_data();
+#else
     const char *partition_label = find_data_partition_label();
 
     if (partition_label == nullptr) {
@@ -279,6 +290,7 @@ bool mount_or_format_data_partition()
 #endif
 
     return mount_or_format_littlefs(partition_label);
+#endif
 }
 
 struct directory_entry {

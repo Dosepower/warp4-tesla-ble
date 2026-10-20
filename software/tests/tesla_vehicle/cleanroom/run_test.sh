@@ -62,7 +62,8 @@ if [[ "$name" == test_warp_littlefs ]]; then
 fi
 if [[ "$name" == test_warp_module || "$name" == test_warp_module_posix || "$name" == test_warp_target_sync || "$name" == test_warp_r6 || "$name" == test_warp_r6_sync || "$name" == test_warp_r6_posix || "$name" == test_warp_iram_diagnostics ]]; then
     sources+=("$root/software/src/modules/tesla_vehicle/tesla_ble_storage.cpp"
-              "$root/software/src/modules/tesla_vehicle/tesla_ble_transport.cpp")
+              "$root/software/src/modules/tesla_vehicle/tesla_ble_transport.cpp"
+              "$root/software/src/modules/tesla_vehicle/bluetooth_lifecycle.cpp")
     # The diagnostics entry includes GATT in its enabled translation unit.
     if [[ "$name" == test_warp_module || "$name" == test_warp_module_posix || "$name" == test_warp_target_sync || "$name" == test_warp_r6 || "$name" == test_warp_r6_sync || "$name" == test_warp_r6_posix ]]; then
         sources+=("$root/software/src/modules/tesla_vehicle/tesla_ble_gatt.cpp")

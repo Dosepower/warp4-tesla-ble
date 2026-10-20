@@ -13,6 +13,7 @@
 
 #include "tesla_ble_key_validation.h"
 #include "tesla_ble_storage_io.h"
+#include "tesla_ble_validation.h"
 #include <mbedtls/platform_util.h>
 
 bool TeslaBleStorageAdapter::initialize_identity(tesla_clean::IdentityStore &keys, tesla_clean::Random random, bool allow_generate)
@@ -33,8 +34,130 @@ bool TeslaBleStorageAdapter::initialize_identity(tesla_clean::IdentityStore &key
 
 bool TeslaBleStorageAdapter::restart_required() const { return TeslaBleStorageIO::restart_required(); }
 
-const char *TeslaBleStorageAdapter::path_for_key(std::string_view key)
+bool TeslaBleStorageAdapter::select_profile(int index, uint64_t mac)
 {
+    if (index < 0 || static_cast<unsigned>(index) >= MAX_PROFILES || !mac || mac > 0xFFFFFFFFFFFFULL) { return false; }
+    snprintf(profile_prefix, sizeof(profile_prefix), "/config/tesla_p%02d_%012llx_", index, static_cast<unsigned long long>(mac));
+    return true;
+}
+
+bool TeslaBleStorageAdapter::profiles_config_present()
+{
+    TeslaBleStorageIO::Paths paths;
+    if (!paths.initialize("/config/tesla_vehicle_profiles")) { return true; }
+    for (const char *p : {paths.canonical, paths.backup, paths.temporary}) {
+        if (TeslaBleStorageIO::presence(p) != TeslaBleStorageIO::Presence::Absent) { return true; }
+    }
+    if (!paths.initialize("/config/.tesla_vehicle_profiles")) { return true; }
+    return TeslaBleStorageIO::presence(paths.canonical) != TeslaBleStorageIO::Presence::Absent;
+}
+
+namespace {
+// Deliberately NOT a general config restore: restorePersistentConfig can fill
+// missing defaults, coerce values and remove saved defaults. Here every field
+// must be explicit, unique and exactly the known predecessor's inert token.
+// Only VIN may also contain 17 raw ASCII bytes accepted by the production
+// validator. It is unused metadata: never imported into an unbound profile.
+// Bounded/no allocations; unknown schema, escapes and alternative number forms
+// fail closed. JSON member order and the four JSON whitespace bytes may vary.
+bool exact_unbound_inert_legacy_config(const uint8_t *data, size_t size)
+{
+    size_t at = 0;
+    const auto whitespace = [&]() {
+        while (at < size && (data[at] == ' ' || data[at] == '\t' || data[at] == '\r' || data[at] == '\n')) { ++at; }
+    };
+    const auto token = [&](const char *text) {
+        whitespace();
+        const size_t n = strlen(text);
+        if (n > size - at || memcmp(data + at, text, n)) { return false; }
+        at += n;
+        return true;
+    };
+    const auto vin_value = [&]() {
+        if (!token("\"")) { return false; }
+        if (at < size && data[at] == '"') { ++at; return true; }
+        // No JSON unescaping/coercion. The bounded NUL-terminated copy is
+        // validated identically to a new profile; embedded NUL also fails.
+        if (size - at < 18 || data[at + 17] != '"') { return false; }
+        char vin[18]{};
+        memcpy(vin, data + at, 17);
+        if (!tesla_ble_valid_vin(vin)) { return false; }
+        at += 18;
+        return true;
+    };
+    constexpr const char *names[] = {"\"enable\"", "\"vin\"", "\"ble_address\"", "\"ev_index\"", "\"poll_interval\"", "\"wake_once\""};
+    constexpr const char *values[] = {"false", "\"\"", "\"\"", "-1", "300", "false"};
+    if (!token("{")) { return false; }
+    unsigned seen = 0;
+    for (unsigned member = 0; member < 6; ++member) {
+        if (member && !token(",")) { return false; }
+        unsigned field = 0;
+        while (field < 6 && !token(names[field])) { ++field; }
+        if (field == 6 || (seen & (1U << field)) || !token(":") ||
+            !(field == 1 ? vin_value() : token(values[field]))) { return false; }
+        seen |= 1U << field;
+    }
+    if (seen != 0x3f || !token("}")) { return false; }
+    whitespace();
+    return at == size;
+}
+
+bool read_exact_unbound_inert_legacy_config(const char *path)
+{
+    TeslaBleStorageIO::File file;
+    if (!file.open(path, false)) { return false; }
+    uint8_t bytes[512]{};
+    size_t size = 0, offset = 0;
+    bool ok = file.size(size) && size > 0 && size <= sizeof(bytes);
+    while (ok && offset < size) {
+        const ssize_t n = file.read(bytes + offset, size - offset);
+        if (n <= 0 || static_cast<size_t>(n) > size - offset) { ok = false; break; }
+        offset += static_cast<size_t>(n);
+    }
+    // Reject a file which grew after fstat as well; never ignore trailing bytes.
+    uint8_t extra = 0;
+    if (ok) { ok = file.read(&extra, 1) == 0; }
+    const bool closed = file.close(); // Checked POSIX close, even on parse/IO failure.
+    return ok && closed && exact_unbound_inert_legacy_config(bytes, size);
+}
+}
+
+bool TeslaBleStorageAdapter::legacy_material_present()
+{
+    // Read-only startup classification. No durable harmless marker, cleanup,
+    // key/session import or mutation: an interrupted probe changes no bytes and
+    // the next boot must prove the entire absence/unbound-inert predicate again.
+    // Only the evidenced tesla_vehicle singleton is eligible. Older aliases,
+    // API dot-file transactions and ALL backup/temp variants remain blocking.
+    for (const char *path : {"/config/tesla_ble_private_key", "/config/tesla_ble_session_vcsec",
+                           "/config/tesla_ble_session_info", "/config/tesla_ble_session_infotainment",
+                           "/config/tesla_ble_warp_ev_mac", "/config/tesla_ble_vehicle_vin", "/config/tesla_ble_authorized",
+                           "/config/tesla_ble_config", "/config/.tesla_vehicle_config", "/config/.tesla_ble_config",
+                           "/tesla_ble_bench_pair_record", "/tesla_ble_bench_pair_exposed"}) {
+        TeslaBleStorageIO::Paths paths;
+        if (!paths.initialize(path)) { return true; }
+        for (const char *p : {paths.canonical, paths.backup, paths.temporary}) {
+            if (TeslaBleStorageIO::presence(p) != TeslaBleStorageIO::Presence::Absent) { return true; }
+        }
+    }
+    TeslaBleStorageIO::Paths config;
+    if (!config.initialize("/config/tesla_vehicle_config")) { return true; }
+    for (const char *p : {config.backup, config.temporary}) {
+        if (TeslaBleStorageIO::presence(p) != TeslaBleStorageIO::Presence::Absent) { return true; }
+    }
+    const auto presence = TeslaBleStorageIO::presence(config.canonical);
+    if (presence == TeslaBleStorageIO::Presence::Absent) { return false; }
+    return presence != TeslaBleStorageIO::Presence::Present || !read_exact_unbound_inert_legacy_config(config.canonical);
+}
+
+const char *TeslaBleStorageAdapter::path_for_key(std::string_view key) const
+{
+    if (profile_prefix[0]) {
+        if (key != "private_key" && key != "session_vcsec" && key != "session_infotainment" &&
+            key != "warp_ev_mac" && key != "vehicle_vin" && key != "authorized" && key != "ble_binding") { return nullptr; }
+        snprintf(profile_path, sizeof(profile_path), "%s%.*s", profile_prefix, static_cast<int>(key.size()), key.data());
+        return profile_path;
+    }
     if (key == "private_key") {
         return "/config/tesla_ble_private_key";
     }
@@ -172,7 +295,8 @@ TeslaBleStorageAdapter::KeyPresence TeslaBleStorageAdapter::private_key_presence
         // No committed identity: orphaned session/binding files are not usable
         // either. Keep deletion offered after partial erasure and restart.
         presence = KeyPresence::Absent;
-        for (const char *name : {"private_key", "session_vcsec", "session_infotainment", "warp_ev_mac"}) {
+        for (const char *name : {"private_key", "session_vcsec", "session_infotainment", "warp_ev_mac", "vehicle_vin", "authorized", "ble_binding"}) {
+            if (!profile_prefix[0] && (!strcmp(name,"vehicle_vin") || !strcmp(name,"authorized") || !strcmp(name,"ble_binding"))) { continue; }
             TeslaBleStorageIO::Paths paths;
             if (!paths.initialize(path_for_key(name))) { presence = KeyPresence::Unknown; break; }
             for (const char *file : {paths.canonical, paths.backup, paths.temporary}) {
@@ -198,6 +322,9 @@ bool TeslaBleStorageAdapter::has_private_key()
 bool TeslaBleStorageAdapter::forget_material()
 {
     bool ok = true;
+    if (profile_prefix[0]) {
+        for (const char *key : {"vehicle_vin", "authorized", "ble_binding"}) { ok = remove_key(key) && ok; }
+    }
     for (const char *key : {"private_key", "session_vcsec", "session_infotainment", "warp_ev_mac"}) {
         const bool removed = remove_key(key);
         ok = removed && ok;

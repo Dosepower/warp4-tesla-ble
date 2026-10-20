@@ -218,6 +218,8 @@ static void register_default_urls() {
     });
 }
 
+#include "modules/tesla_vehicle/r13_psram_policy.h"
+
 void setup()
 {
     set_main_task_handle();
@@ -228,6 +230,10 @@ void setup()
     // However if BUILD_MONITOR_SPEED is not the ROM bootloader's preferred speed, this call will change the speed.
     Serial.begin(BUILD_MONITOR_SPEED);
 
+#if TESLA_BLE_PSRAM_POLICY_DIAGNOSTIC || TESLA_BLE_MANUAL_WEB_BENCH
+    r13_psram_boot(false);
+#endif
+
     tools_malloc_pre_setup();
 
     for (size_t i = 0; i < imodules_count; i++) {
@@ -236,6 +242,11 @@ void setup()
 
     if (!mount_or_format_data_partition()) {
         logger.printfln("Failed to mount data partition");
+#if TESLA_BLE_CANONICAL_LAYOUT_BENCH
+        // Do not boot normal modules against missing/default configuration.
+        // No restart loop and no network or Bluetooth initialization on failure.
+        while (true) { delay(1000); }
+#endif
     }
 
     check_memory_assumptions();
@@ -249,7 +260,13 @@ void setup()
     boot_stage = BootStage::SETUP;
 
     for (size_t i = 0; i < imodules_count; i++) {
+#if TESLA_BLE_PSRAM_POLICY_DIAGNOSTIC
+        r13_psram_checkpoint(imodules[i].name, "setup", false, api.states.size(), 0);
+#endif
         (*imodules[i].imodule)->setup();
+#if TESLA_BLE_PSRAM_POLICY_DIAGNOSTIC || TESLA_BLE_MANUAL_WEB_BENCH
+        r13_psram_checkpoint(imodules[i].name, "setup", true, api.states.size(), 0);
+#endif
     }
 
     modules = modules_get_init_config();
@@ -263,13 +280,25 @@ void setup()
     register_default_urls();
 
     for (size_t i = 0; i < imodules_count; i++) {
+#if TESLA_BLE_PSRAM_POLICY_DIAGNOSTIC
+        r13_psram_checkpoint(imodules[i].name, "register_urls", false, api.states.size(), 0);
+#endif
         (*imodules[i].imodule)->register_urls();
+#if TESLA_BLE_PSRAM_POLICY_DIAGNOSTIC
+        r13_psram_checkpoint(imodules[i].name, "register_urls", true, api.states.size(), 0);
+#endif
     }
 
     boot_stage = BootStage::REGISTER_EVENTS;
 
     for (size_t i = 0; i < imodules_count; i++) {
+#if TESLA_BLE_PSRAM_POLICY_DIAGNOSTIC
+        r13_psram_checkpoint(imodules[i].name, "register_events", false, api.states.size(), api.states.size() * sizeof(micros_t));
+#endif
         (*imodules[i].imodule)->register_events();
+#if TESLA_BLE_PSRAM_POLICY_DIAGNOSTIC
+        r13_psram_checkpoint(imodules[i].name, "register_events", true, api.states.size(), api.states.size() * sizeof(micros_t));
+#endif
     }
 
     // Ignore non-overridden empty loop functions.
@@ -313,9 +342,15 @@ void setup()
     logger.printfln("Initialization done");
 
     boot_stage = BootStage::LOOP;
+#if TESLA_BLE_PSRAM_POLICY_DIAGNOSTIC || TESLA_BLE_MANUAL_WEB_BENCH
+    r13_psram_boot(true);
+#endif
 }
 
 void loop() {
+#if TESLA_BLE_PSRAM_POLICY_DIAGNOSTIC
+    r13_psram_loop();
+#endif
 #if !MODULE_IO_SCHEDULER_AVAILABLE()
     tf_hal_tick(&hal, 0);
 #endif

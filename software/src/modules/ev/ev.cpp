@@ -94,7 +94,7 @@ void Ev::pre_setup()
             0, EV_MAX_EVS,
             Config::type_id<Config::ConfObject>())
         }
-    }), [](Config &update, ConfigSource source) -> String {
+    }), [this](Config &update, ConfigSource source) -> String {
         Config *evs = static_cast<Config *>(update.get("evs"));
         size_t count = evs->count();
 
@@ -131,6 +131,7 @@ void Ev::pre_setup()
 #endif
         }
 
+        if (source != ConfigSource::File) { live_revision.fetch_or(1); }
         return "";
     }};
 
@@ -246,6 +247,7 @@ void Ev::register_events()
 
 void Ev::on_ev_connected(const uint8_t mac[EV_MAC_ADDRESS_LENGTH], bool injected)
 {
+    live_revision.fetch_or(1); // Invalidate worker admission before any transition.
     if (!ev_advance_session(session_generation, session_generation_exhausted, active_ev_index, active_ev_mac)) {
         on_ev_disconnected(); // Clear API/session; never profile-match or authenticate this SLAC identity.
         return;
@@ -295,6 +297,7 @@ void Ev::on_ev_connected(const uint8_t mac[EV_MAC_ADDRESS_LENGTH], bool injected
     state.get("soc")->updateFloat(session.soc);
     state.get("capacity")->updateFloat(session.capacity);
     state.get("charging_efficiency")->updateFloat(session.charging_efficiency);
+    publish_live_identity();
 
     // If autocharge is enabled, an EV that identified itself via SLAC (or was
     // injected) acts as an authentication source.
@@ -316,9 +319,11 @@ void Ev::on_ev_connected(const uint8_t mac[EV_MAC_ADDRESS_LENGTH], bool injected
 
 void Ev::on_ev_disconnected()
 {
+    live_revision.fetch_or(1);
     ev_advance_session(session_generation, session_generation_exhausted, active_ev_index, active_ev_mac);
     active_ev_index = -1;
     active_ev_mac = 0;
+    publish_live_identity();
     clear_session();
 
     // Update API state
@@ -365,6 +370,20 @@ int Ev::find_matching_ev_index(const uint8_t mac[EV_MAC_ADDRESS_LENGTH])
     }
 
     return -1;
+}
+
+uint64_t Ev::get_profile_mac(int index) const
+{
+    const auto evs = config.get("evs");
+    if (index < 0 || static_cast<size_t>(index) >= evs->count()) { return 0; }
+    uint8_t mac[6]{}, mask[6]{};
+    if (!parse_mac(evs->get(index)->get("mac")->asString().c_str(), mac, mask)) { return 0; }
+    uint64_t value = 0;
+    for (unsigned i = 0; i < 6; ++i) {
+        if (mask[i] != 0xFF) { return 0; }
+        value = (value << 8) | mac[i];
+    }
+    return value;
 }
 
 int16_t Ev::get_user_id(const uint8_t mac[EV_MAC_ADDRESS_LENGTH])

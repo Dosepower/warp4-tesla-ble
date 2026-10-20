@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Native execution of the diagnostic SDK boundary (not a heap simulator)."""
 from pathlib import Path
+import os
 import subprocess
 import tempfile
 import unittest
@@ -108,6 +109,8 @@ class IramDiagnosticsTests(unittest.TestCase):
                        str(MODULE / "tesla_ble_iram_diagnostics.cpp"), "-o", str(temp / "test")]
             if enabled:
                 command.insert(1, "-DTESLA_BLE_IRAM_DIAGNOSTICS=1")
+            if os.environ.get('TESLA_BLE_SMOKE_SANITIZE') == '1':
+                command[1:1] = ['-fsanitize=address,undefined', '-fno-omit-frame-pointer', '-g', '-no-pie']
             result = subprocess.run(command, capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
             result = subprocess.run([str(temp / "test")], capture_output=True, text=True)
@@ -119,13 +122,18 @@ class IramDiagnosticsTests(unittest.TestCase):
     def test_disabled_build_needs_no_sdk_heap_serial_or_bluetooth_symbols(self):
         self.compile_run(False)
 
-    def test_async_status_and_disabled_boot_checkpoints_are_bound(self):
+    def test_async_status_and_enabled_boot_checkpoints_are_bound(self):
         main = (MODULE / "tesla_vehicle.cpp").read_text()
         setup = main.split("void TeslaVehicle::setup()", 1)[1].split("void TeslaVehicle::register_urls()", 1)[0]
-        self.assertIn('tesla_ble_iram_snapshot("module.setup", "boot")', setup)
-        self.assertLess(setup.index('tesla_ble_iram_snapshot'), setup.index('if (config.get("enable")->asBool())'))
+        self.assertIn('if (bluetooth_boot_enabled) {\n#if TESLA_BLE_R13_MASTER_BENCH\n        tesla_ble_iram_snapshot("module.setup", "boot");', setup)
+        self.assertLess(setup.index('tesla_ble_iram_snapshot'), setup.index('master_bench.start()'))
+        self.assertIn('bluetooth_boot_enabled = bluetooth_supported() && bluetooth_commit_ok && desired;', setup)
         gatt = (MODULE / "tesla_ble_gatt.cpp").read_text()
         self.assertIn('tesla_ble_iram_snapshot("gatt.app_register", "event", param->reg.status, true)', gatt)
+        # Master and production now share the direct-IDF lifecycle. Keep the
+        # async diagnostic contract on the real callback, not the empty shim.
+        master = (MODULE / "bluetooth_lifecycle.cpp").read_text()
+        self.assertIn('tesla_ble_iram_snapshot("master.gatt_register", "event", param->reg.status, true)', master)
         self.assertIn('tesla_ble_iram_snapshot("gatt.open", "event", param->open.status, true)', gatt)
 
     def test_minimal_variant_is_separate_and_retains_client_and_task_stack_sizes(self):

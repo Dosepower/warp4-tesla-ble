@@ -1,8 +1,8 @@
 #include "tesla_ble_bench_pairing.h"
-#if defined(TESLA_BLE_BENCH_ONLY) && TESLA_BLE_BENCH_ONLY && defined(TESLA_BLE_IRAM_DIAGNOSTICS) && TESLA_BLE_IRAM_DIAGNOSTICS
+#if defined(TESLA_BLE_BENCH_ONLY) && TESLA_BLE_BENCH_ONLY && defined(TESLA_BLE_IRAM_DIAGNOSTICS) && TESLA_BLE_IRAM_DIAGNOSTICS && (!defined(TESLA_BLE_R13_MASTER_BENCH) || !TESLA_BLE_R13_MASTER_BENCH)
 #include "tesla_ble_validation.h"
 #include "tesla_ble_bench_record.h"
-#include <mbedtls/sha1.h>
+#include "tesla_ble_identifier.h"
 #include <mbedtls/md.h>
 #include <mbedtls/platform_util.h>
 #include <cstdio>
@@ -25,14 +25,7 @@ struct LocalRehearsalWorkspace {
 }
 bool BenchPairing::vehicle_name(const char *value, char (&name)[19])
 {
-    name[0]=0;
-    if (!tesla_ble_valid_vin(value)) { return false; }
-    uint8_t digest[20];
-    if (mbedtls_sha1(reinterpret_cast<const uint8_t *>(value),17,digest)) { return false; }
-    name[0]='S';
-    for (unsigned i=0;i<8;++i) { snprintf(name+1+2*i,3,"%02x",digest[i]); }
-    name[17]='C'; name[18]=0;
-    return true;
+    return tesla_ble_vehicle_name(value, name);
 }
 bool BenchPairing::bind(const char *value,const char *name,const uint8_t *addr,uint8_t type,bool connectable)
 {

@@ -4,6 +4,7 @@
 #define TESLA_BLE_IRAM_DIAGNOSTICS 1
 #include "../../../src/modules/tesla_vehicle/tesla_vehicle.cpp"
 #include "../../../src/modules/tesla_vehicle/tesla_ble_gatt.cpp"
+#include "../host/bluetooth_driver.h"
 #include <vector>
 #include <string>
 
@@ -20,28 +21,29 @@ struct TeslaBleModuleTest {
         TeslaVehicle module;
         module.pre_setup();
         module.setup();
-        assert(module.initialized && !module.runtime_owner.get());
-        assert(!module.start_attempted && queues_live == 0 && queue_creates == 0);
+        assert(module.initialized && !module.tesla);
+        assert(queues_live == 0 && queue_creates == 0);
         assert(task_launches == 0 && ble_init_calls == 0 && LittleFS.files.empty());
-        assert(snapshots.size() == 1 && snapshots[0].stage == "module.setup" &&
-               snapshots[0].phase == "boot" && !snapshots[0].rc_valid);
+        assert(snapshots.empty()); // OFF never enters the heap/ROM snapshot.
         module.loop();
-        assert(!module.runtime_owner.get() && queues_live == 0 && task_launches == 0 && ble_init_calls == 0);
-        assert(snapshots.size() == 1);
+        assert(!module.tesla && queues_live == 0 && task_launches == 0 && ble_init_calls == 0);
+        assert(snapshots.empty());
 
         // No protocol/worker execution needed to check asynchronous status
         // observation and preservation of the existing callback admission gates.
-        module.config.get("enable")->updateBool(true);
+        assert(module.prepare_tesla());
+        HostBluetoothDriver driver(module.bluetooth, TeslaVehicle::gatt_callback);
+        module.tesla->config.get("enable")->updateBool(true);
         module.bluetooth_boot_enabled = true;
-        module.config.get("vin")->updateString("5YJ3E1EA7KF000001");
-        module.config.get("ble_address")->updateString("01:02:03:04:05:06");
+        module.tesla->config.get("vin")->updateString("5YJ3E1EA7KF000001");
+        module.tesla->config.get("ble_address")->updateString("01:02:03:04:05:06");
         assert(module.start_runtime());
-        auto *r = module.runtime_owner.get();
+        auto *r = module.tesla->runtime_owner.get();
         TeslaVehicle::gatt_owner.store(&module);
         esp_ble_gattc_cb_param_t param{};
         param.reg.app_id = 0x1234;
         TeslaVehicle::gatt_callback(ESP_GATTC_REG_EVT, 3, &param);
-        assert(snapshots.size() == 1);
+        assert(snapshots.empty());
         param.reg.app_id = TESLA_GATT_APP;
         param.reg.status = 133;
         TeslaVehicle::gatt_callback(ESP_GATTC_REG_EVT, 3, &param);
