@@ -133,7 +133,7 @@ static void api_case(const std::string &mode)
             fail_ram = IRAM;
             fail_bytes = sizeof(StateRegistration);
         } else if (mode == "commands") {
-            fail_ram = IRAM;
+            fail_ram = PSRAM;
             fail_bytes = 164 * sizeof(CommandRegistration);
         } else if (mode == "responses") {
             fail_ram = DRAM;
@@ -141,7 +141,7 @@ static void api_case(const std::string &mode)
         }
         api.register_events();
         assert(allocation_calls == 3);
-        assert((selected_rams == std::vector<RAM>{IRAM, IRAM, DRAM}));
+        assert((selected_rams == std::vector<RAM>{IRAM, PSRAM, DRAM}));
         assert(requested_bytes[1] == 164 * sizeof(CommandRegistration));
         assert(api.states.size() == 1 && api.commands.size() == 164 && api.responses.size() == 1);
         if (mode == "success") {

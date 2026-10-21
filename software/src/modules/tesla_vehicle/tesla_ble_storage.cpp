@@ -7,6 +7,7 @@
 #include <cstring>
 #include <cerrno>
 #include <cstdio>
+#include <cstdlib>
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -287,9 +288,15 @@ bool TeslaBleStorageAdapter::remove_key(const char *key)
 
 TeslaBleStorageAdapter::KeyPresence TeslaBleStorageAdapter::private_key_presence()
 {
-    uint8_t key[4096]{};
+    // Called by profile validation on the 8 KiB Arduino loopTask. Keep this
+    // per-call scratch off that stack: load_into/open can descend through
+    // LittleFS, encrypted flash and FreeRTOS locking before an interrupt frame.
+    // Allocation failure is indeterminate, never evidence of an absent identity.
+    constexpr size_t capacity = 4096;
+    auto *key = static_cast<uint8_t *>(std::calloc(capacity, sizeof(uint8_t)));
+    if (!key) { return KeyPresence::Unknown; }
     size_t size = 0;
-    const auto loaded = load_into("private_key", key, sizeof(key), size);
+    const auto loaded = load_into("private_key", key, capacity, size);
     KeyPresence presence = KeyPresence::Unknown;
     if (loaded == LoadResult::Absent) {
         // No committed identity: orphaned session/binding files are not usable
@@ -309,8 +316,8 @@ TeslaBleStorageAdapter::KeyPresence TeslaBleStorageAdapter::private_key_presence
     }
     if (loaded == LoadResult::Loaded &&
         tesla_ble_valid_private_key(std::string_view(reinterpret_cast<const char *>(key), size))) { presence = KeyPresence::Present; }
-    volatile uint8_t *wipe = key;
-    for (size_t i = 0; i < sizeof(key); ++i) { wipe[i] = 0; }
+    mbedtls_platform_zeroize(key, capacity);
+    std::free(key);
     return presence;
 }
 

@@ -46,6 +46,48 @@ class Elf:
                 return self.raw[at:at+size]
         raise ValueError('ELF address is not file-backed')
 
+def retained_map_ranges(text, sections):
+    """GNU ld retained input ranges checked against allocated ELF output sections.
+
+    Discarded inputs, cross references and debug-only ranges are not evidence.
+    This is a structural presence check, NOT an immutable link-closure proof.
+    """
+    import re
+    if text.count('Linker script and memory map\n') != 1 or 'Memory Configuration\n' not in text:
+        raise ValueError('Missing/ambiguous structural linker map')
+    text=text.split('Linker script and memory map\n',1)[1].split('Cross Reference Table',1)[0]
+    output=None
+    pending=None
+    result=[]
+    for line in text.splitlines():
+        top=re.match(r'^(\.\S+)(?:\s|$)',line)
+        if top:
+            output=top[1] if top[1] in sections else None
+            pending=None
+            continue
+        named=re.fullmatch(r' (\.\S+)(?:\s+(0x[0-9a-fA-F]+)\s+(0x[0-9a-fA-F]+)\s+(.+))?\s*',line)
+        if named:
+            pending=named[1]
+            record=named.groups()[1:] if named[2] else None
+        else:
+            continuation=re.fullmatch(r'\s+(0x[0-9a-fA-F]+)\s+(0x[0-9a-fA-F]+)\s+(.+)',line)
+            record=continuation.groups() if pending and continuation else None
+        if not record:continue
+        address,size,source=record
+        address,size=int(address,16),int(size,16)
+        name=pending
+        pending=None
+        if not output or not size:continue
+        # Only object/archive-member input records, not fills or expressions.
+        if not re.fullmatch(r'.+\.(?:o|obj)|.+\.a\([^()]+\)',source):continue
+        sec=sections[output]
+        if not sec['address']<=address or address+size>sec['address']+sec['size']:
+            raise ValueError('Retained map range outside ELF output: '+name)
+        result.append({'section':name,'address':address,'size':size,
+                       'input':source,'output_section':output})
+    return result
+
+
 def report(elf_path,map_path=None,stack_root=None):
     elf=Elf(elf_path)
     sections={name:{'address':s[3],'size':s[5],'type':s[1]}

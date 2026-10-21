@@ -2,14 +2,16 @@
 #include "tesla_vehicle.h"
 #endif
 #include <cstring>
-#if WARP_BLUETOOTH_COMPILED
+#if WARP_BLUETOOTH_COMPILED && !TESLA_BLE_USE_NIMBLE
 #include "tesla_ble_uuid.h"
 #endif
 #include "tesla_ble_iram_diagnostics.h"
 
 std::atomic<TeslaVehicle *> TeslaVehicle::gatt_owner{nullptr};
 
-#if WARP_BLUETOOTH_COMPILED
+#if TESLA_BLE_USE_NIMBLE
+#include "tesla_nimble_gatt.inc"
+#elif WARP_BLUETOOTH_COMPILED
 static constexpr uint16_t TESLA_GATT_APP = 0x5742;
 
 void TeslaVehicle::process_disconnect()
@@ -126,7 +128,8 @@ bool TeslaVehicle::ensure_connected()
         ok = ok && esp_ble_gattc_get_char_by_uuid(interface, connection, service.start_handle, service.end_handle,
                                                 notify_uuid, &notify, &count) == ESP_GATT_OK && count == 1;
         count = 1;
-        ok = ok && (write.properties & ESP_GATT_CHAR_PROP_BIT_WRITE) && (notify.properties & ESP_GATT_CHAR_PROP_BIT_NOTIFY) &&
+        ok = ok && (write.properties & ESP_GATT_CHAR_PROP_BIT_WRITE) &&
+             (notify.properties & (ESP_GATT_CHAR_PROP_BIT_INDICATE | ESP_GATT_CHAR_PROP_BIT_NOTIFY)) &&
              esp_ble_gattc_get_descr_by_char_handle(interface, connection, notify.char_handle, cccd,
                                                     &descriptor, &count) == ESP_GATT_OK && count == 1;
         r->operation.complete(Cache, connection, 0, ok);
@@ -135,7 +138,10 @@ bool TeslaVehicle::ensure_connected()
     if (!gatt_operation(Subscribe, notify.char_handle, [r, &notify]() {
             return esp_ble_gattc_register_for_notify(r->gatt_if.load(), r->remote_address, notify.char_handle) == ESP_OK;
         })) { return false; }
-    uint8_t enable[2] = {1, 0};
+    // Tesla's official transport requests indications (CCCD 0x0002). Prefer
+    // them whenever offered; notify-only peers need CCCD 0x0001. Both arrive
+    // as ESP_GATTC_NOTIFY_EVT, including is_notify=false for indications.
+    uint8_t enable[2] = {static_cast<uint8_t>((notify.properties & ESP_GATT_CHAR_PROP_BIT_INDICATE) ? 2 : 1), 0};
     if (r->stop_requested.load() || !gatt_operation(Descriptor, descriptor.handle, [r, &descriptor, &enable]() {
             return esp_ble_gattc_write_char_descr(r->gatt_if.load(), r->gatt_connection.load(), descriptor.handle,
                                                   2, enable, ESP_GATT_WRITE_TYPE_RSP, ESP_GATT_AUTH_REQ_NONE) == ESP_OK;

@@ -1,4 +1,8 @@
 #include "bluetooth_lifecycle.h"
+#include "bluetooth_memory.h"
+#if TESLA_BLE_USE_NIMBLE
+#include "bluetooth_nimble_lifecycle.inc"
+#else
 #include <new>
 #ifndef TESLA_BLE_MODULE_HOST_TEST
 #include <Arduino.h>
@@ -58,7 +62,9 @@ BluetoothLifecycle::~BluetoothLifecycle() {
 bool BluetoothLifecycle::start(Handler handler) {
 #if WARP_BLUETOOTH_COMPILED
     if (!bluetooth_supported() || context || latched) { return false; }
+    bluetooth_memory::sample(bluetooth_memory::Stage::ContextBefore);
     context.reset(new (std::nothrow) Context);
+    bluetooth_memory::sample(bluetooth_memory::Stage::ContextAfter);
     if (!context) { latched = true; return false; }
     Context *expected = nullptr;
     if (!owner.compare_exchange_strong(expected, context.get())) { latched = true; return false; }
@@ -152,6 +158,7 @@ void BluetoothLifecycle::gap(esp_gap_ble_cb_event_t event,esp_ble_gap_cb_param_t
         }
     }
     // No GATT open, security negotiation, key/protocol or follow-up action.
+    bluetooth_memory::sample(bluetooth_memory::Stage::GapCallback,true,1000);
 }
 bool BluetoothLifecycle::discovery_tick(Context &c) {
     using D=TeslaBleDiscovery;
@@ -186,6 +193,8 @@ void BluetoothLifecycle::gatt(esp_gattc_cb_event_t event, esp_gatt_if_t interfac
         tesla_ble_iram_snapshot("master.gatt_register", "event", param->reg.status, true);
 #endif
     } else if (!c->stop.load() && c->handler) { c->handler(event, interface, param); }
+    // Self-sample after callback work; no c/task pointer used or retained here.
+    bluetooth_memory::sample(bluetooth_memory::Stage::GattCallback,true,1000);
 }
 #endif
 bool BluetoothLifecycle::teardown(Context &c) {
@@ -245,28 +254,35 @@ void BluetoothLifecycle::run(Context &c) {
             esp_bluedroid_get_status() != ESP_BLUEDROID_STATUS_UNINITIALIZED) { return false; }
         esp_bt_controller_config_t config = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
         bool ok = esp_bt_controller_init(&config) == ESP_OK;
+        bluetooth_memory::sample(bluetooth_memory::Stage::ControllerInit,true);
         c.controller_owned = ok;
         ok = ok && r13_psram_ok() && esp_bt_controller_get_status() == ESP_BT_CONTROLLER_STATUS_INITED &&
              esp_bt_controller_enable(ESP_BT_MODE_BLE) == ESP_OK &&
              r13_psram_ok() && esp_bt_controller_get_status() == ESP_BT_CONTROLLER_STATUS_ENABLED;
+        bluetooth_memory::sample(bluetooth_memory::Stage::ControllerEnabled,true);
         if (!ok || c.stop.load()) { return ok; }
         ok = esp_bluedroid_init() == ESP_OK;
+        bluetooth_memory::sample(bluetooth_memory::Stage::HostInit,true);
         c.host_owned = ok;
         ok = ok && r13_psram_ok() && esp_bluedroid_get_status() == ESP_BLUEDROID_STATUS_INITIALIZED &&
              esp_bluedroid_enable() == ESP_OK && r13_psram_ok() && esp_bluedroid_get_status() == ESP_BLUEDROID_STATUS_ENABLED;
+        bluetooth_memory::sample(bluetooth_memory::Stage::HostEnabled,true);
         if (!ok || c.stop.load()) { return ok; }
         ok = esp_ble_gattc_register_callback(gatt) == ESP_OK && r13_psram_ok() && esp_ble_gattc_app_register(0x5231) == ESP_OK && r13_psram_ok();
         const auto begin = millis();
         while (ok && !c.stop.load() && c.registered.load() == 0 && millis() - begin < 5000) { vTaskDelay(pdMS_TO_TICKS(5)); }
+        bluetooth_memory::sample(bluetooth_memory::Stage::GattReady,true);
         return ok && r13_psram_ok() && (c.stop.load() || c.registered.load() == 1);
     };
     bool ok = initialize();
     if (ok && !c.stop.load()) {
+        bluetooth_memory::sample(bluetooth_memory::Stage::BtActive,true);
         c.phase.store(Context::Active);
 #if TESLA_BLE_R13_MASTER_BENCH || TESLA_BLE_PSRAM_POLICY_DIAGNOSTIC
         c.sample("master.active");
 #endif
         while (!c.stop.load()) {
+            bluetooth_memory::sample(bluetooth_memory::Stage::BtActive,true,1000);
             if (!r13_psram_ok() || esp_bt_controller_get_status() != ESP_BT_CONTROLLER_STATUS_ENABLED ||
                 esp_bluedroid_get_status() != ESP_BLUEDROID_STATUS_ENABLED) { ok = false; break; }
 #if TESLA_BLE_MANUAL_VEHICLE_UI
@@ -284,7 +300,9 @@ void BluetoothLifecycle::run(Context &c) {
     c.sample("master.teardown.before");
 #endif
     // A foreign pre-existing stack is never touched, and never presented as ours.
+    bluetooth_memory::sample(bluetooth_memory::Stage::BtStopBefore,true);
     const bool clean = teardown(c);
+    bluetooth_memory::sample(bluetooth_memory::Stage::BtStopAfter,true);
 #if TESLA_BLE_R13_MASTER_BENCH || TESLA_BLE_PSRAM_POLICY_DIAGNOSTIC
     c.sample("master.teardown.after");
 #endif
@@ -301,3 +319,4 @@ uint32_t BluetoothLifecycle::stack_min() const { return context ? context->water
 int BluetoothLifecycle::controller() const { return esp_bt_controller_get_status(); }
 int BluetoothLifecycle::host() const { return esp_bluedroid_get_status(); }
 #endif
+#endif // !TESLA_BLE_USE_NIMBLE

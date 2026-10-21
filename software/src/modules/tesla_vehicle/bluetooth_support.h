@@ -1,6 +1,9 @@
 #pragma once
 #include "bluetooth_littlefs_binding.h"
 #include "r13_psram_policy.h"
+#ifndef TESLA_BLE_USE_NIMBLE
+#define TESLA_BLE_USE_NIMBLE 0
+#endif
 #ifndef TESLA_BLE_R13_MASTER_BENCH
 #define TESLA_BLE_R13_MASTER_BENCH 0
 #endif
@@ -13,7 +16,12 @@
 #ifndef TESLA_BLE_MODULE_HOST_TEST
 #include <sdkconfig.h>
 #include <soc/soc_caps.h>
-#if defined(SOC_BT_SUPPORTED) && SOC_BT_SUPPORTED && defined(CONFIG_BT_ENABLED) && CONFIG_BT_ENABLED && defined(CONFIG_BLUEDROID_ENABLED) && CONFIG_BLUEDROID_ENABLED && defined(CONFIG_BT_BLE_ENABLED) && CONFIG_BT_BLE_ENABLED
+#if TESLA_BLE_USE_NIMBLE
+#if !defined(CONFIG_BT_NIMBLE_ENABLED) || !CONFIG_BT_NIMBLE_ENABLED || defined(CONFIG_BT_BLUEDROID_ENABLED)
+#error "NimBLE profile requires native NimBLE-only SDK"
+#endif
+#define WARP_BLUETOOTH_COMPILED 1
+#elif defined(SOC_BT_SUPPORTED) && SOC_BT_SUPPORTED && defined(CONFIG_BT_ENABLED) && CONFIG_BT_ENABLED && defined(CONFIG_BLUEDROID_ENABLED) && CONFIG_BLUEDROID_ENABLED && defined(CONFIG_BT_BLE_ENABLED) && CONFIG_BT_BLE_ENABLED
 #define WARP_BLUETOOTH_COMPILED 1
 #else
 #define WARP_BLUETOOTH_COMPILED 0

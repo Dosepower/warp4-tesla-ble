@@ -20,10 +20,15 @@ class Privacy(unittest.TestCase):
   self.assertNotRegex(gap,r'esp_ble_gattc_|esp_fill_random|request_soc|pair\(')
   self.assertEqual(text.count('esp_ble_gap_start_scanning('),1)
  def test_no_frontend_background_scan(self):
-  text=(R/'software/web/src/modules/tesla_vehicle/main.tsx').read_text()
+  text=(R/'software/web/src_tfpp/modules/tesla_vehicle/guided_vehicle.tsx').read_text()
   self.assertEqual(text.count('API.call("tesla_vehicle/scan"'),1)
-  self.assertNotIn('setInterval',text);self.assertNotIn('setTimeout',text)
+  self.assertNotIn('setInterval',text)
+  # The sole timeout waits for cached worker ACK after explicit confirmation;
+  # it does not initiate scans, polls or network requests.
+  self.assertEqual(text.count('setTimeout(resolve, 50)'),1)
   self.assertNotIn('localStorage',text);self.assertNotIn('sessionStorage',text)
-  constructor=text.split('    constructor() {')[2].split('    private commandAllowed')[0]
+  parts=re.split(r'\n    (?:override )?componentWillUnmount\(',text.split('    constructor() {')[1])
+  self.assertEqual(len(parts),2,'Constructor boundary must be the actual lifecycle override')
+  constructor=parts[0]
   self.assertNotIn('this.search(',constructor);self.assertNotIn('API.call',constructor)
 if __name__=='__main__':unittest.main(verbosity=2)

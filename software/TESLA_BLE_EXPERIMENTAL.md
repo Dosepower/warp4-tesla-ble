@@ -56,7 +56,10 @@ fragmentation, stack-watermark, interrupt-latency, or RF-coexistence evidence.
 
 ## Required before installation or release
 
-- exact official WARP4 SDK provenance and equivalence;
+- qualified SDK sources, patches, configuration, tools, and build derivation;
+  a separately source-derived Secure+BLE candidate need not be byte-identical
+  to the manufacturer's precompiled SDK, but its differences must be explicit
+  and its WARP4 compatibility independently reviewed;
 - official signing, secure-boot, partition, OTA, and recovery acceptance;
 - runtime heap, largest-block, PSRAM, and task stack measurements;
 - WLAN/BLE/charging coexistence measurements on a real WARP4;

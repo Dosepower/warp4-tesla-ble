@@ -38,7 +38,7 @@ fi
 flags=(-std=c++17 -Wall -Wextra -Werror -fno-exceptions -fno-rtti -I"$root/software/tests/tesla_vehicle/cleanroom/target_ports"
        -I"$root/software/tests/tesla_vehicle/cleanroom")
 suffix=""
-if [[ "$name" == test_faults || "$name" == test_lifecycle_faults || "$name" == test_vehicle_faults || "$name" == test_astra_faults ]]; then
+if [[ "$name" == test_faults || "$name" == test_lifecycle_faults || "$name" == test_vehicle_faults || "$name" == test_astra_faults || "$name" == test_warp_presence_scratch ]]; then
     flags+=(-Wl,--wrap=calloc,--wrap=free)
 fi
 if [[ "${2:-}" == sanitize ]]; then
@@ -46,7 +46,7 @@ if [[ "${2:-}" == sanitize ]]; then
     suffix="-sanitized"
 fi
 sources=()
-if [[ "$name" == test_warp_adapters || "$name" == test_warp_storage_faults || "$name" == test_warp_littlefs ]]; then
+if [[ "$name" == test_warp_adapters || "$name" == test_warp_storage_faults || "$name" == test_warp_littlefs || "$name" == test_warp_presence_scratch ]]; then
     sources+=("$root/software/src/modules/tesla_vehicle/tesla_ble_storage.cpp")
     flags+=("-DTESLA_CLEAN_STORAGE_PREFIX=\"$out/storage\"" -pthread)
 fi

@@ -29,6 +29,9 @@ FrontendStatusComponent = namedtuple('FrontendStatusComponent', 'module componen
 
 def check_call(*args, **kwargs):
     try:
+        if env.GetProjectOption("custom_warp4_ota_only", "false") == "true":
+            from installer_generators import run
+            return run(*args, environment=env["PIOENV"], guarded=env["WARP4_INSTALLER_VERIFIED"], **kwargs)
         subprocess.check_call(*args, **kwargs)
     except Exception as e:
         print(f'Error: Command failed: {e}')
@@ -735,7 +738,49 @@ def preprocess_web(frontend_modules_under):
                     src_tfpp_path.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(src_path, src_tfpp_path)
 
+        # Bind the selected module set, not git's tracked/ignored file list.
+        # build_web may also be called directly, outside main's regeneration.
+        pathlib.Path('src_tfpp/.tfpp-modules.json').write_text(json.dumps(sorted(frontend_modules_under)), encoding='utf-8')
+
+def verify_preprocessed_web():
+    """Compare actual bundler inputs with freshly evaluated production tfpp.
+
+    A digest of authored source alone cannot detect stale/manual src_tfpp.
+    Re-evaluate directives/includes and require the complete selected tree.
+    This is a guard, never a repair of generated files or embedded bytes.
+    """
+    with tfutil.ChangedDirectory('web'):
+        receipt = pathlib.Path('src_tfpp/.tfpp-modules.json')
+        try:
+            modules = json.loads(receipt.read_text(encoding='utf-8'))
+        except (OSError, ValueError) as exc:
+            raise ValueError('STALE_PREPROCESSED_WEB: run the full production generation hook') from exc
+        if not isinstance(modules, list) or not all(isinstance(m, str) for m in modules):
+            raise ValueError('STALE_PREPROCESSED_WEB: invalid module receipt')
+        expected_paths = {receipt}
+        for root, dirs, files in os.walk('src', followlinks=True):
+            for name in files:
+                src_path = pathlib.Path(root) / name
+                if src_path.parts[:2] == ('src', 'modules') and src_path.parts[2] not in modules:
+                    continue
+                output = pathlib.Path('src_tfpp', *src_path.parts[1:])
+                expected_paths.add(output)
+                if src_path.suffix in ['.ts', '.tsx']:
+                    with src_path.open(encoding='utf-8') as f:
+                        expected = ''.join(tfpp_lines(src_path, f.readlines())).encode('utf-8')
+                    # Match text-mode output on Windows as well.
+                    if os.linesep != '\n':
+                        expected = expected.replace(b'\n', os.linesep.encode())
+                else:
+                    expected = src_path.read_bytes()
+                if not output.is_file() or output.read_bytes() != expected:
+                    raise ValueError(f'STALE_PREPROCESSED_WEB: {output} differs from production preprocessing of {src_path}')
+        actual_paths = {p for p in pathlib.Path('src_tfpp').rglob('*') if p.is_file()}
+        if actual_paths != expected_paths:
+            raise ValueError(f'STALE_PREPROCESSED_WEB: unexpected generated files {sorted(str(p) for p in actual_paths - expected_paths)}')
+
 def build_web(js_source_map, css_source_map, no_minify):
+    verify_preprocessed_web()
     with tfutil.ChangedDirectory(pathlib.Path('web', 'src_tfpp')):
         js_analyze = False
 
@@ -782,6 +827,9 @@ def build_web(js_source_map, css_source_map, no_minify):
             '--build',
             'tsconfig.json'
         ], shell=sys.platform == 'win32')
+        # tsc --build emits bookkeeping beside its config even with noEmit.
+        # Keep compiler outputs out of the pure preprocessed input tree.
+        pathlib.Path('tsconfig.tsbuildinfo').unlink(missing_ok=True)
 
         print('esbuild...')
         esbuild_args = npx_args + [
@@ -971,11 +1019,21 @@ def handle_build_cache():
         env.CacheDir(build_cache_dir)
 
 def main():
+    installer_ota_only = env.GetProjectOption("custom_warp4_ota_only", "false") == "true"
+    if installer_ota_only and not env.get("WARP4_INSTALLER_VERIFIED"):
+        raise ValueError("INSTALLER_GUARD_NOT_VERIFIED")
+    if installer_ota_only:
+        from installer_policy import reject_private_inputs, validate_effective
+        reject_private_inputs(env.subst("$PROJECT_DIR"))
+        if env["WARP4_INSTALLER_VERIFIED"].get("stage_phase") == "build":
+            from installer_generators import consume
+            consume(env)
+            return
     if env.IsCleanTarget():
         remove_all_generated_files()
         return
 
-    build = len(COMMAND_LINE_TARGETS) == 0 or any(x in COMMAND_LINE_TARGETS for x in ['upload', 'erase_upload', 'coredump', 'metrics', 'size'])
+    build = len(COMMAND_LINE_TARGETS) == 0 or any(x in COMMAND_LINE_TARGETS for x in ['upload', 'erase_upload', 'coredump', 'metrics', 'size', 'tesla-review'])
 
     if 'compiledb' in COMMAND_LINE_TARGETS:
         return
@@ -991,7 +1049,8 @@ def main():
     remove_orphaned_enum_files()
     remove_orphaned_union_files()
 
-    check_call(['uv', 'run', 'update_packages.py'])
+    if not installer_ota_only:
+        check_call(['uv', 'run', 'update_packages.py'])
 
     build_flags = env.GetProjectOption("build_flags")
     product_id = env.GetProjectOption("custom_product_id", None)
@@ -1092,13 +1151,14 @@ def main():
     web_only = env.GetProjectOption("custom_web_only") == "true"
     prepare_only = "-DPREPARE_ONLY" in build_flags
     signature_preset = env.GetProjectOption("custom_signature_preset")
+    signature_verify_preset = env.GetProjectOption("custom_signature_verify_preset", None)
     split_esptool_ota = env.GetProjectOption("custom_split_esptool_ota") == "true"
     secure_boot = env.GetProjectOption("custom_secure_boot", "").replace('"', '')
     provisioning = env.GetProjectOption("custom_provisioning") == "true"
     monitor_speed = env.GetProjectOption("monitor_speed")
     nightly = "-DNIGHTLY" in build_flags
 
-    if build:
+    if build and not installer_ota_only:
         symlinks_to_remove = [
             f'build/{product_id}_firmware_latest.elf',
             f'build/{product_id}_firmware_latest_merged.bin',
@@ -1130,12 +1190,22 @@ def main():
                 except FileNotFoundError:
                     pass
 
-    is_release = len(subprocess.run(["git", "tag", "--contains", "HEAD"], check=True, capture_output=True).stdout) > 0
-    is_dirty = len(subprocess.run(["git", "diff", "HEAD"], check=True, capture_output=True).stdout) > 0
-    dirty_suffix = ""
-    git_url = subprocess.run(["git", "config", "--get", "remote.origin.url"], check=True, capture_output=True).stdout.decode("utf-8").strip()
-    git_commit_id = subprocess.run(["git", "rev-parse", "--short=15", "HEAD"], check=True, capture_output=True).stdout.decode("utf-8").strip()
-    branch_name = subprocess.run(["git", "branch", "--show-current"], check=True, capture_output=True).stdout.decode("utf-8").strip()
+    if installer_ota_only:
+        from installer_generators import source_metadata
+        source = source_metadata(env["PIOENV"], env["WARP4_INSTALLER_VERIFIED"])
+        is_release = source["is_release"]
+        is_dirty = source["is_dirty"]
+        git_url = source["git_url"]
+        git_commit_id = source["git_commit_id"]
+        branch_name = source["branch_name"]
+        dirty_suffix = ""
+    else:
+        is_release = len(subprocess.run(["git", "tag", "--contains", "HEAD"], check=True, capture_output=True).stdout) > 0
+        is_dirty = len(subprocess.run(["git", "diff", "HEAD"], check=True, capture_output=True).stdout) > 0
+        dirty_suffix = ""
+        git_url = subprocess.run(["git", "config", "--get", "remote.origin.url"], check=True, capture_output=True).stdout.decode("utf-8").strip()
+        git_commit_id = subprocess.run(["git", "rev-parse", "--short=15", "HEAD"], check=True, capture_output=True).stdout.decode("utf-8").strip()
+        branch_name = subprocess.run(["git", "branch", "--show-current"], check=True, capture_output=True).stdout.decode("utf-8").strip()
 
     if is_dirty or not is_release:
         if branch_name == "master":
@@ -1225,6 +1295,8 @@ def main():
     if 'w_error' in custom_wifi and custom_wifi['w_error']:
         build_flags.append('-Werror')
 
+    if installer_ota_only:
+        validate_effective({"BUILD_FLAGS": build_flags}, not_for_distribution)
     env.Replace(BUILD_FLAGS=build_flags)
 
     if '-m32' in build_flags:
@@ -1293,7 +1365,7 @@ def main():
     build_lines.append('const char *build_environment_name() {{ return "{}"; }}'.format(env['PIOENV']))
 
     main_branch_info = ""
-    if branch_name not in ["master", "main"]:
+    if not installer_ota_only and branch_name not in ["master", "main"]:
         try:
             # This fails if we are on a detached HEAD or an unpushed branch.
             main_branch_name = subprocess.run(["git", "symbolic-ref", "refs/remotes/origin/HEAD"], check=True, capture_output=True).stdout.decode("utf-8").strip().split('/')[-1]
@@ -1774,6 +1846,7 @@ def main():
         'build_dir': env.subst('$BUILD_DIR'),
         'firmware_basename': firmware_basename,
         'signature_preset': signature_preset,
+        **({'signature_verify_preset': signature_verify_preset} if signature_verify_preset is not None else {}),
         'split_esptool_ota': split_esptool_ota,
         'secure_boot': secure_boot,
         'frontend_modules': [frontend_module.under for frontend_module in frontend_modules],
@@ -1784,6 +1857,9 @@ def main():
         'version': version,
         'build_timestamp': build_timestamp,
     }, separators=(',', ':'))
+
+    if installer_ota_only:
+        metadata = json.dumps(json.loads(metadata) | {"installer_public_key_sha256": env["WARP4_INSTALLER_VERIFIED"]["public_key_sha256"]}, separators=(",", ":"))
 
     with open(os.path.join(env.subst('$BUILD_DIR'), 'metadata.json'), 'w', encoding='utf-8') as f:
         f.write(metadata)
@@ -2153,6 +2229,7 @@ def main():
     util.log('Preprocessing web interface')
 
     preprocess_web([x.under for x in frontend_modules])
+    verify_preprocessed_web()
 
     # Check translation completeness
     util.log('Checking translation completeness')
@@ -2189,7 +2266,13 @@ def main():
     node_modules_needs_update, node_modules_reason, node_modules_digest = util.check_digest(node_modules_src_paths, node_modules_src_datas, 'web', 'node_modules', env=env)
     node_modules_digest_paths = util.get_digest_paths('web', 'node_modules', env=env)
 
-    if not node_modules_needs_update and os.path.exists('web/node_modules/tinkerforge.marker'):
+    if installer_ota_only:
+        from installer_generators import verify_frozen_web
+        verify_frozen_web(env["PIOENV"], env["WARP4_INSTALLER_VERIFIED"])
+        # Fresh private digest bookkeeping authenticates frozen dependency bytes;
+        # never npm ci/nodeenv/uv provisioning inside the installer namespace.
+        util.store_digest(node_modules_digest, 'web', 'node_modules', env=env)
+    elif not node_modules_needs_update and os.path.exists('web/node_modules/tinkerforge.marker'):
         util.log('Web interface dependencies are up-to-date')
     else:
         if not os.path.exists('web/node_modules/tinkerforge.marker'):
@@ -2297,6 +2380,11 @@ def main():
 
     # FIXME: Scons runs this script using exec(), resulting in __file__ being not available
     #index_html_src_paths.append(__file__)
+    # The generator and the exact tree esbuild resolves are cache inputs too.
+    index_html_src_paths.append('pio_hooks.py')
+    for root, dirs, files in sorted(os.walk('web/src_tfpp', followlinks=True)):
+        for filename in sorted(files):
+            index_html_src_paths.append(os.path.join(root, filename))
 
     index_html_needs_update, index_html_reason, index_html_digest = util.check_digest(index_html_src_paths, index_html_src_datas, 'src', 'index_html', env=env)
 
@@ -2344,6 +2432,16 @@ def main():
 
         util.embed_data(util.gzip_compress(html_bytes), 'src', 'index_html', 'char', 'size_t')
         util.store_digest(index_html_digest, 'src', 'index_html', env=env)
+
+    if installer_ota_only:
+        approved = env["WARP4_INSTALLER_VERIFIED"]["effective_flags"][env["PIOENV"]]
+        if env["WARP4_INSTALLER_VERIFIED"].get("stage_phase") == "generate":
+            approved = {k: (v if k == "BUILD_FLAGS" else []) for k, v in approved.items()}
+        validate_effective(env, not_for_distribution, approved=approved)
+        from build_warp4_installer import verify_web_outputs
+        if env["WARP4_INSTALLER_VERIFIED"].get("stage_phase") != "generate":
+            verify_web_outputs(env.subst("$PROJECT_DIR"), env["WARP4_INSTALLER_VERIFIED"]["web_outputs"])
+        env["WARP4_INSTALLER_NOT_FOR_DISTRIBUTION"] = not_for_distribution
 
     if web_only:
         print('Stopping build after web')

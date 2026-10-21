@@ -175,20 +175,23 @@ using TaskHandle_t = HostTask *;
 inline std::vector<std::unique_ptr<HostTask>> tasks;
 inline std::string fail_task;
 inline unsigned task_launches = 0;
-inline int xTaskCreatePinnedToCore(void (*entry)(void *), const char *name, int stack_bytes, void *context, int, TaskHandle_t *out, int) {
+inline int host_created_priority=0;
+inline std::function<void(TaskHandle_t)> host_task_created;
+inline int xTaskCreatePinnedToCore(void (*entry)(void *), const char *name, int stack_bytes, void *context, int priority, TaskHandle_t *out, int) {
     ++task_launches;
     if (fail_task == name) { return 0; }
-    tasks.emplace_back(new HostTask{entry, context, false, false, name, stack_bytes}); *out = tasks.back().get(); return pdPASS;
+    tasks.emplace_back(new HostTask{entry, context, false, false, name, stack_bytes}); *out = tasks.back().get();host_created_priority=priority; if(host_task_created)host_task_created(*out); return pdPASS;
 }
 // OS-only escape after the real production ACK/completion; no C++ objects
 // are abandoned between this boundary and the task entry. Production stays
 // compiled with -fno-exceptions, matching the Xtensa target.
 inline thread_local std::jmp_buf parked_task;
 inline thread_local HostTask *running_task = nullptr;
-inline bool async_bluetooth = false; // Test driver uses a real independently scheduled owned worker.
+inline bool async_bluetooth = false;
+inline std::atomic<unsigned> host_bt_yields{0}; // Test driver uses a real independently scheduled owned worker.
 inline void vTaskSuspend(void *) { std::longjmp(parked_task, 1); }
 inline void run_task(TaskHandle_t task) { running_task = task; if (setjmp(parked_task) == 0) { task->entry(task->context); } task->parked = true; running_task = nullptr; }
-inline void vTaskDelete(TaskHandle_t task) { assert(task && (task->parked || (async_bluetooth && task->name == "bluetooth")) && !task->deleted); task->deleted = true; }
+inline void vTaskDelete(TaskHandle_t task) { assert(task && (task->parked || (async_bluetooth && (task->name == "bluetooth" || task->name == "nimble_host"))) && !task->deleted); task->deleted = true; }
 #if defined(TESLA_BLE_R13_MASTER_BENCH) && TESLA_BLE_R13_MASTER_BENCH
 inline unsigned uxTaskGetStackHighWaterMark(void *) { return 3072; }
 struct HostMasterSerial {
@@ -205,6 +208,7 @@ inline std::function<void()> on_delay;
 inline std::function<void(uint32_t)> on_task_delay;
 inline void vTaskDelay(uint32_t ms) {
     if (async_bluetooth && running_task && running_task->name == "bluetooth") {
+        host_bt_yields.fetch_add(1,std::memory_order_release);
         std::this_thread::sleep_for(std::chrono::microseconds(50)); return;
     }
     clock_ms.fetch_add(ms); auto callback = on_delay; if (callback) { callback(); } if (on_task_delay) { on_task_delay(ms); }
@@ -214,7 +218,12 @@ inline void vTaskDelay(uint32_t ms) {
 using esp_gatt_if_t = uint8_t;
 using esp_ble_addr_type_t = uint8_t;
 constexpr int ESP_OK=0, ESP_GATT_OK=0, ESP_GATT_IF_NONE=255, ESP_UUID_LEN_16=2, ESP_UUID_LEN_128=16;
-constexpr int ESP_GATT_CHAR_PROP_BIT_WRITE=1, ESP_GATT_CHAR_PROP_BIT_NOTIFY=2;
+constexpr int ESP_GATT_CHAR_PROP_BIT_WRITE=0x08, ESP_GATT_CHAR_PROP_BIT_NOTIFY=0x10, ESP_GATT_CHAR_PROP_BIT_INDICATE=0x20;
+inline int host_rx_properties=ESP_GATT_CHAR_PROP_BIT_NOTIFY;
+inline unsigned host_cccd_writes=0, host_cccd_value=0;
+inline std::function<void(uint16_t,uint16_t)> on_descriptor_write;
+inline bool host_single_link_enforced=false;
+inline unsigned host_physical_links=0;
 constexpr int ESP_GATT_WRITE_TYPE_RSP=0, ESP_GATT_AUTH_REQ_NONE=0;
 enum esp_gattc_cb_event_t { ESP_GATTC_REG_EVT, ESP_GATTC_OPEN_EVT, ESP_GATTC_DIS_SRVC_CMPL_EVT,
     ESP_GATTC_REG_FOR_NOTIFY_EVT, ESP_GATTC_WRITE_DESCR_EVT, ESP_GATTC_WRITE_CHAR_EVT,
@@ -227,7 +236,7 @@ struct esp_ble_gattc_cb_param_t {
     struct { int status=0; uint16_t conn_id=0, handle=0; } write;
     struct { int status=0; uint16_t conn_id=0; } close;
     struct { uint16_t conn_id=0; } disconnect;
-    struct { uint16_t conn_id=0, handle=0, value_len=0; uint8_t remote_bda[6]={}; uint8_t *value=nullptr; } notify;
+    struct { uint16_t conn_id=0, handle=0, value_len=0; uint8_t remote_bda[6]={}; uint8_t *value=nullptr; bool is_notify=true; } notify;
 };
 struct esp_bt_uuid_t { uint16_t len=0; union { uint16_t uuid16; uint8_t uuid128[16]; } uuid{}; };
 struct esp_gattc_service_elem_t { uint16_t start_handle=0, end_handle=0; };
@@ -322,6 +331,7 @@ inline int esp_ble_gattc_open(esp_gatt_if_t interface, uint8_t *address, esp_ble
     ++peer_open_calls;
     peer_open_type=type;
     if(!host_gatt_success)return -1;
+    if(host_single_link_enforced) { assert(host_physical_links==0); ++host_physical_links; }
     esp_ble_gattc_cb_param_t p;p.open.conn_id=4;std::memcpy(p.open.remote_bda,address,6);host_gatt_handler(ESP_GATTC_OPEN_EVT,interface,&p);
     p.dis_srvc_cmpl.conn_id=4;host_gatt_handler(ESP_GATTC_DIS_SRVC_CMPL_EVT,interface,&p);return ESP_OK;
 }
@@ -330,16 +340,21 @@ inline int esp_ble_gattc_get_service(esp_gatt_if_t, uint16_t, esp_bt_uuid_t *, e
 }
 inline int esp_ble_gattc_get_char_by_uuid(esp_gatt_if_t, uint16_t, uint16_t, uint16_t, esp_bt_uuid_t id, esp_gattc_char_elem_t *out, uint16_t *count) {
     if(!host_gatt_success)return -1;
-    const bool write=id.uuid.uuid128[12]==0x12;*out={uint16_t(write?10:20),write?ESP_GATT_CHAR_PROP_BIT_WRITE:ESP_GATT_CHAR_PROP_BIT_NOTIFY};*count=1;return ESP_GATT_OK;
+    const bool write=id.uuid.uuid128[12]==0x12;*out={uint16_t(write?10:20),write?ESP_GATT_CHAR_PROP_BIT_WRITE:host_rx_properties};*count=1;return ESP_GATT_OK;
 }
-inline int esp_ble_gattc_get_descr_by_char_handle(esp_gatt_if_t, uint16_t, uint16_t, esp_bt_uuid_t, esp_gattc_descr_elem_t *out, uint16_t *count) {
+inline int esp_ble_gattc_get_descr_by_char_handle(esp_gatt_if_t, uint16_t, uint16_t characteristic, esp_bt_uuid_t uuid, esp_gattc_descr_elem_t *out, uint16_t *count) {
+    assert(characteristic==20 && uuid.len==ESP_UUID_LEN_16 && uuid.uuid.uuid16==0x2902);
     if(!host_gatt_success){return -1;} out->handle=21;*count=1;return ESP_GATT_OK;
 }
 inline int esp_ble_gattc_register_for_notify(esp_gatt_if_t interface, uint8_t *, uint16_t handle) {
     if(!host_gatt_success){return -1;} esp_ble_gattc_cb_param_t p;p.reg_for_notify.handle=handle;host_gatt_handler(ESP_GATTC_REG_FOR_NOTIFY_EVT,interface,&p);return ESP_OK;
 }
-inline int esp_ble_gattc_write_char_descr(esp_gatt_if_t interface, uint16_t connection, uint16_t handle, int, uint8_t *, int, int) {
-    if(!host_gatt_success){return -1;} esp_ble_gattc_cb_param_t p;p.write.conn_id=connection;p.write.handle=handle;host_gatt_handler(ESP_GATTC_WRITE_DESCR_EVT,interface,&p);return ESP_OK;
+inline int esp_ble_gattc_write_char_descr(esp_gatt_if_t interface, uint16_t connection, uint16_t handle, int size, uint8_t *bytes, int type, int auth) {
+    assert(size==2 && bytes[1]==0 && handle==21 && type==ESP_GATT_WRITE_TYPE_RSP && auth==ESP_GATT_AUTH_REQ_NONE);
+    ++host_cccd_writes; host_cccd_value=bytes[0];
+    if(!host_gatt_success){return -1;}
+    if(on_descriptor_write) { on_descriptor_write(connection,handle); return ESP_OK; }
+    esp_ble_gattc_cb_param_t p;p.write.conn_id=connection;p.write.handle=handle;host_gatt_handler(ESP_GATTC_WRITE_DESCR_EVT,interface,&p);return ESP_OK;
 }
 inline int gatt_write_result = -1;
 inline std::function<void()> on_gatt_write;

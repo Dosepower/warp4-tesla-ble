@@ -17,6 +17,7 @@ export const __ = key => key;
 export const addApiEventListener = (topic,cb) => { f.listeners[topic] = cb; };
 export const render_allowed = () => true;
 export const format_timespan_ms = ms => ms + ' ms';
+export const toLocaleFixed = (n,d) => n.toFixed(d);
 export const async_modal_ref = {current:{show:async options => { f.modals.push(options); return f.show(); }}};
 export class ConfigComponent {
  constructor(topic,error,unused,extra) { this.state = {...f.values[topic],...extra}; this.dirty=false; }
@@ -48,7 +49,8 @@ for (const phase of ['disabled','starting','active','stopping','error']) {
  assert(nodes.some(n=>n.type===BluetoothSettings));
  const settings = new BluetoothSettings();
  const settingsNodes = walk(settings.render({},settings.state));
- assert.equal(settingsNodes.some(n=>n.props?.children==='tesla_vehicle.bluetooth.active_hint'),phase==='active');
+ assert(!settingsNodes.some(n=>n.props?.children==='tesla_vehicle.bluetooth.active_hint'),'Approved page has no permanent Tesla paragraph, even when active');
+ assert(!settingsNodes.some(n=>n.props?.label==='tesla_vehicle.bluetooth.runtime'));
  assert(!settingsNodes.some(n=>n.type==='a' || n.props?.href || n.type==='NavbarItem'));
  assert.equal(settingsNodes.filter(n=>n.type==='Button').length,1,'Only restart button');
  assert(!nodes.some(n=>n.props?.id==='tesla_vehicle_config_form'));
@@ -66,11 +68,13 @@ fixture.calls=[];
 fixture.show=async()=>false;
 await restart().props.onClick(); assert.equal(fixture.calls.length,0);
 fixture.show=async()=>true;
-bt.dirty=true; assert.equal(restart().props.disabled,true);
-await restart().props.onClick(); assert.equal(fixture.calls.length,0);
+const retainedRestart=restart();
+bt.dirty=true; assert(!restart(),'No non-actionable restart button');
+await retainedRestart.props.onClick(); assert.equal(fixture.calls.length,0);
 bt.dirty=false;
 bt.state.bluetooth_state.persistence_error=true;
-assert.equal(restart().props.disabled,true);
+assert(!restart());
+await retainedRestart.props.onClick(); assert.equal(fixture.calls.length,0);
 bt.state.bluetooth_state.persistence_error=false;
 let confirm;
 fixture.show=()=>new Promise(resolve=>{confirm=resolve;});

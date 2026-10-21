@@ -110,8 +110,11 @@ String TeslaVehicle::validate_profiles(Config &update, ConfigSource source)
         if (!mac || ev.get_profile_mac(index) != mac) { return checked_error_string("Existing WARP profile with exact EV MAC required; no wildcard"); }
         const auto &vin = p->get("vin")->asString();
         const auto &address = p->get("ble_address")->asString();
-        if (p->get("enable")->asBool() && (!tesla_ble_valid_vin(vin.c_str()) || !tesla_ble_valid_address(address.c_str()))) {
-            return checked_error_string("Valid 17-character VIN and BLE address required");
+        // Permission can be saved before discovery. It never starts a worker
+        // or authorizes a transport; select_profile still requires a fresh binding.
+        if ((vin.length() && !tesla_ble_valid_vin(vin.c_str())) ||
+            (address.length() && !tesla_ble_valid_address(address.c_str()))) {
+            return checked_error_string("Valid 17-character VIN and BLE address required when provided");
         }
         // Never silently replace a local identity when an index is reused or
         // the VIN changes. Even disabled mappings must retain their binding.
@@ -154,6 +157,12 @@ String TeslaVehicle::validate_profiles(Config &update, ConfigSource source)
                 }
             }
         }
+    }
+    if (source != ConfigSource::File) {
+        if (tesla->config_revision == UINT32_MAX) { return checked_error_string("Profile sequence exhausted; reboot required"); }
+        ++tesla->config_revision; // Also cancels A→B→A edits, even if bytes return.
+        clear_guided();
+        tesla->guidance_refresh = true;
     }
     if (source != ConfigSource::File && tesla->runtime_owner.get()) {
         tesla->runtime_owner.get()->profile_ready.store(false); // Reload explicitly; never apply/save into a live protocol object.
@@ -283,6 +292,7 @@ void TeslaVehicle::apply_profile()
         r->stop_requested.store(true); return;
     }
     r->deleting_profile = false;
+    bluetooth_memory::sample(bluetooth_memory::Stage::ProfileApplied,true);
     r->profile_actionable.store(!request.deleting);
     post_event(EventType::KeyPresence, nullptr, presence == TeslaBleStorageAdapter::KeyPresence::Present ? 1.0f :
         presence == TeslaBleStorageAdapter::KeyPresence::Absent ? 0.0f : presence == TeslaBleStorageAdapter::KeyPresence::CleanupRequired ? 2.0f : NAN);
@@ -307,5 +317,135 @@ void TeslaVehicle::publish_profile()
     tesla->state.get("pair_request_sent")->updateBool(false);
     tesla->state.get("connected")->updateBool(false);
     publish_error("");
+}
+
+void TeslaVehicle::clear_guided()
+{
+    tesla->guided = {};
+    tesla->guidance.get("ready")->updateBool(false);
+    tesla->guidance.get("request")->updateString("");
+}
+
+bool TeslaVehicle::guided_current() const
+{
+    const auto &g = tesla->guided;
+    auto *r = tesla->runtime_owner.get();
+    return g.request[0] && r && r->epoch == g.runtime_epoch &&
+        tesla->config_revision == g.config_revision && active_identity_matches(g.identity) &&
+        uint32_t(millis() - g.started_ms) < 15000 && bluetooth.active() && !bluetooth_restart_pending &&
+        !tesla->runtime_owner.restart_required() && !tesla->runtime_owner.is_stopping() && !r->stop_requested.load();
+}
+
+void TeslaVehicle::guided_command(String &errmsg)
+{
+    auto &command = tesla->guided_command;
+    const auto &phase = command.get("phase")->asString();
+    const auto &request = command.get("request")->asString();
+    if (request.length() != 32) { errmsg = checked_error_string("Invalid explicit action request"); return; }
+    for (auto c : request) { if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) {
+        errmsg = checked_error_string("Invalid explicit action request"); return;
+    } }
+    if (phase == "cancel") {
+        if (request == tesla->guided.request) { clear_guided(); }
+        return;
+    }
+    const bool pair = phase == "prepare_pair";
+    if (pair || phase == "prepare_poll") {
+        if (tesla->guided.request[0] && guided_current()) { errmsg = checked_error_string("Explicit action preparation pending"); return; }
+        clear_guided();
+        auto p = command.get("profile");
+        const int index = p->get("ev_index")->asInt();
+        auto *saved = find_profile(index);
+        const auto live = ev.get_live_identity();
+        char generation[21]; snprintf(generation, sizeof(generation), "%llu", static_cast<unsigned long long>(live.generation));
+        if (!saved || command.get("generation")->asString() != generation || live.index != index ||
+            live.mac != profile_mac_value(p->get("ev_mac")->asString().c_str())) {
+            errmsg = checked_error_string("Connected profile changed; confirm again"); return;
+        }
+        // Explicit config equality before allocating/loading anything. Do not
+        // trust frontend cached state or an index alone as action consent.
+        for (const char *key : {"ev_mac", "vin", "ble_address"}) {
+            if (p->get(key)->asString() != saved->get(key)->asString()) { errmsg = checked_error_string("Saved profile changed; confirm again"); return; }
+        }
+        for (const char *key : {"ble_address_type", "discovery_revision", "poll_interval"}) {
+            if (p->get(key)->asUint() != saved->get(key)->asUint()) { errmsg = checked_error_string("Saved profile changed; confirm again"); return; }
+        }
+        if (p->get("enable")->asBool() != saved->get("enable")->asBool() ||
+            p->get("wake_once")->asBool() != saved->get("wake_once")->asBool()) {
+            errmsg = checked_error_string("Saved permission changed; confirm again"); return;
+        }
+        if (!select_profile(index, false, errmsg)) { return; }
+        auto &g = tesla->guided;
+        strlcpy(g.request, request.c_str(), sizeof(g.request));
+        g.identity = {live.generation, live.index, live.mac};
+        g.config_revision = tesla->config_revision; g.runtime_epoch = tesla->runtime_owner.get()->epoch;
+        g.started_ms = millis(); g.pair = pair;
+        publish_guidance(); // Local preparation only. Never chain a radio action here.
+        return;
+    }
+    if (phase != "commit") { errmsg = checked_error_string("Invalid explicit action phase"); return; }
+    auto *r = tesla->runtime_owner.get();
+    if (request != tesla->guided.request || !guided_current() || !r ||
+        r->profile_pending.load() || !r->profile_ready.load() ||
+        r->configured_ev_index.load() != tesla->guided.identity.index || !runtime_binding_matches()) {
+        // A stale caller may not cancel somebody else's valid preparation.
+        if (request == tesla->guided.request) { clear_guided(); }
+        errmsg = checked_error_string("Preparation expired, failed or profile changed; confirm again"); return;
+    }
+    const int index = tesla->guided.identity.index;
+    const bool pairing = tesla->guided.pair;
+    clear_guided(); // Single use, including rejected key/prerequisite checks.
+    if (pairing) { request_pair(index, errmsg); } else { request_poll(index, errmsg); }
+}
+
+void TeslaVehicle::publish_guidance()
+{
+    const auto live = ev.get_live_identity();
+    char generation[21]; snprintf(generation, sizeof(generation), "%llu", static_cast<unsigned long long>(live.generation));
+    tesla->guidance.get("generation")->updateStringChecked(generation);
+    auto *r = tesla->runtime_owner.get();
+    if (tesla->guided.request[0] && !guided_current()) { clear_guided(); }
+    const bool ready = guided_current() && r && !r->profile_pending.load() && r->profile_ready.load() &&
+        live_profile(tesla->guided.identity.index) && runtime_binding_matches();
+    tesla->guidance.get("ready")->updateBool(ready);
+    tesla->guidance.get("request")->updateStringChecked(tesla->guided.request);
+    auto freshness_rows = tesla->guidance.get("profiles");
+    for (size_t i = 0; i < freshness_rows->count(); ++i) {
+        auto row = freshness_rows->get(i);
+        auto *p = find_profile(row->get("ev_index")->asInt());
+        row->get("binding_fresh")->updateBool(p && fresh_binding(p->get("ev_index")->asInt(),
+            profile_mac_value(p->get("ev_mac")->asString().c_str()), p->get("vin")->asString().c_str(),
+            p->get("ble_address")->asString().c_str(), p->get("ble_address_type")->asUint(), p->get("discovery_revision")->asUint()));
+    }
+    const int signature = tesla->state.get("profile_ev_index")->asInt() * 16 +
+        (tesla->state.get("paired")->asBool() ? 8 : 0) + (tesla->state.get("key_present")->asBool() ? 4 : 0) +
+        (tesla->state.get("key_presence")->asString() == "cleanup" ? 2 : 0);
+    if (signature != tesla->guidance_key_signature) { tesla->guidance_refresh = true; tesla->guidance_key_signature = signature; }
+    // Read-only boot/config/key-change summary, never starts a worker or scans.
+    // Don't read a namespace concurrently with its worker transaction.
+    if (!tesla->guidance_refresh || tesla->legacy_blocked || !discovery_allowed() || tesla->guided.request[0]) { return; }
+    auto rows = tesla->guidance.get("profiles");
+    auto entries = tesla->profiles.get("entries");
+    if (!rows->setCount(entries->count())) { return; }
+    for (size_t i = 0; i < entries->count(); ++i) {
+        auto p = entries->get(i); auto row = rows->get(i);
+        const int index = p->get("ev_index")->asInt();
+        const auto mac = profile_mac_value(p->get("ev_mac")->asString().c_str());
+        TeslaBleStorageAdapter store;
+        auto presence = TeslaBleStorageAdapter::KeyPresence::Unknown;
+        bool paired = false;
+        if (store.select_profile(index, mac)) {
+            presence = store.private_key_presence();
+            paired = presence == TeslaBleStorageAdapter::KeyPresence::Present &&
+                profile_material_authorized(store, p->get("vin")->asString().c_str(), mac);
+        }
+        row->get("ev_index")->updateInt(index); row->get("paired")->updateBool(paired);
+        row->get("binding_fresh")->updateBool(fresh_binding(index, mac, p->get("vin")->asString().c_str(),
+            p->get("ble_address")->asString().c_str(), p->get("ble_address_type")->asUint(), p->get("discovery_revision")->asUint()));
+        if (!row->get("key_presence")->updateStringChecked(presence == TeslaBleStorageAdapter::KeyPresence::Present ? "present" :
+            presence == TeslaBleStorageAdapter::KeyPresence::Absent ? "absent" :
+            presence == TeslaBleStorageAdapter::KeyPresence::CleanupRequired ? "cleanup" : "unknown")) { return; }
+    }
+    tesla->guidance_refresh = false;
 }
 #endif

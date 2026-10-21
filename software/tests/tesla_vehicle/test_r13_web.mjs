@@ -32,6 +32,8 @@ export const __ = k => k;
 export const addApiEventListener = (t,cb) => {f.listeners[t]=cb;};
 export const postReboot = () => {};
 export const render_allowed = () => true;
+export const toLocaleFixed = (n,d) => n.toFixed(d);
+export const format_timespan_ms = ms => String(ms);
 export const async_modal_ref = {current: {show: async opts => {f.modals.push(opts); return f.show();}}};
 export class ConfigComponent {
  constructor(t,e,r,s) {this.state={...f.config,...s};this.dirty=false;this.topic=t;}
@@ -59,7 +61,7 @@ const nodes=()=>walk(page.render({},page.state));
 const restart=()=>nodes().find(n=>n.type==='Button');
 // SubPage.Config is a null-returning marker, not a usable nested form.
 assert(nodes().some(n=>n.type==='ConfigForm'));
-assert(restart().props.disabled);
+assert(!restart(),'Approved page has no permanent disabled restart button');
 const sw=nodes().find(n=>n.type==='Switch');
 sw.props.onClick(); assert.equal(fixture.calls.length,0); assert.equal(fixture.modals.length,0);
 fixture.fail=true; await assert.rejects(page.save(),/commit refused/);
@@ -80,7 +82,7 @@ fixture.values['bluetooth/state']={supported:false,unsupported_reason:'sdk_disab
 fixture.listeners['bluetooth/state'](); confirm(true); await pending;
 assert.equal(fixture.calls.filter(t=>t==='bluetooth/restart').length,1);
 assert(nodes().find(n=>n.type==='Switch').props.disabled);
-assert(restart().props.disabled);
+assert(!restart(),'Unsupported Bluetooth cannot expose a restart action');
 await assert.rejects(page.save());
 for(const lang of ['de','en']) {
  const tr=source(`web/src/modules/tesla_vehicle/translation_${lang}.tsx`);

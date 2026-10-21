@@ -101,6 +101,8 @@ struct TeslaVehicle {
     bool start_runtime(bool) {return start_result;}
     void register_urls();
     void register_tesla_urls();
+    void request_pair(int index, String &errmsg);
+    void request_poll(int index, String &errmsg);
     void register_bluetooth_urls() {} // Separate R13 full-module/POSIX harness covers this API.
     String validate(Config &update, ConfigSource source);
 };
@@ -108,6 +110,8 @@ struct TeslaVehicle {
 header += definition(source, 'static String checked_error_string') + '\n'
 validator = definition(source, '[this](Config &update, ConfigSource source) -> String')
 header += 'String TeslaVehicle::validate(Config &update, ConfigSource source) ' + validator[validator.index('{'):] + '\n'
+header += definition(source, 'void TeslaVehicle::request_pair(') + '\n'
+header += definition(source, 'void TeslaVehicle::request_poll(') + '\n'
 header += definition(source, 'void TeslaVehicle::register_tesla_urls()') + '\n'
 header += definition(source, 'void TeslaVehicle::register_urls()') + '\n'
 (out / 'module_validation_definitions.inc').write_text(header)

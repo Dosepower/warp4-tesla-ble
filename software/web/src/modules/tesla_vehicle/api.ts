@@ -28,6 +28,13 @@ export interface state {
     last_update: number;
     last_error: string;
 }
+export interface guidance {
+    generation: string;
+    request: string;
+    ready: boolean;
+    profiles: {ev_index: number; paired: boolean; key_presence: state['key_presence']; binding_fresh: boolean}[];
+}
+export type guided = {phase: 'prepare_pair' | 'prepare_poll' | 'commit' | 'cancel'; request: string; generation: string; profile: TeslaProfile};
 export type start = {ev_index: number};
 export type pair = {ev_index: number};
 export type poll = {ev_index: number};

@@ -10,7 +10,7 @@
 #ifdef TESLA_BLE_MODULE_HOST_TEST
 #include "module_platform.h"
 #else
-#if WARP_BLUETOOTH_COMPILED
+#if WARP_BLUETOOTH_COMPILED && !TESLA_BLE_USE_NIMBLE
 #include <esp_gattc_api.h>
 #endif
 #include <freertos/FreeRTOS.h>
@@ -111,7 +111,9 @@ private:
 
     enum GattOperation : uint8_t { Register = 1, Open, Discover, Cache, Subscribe, Descriptor, Write, Close };
     bool gatt_operation(GattOperation kind, uint16_t handle, tesla_warp::FunctionRef<bool()> submit);
-#if WARP_BLUETOOTH_COMPILED
+#if TESLA_BLE_USE_NIMBLE
+    static void gatt_callback(const TeslaNimbleEvent &event);
+#elif WARP_BLUETOOTH_COMPILED
     static void gatt_callback(esp_gattc_cb_event_t event, esp_gatt_if_t interface, esp_ble_gattc_cb_param_t *param);
 #endif
     static std::atomic<TeslaVehicle *> gatt_owner;
@@ -136,6 +138,8 @@ private:
     bool service_start_requested = false; // Explicit action only; never restored.
     bool prepare_tesla();
     void register_tesla_urls();
+    void request_pair(int index, String &errmsg);
+    void request_poll(int index, String &errmsg);
 #if TESLA_BLE_MANUAL_VEHICLE_UI
     void publish_discovery();
     bool discovery_allowed() const;
@@ -150,6 +154,10 @@ private:
     void publish_profile(); // Main only, consumes worker acknowledgement.
     bool active_identity_matches(const TeslaBleIdentity &identity) const;
     void refresh_live_session(); // Tesla worker task; snapshot serializes with main publication.
+    void guided_command(String &errmsg);
+    void publish_guidance();
+    bool guided_current() const;
+    void clear_guided();
 #endif
 #if TESLA_BLE_R13_MASTER_BENCH
     BluetoothMasterBench master_bench;
@@ -197,7 +205,7 @@ private:
         TeslaBleOperation operation;
         TeslaBleOperation retirement_operation;
         TeslaBleWorkWatch worker_watch;
-#if WARP_BLUETOOTH_COMPILED
+#if WARP_BLUETOOTH_COMPILED && !TESLA_BLE_USE_NIMBLE
         std::atomic<esp_gatt_if_t> gatt_if{ESP_GATT_IF_NONE};
 #endif
         std::atomic<uint16_t> gatt_connection{UINT16_MAX};
@@ -280,6 +288,19 @@ private:
         Config discovery_target;
         ConfigRoot discovery_state, scan_command;
         uint32_t discovery_revision=UINT32_MAX;
+        ConfigRoot guided_command, guidance;
+        Config guidance_profile;
+        // Main-task-only consent lease; worker never reads Config trees.
+        struct Guided {
+            char request[33]{};
+            TeslaBleIdentity identity{};
+            uint64_t runtime_epoch = 0;
+            uint32_t config_revision = 0, started_ms = 0;
+            bool pair = false;
+        } guided;
+        uint32_t config_revision = 0;
+        bool guidance_refresh = true;
+        int guidance_key_signature = -1;
 #endif
         TeslaBleRuntimeOwner<Runtime> runtime_owner;
         TeslaBlePairingPolicy pairing_policy;

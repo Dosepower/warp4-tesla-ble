@@ -24,8 +24,9 @@ struct TeslaBleModuleTest {
         auto binding=encode_vehicle_mac(ev.mac);assert(tesla_clean::KeyStorage::committed(store.save_transaction("warp_ev_mac",binding.data(),binding.size())));
         m.tesla->profile_command.get("ev_index")->updateInt(ev.index);
         m.register_urls();
-        assert(api.states.size()==5 && api.commands.size()==7);
-        for(auto &entry:api.commands) assert(entry.first=="bluetooth/config_update" || entry.first=="bluetooth/restart" || entry.first=="tesla_vehicle/start" || entry.first=="tesla_vehicle/pair" || entry.first=="tesla_vehicle/poll" || entry.first=="tesla_vehicle/forget_key" || entry.first=="tesla_vehicle/scan");
+        assert(api.states.size()==6 && api.commands.size()==8);
+        assert(api.states.count("tesla_vehicle/guidance") && api.commands.count("tesla_vehicle/guided"));
+        for(auto &entry:api.commands) assert(entry.first=="bluetooth/config_update" || entry.first=="bluetooth/restart" || entry.first=="tesla_vehicle/start" || entry.first=="tesla_vehicle/pair" || entry.first=="tesla_vehicle/poll" || entry.first=="tesla_vehicle/forget_key" || entry.first=="tesla_vehicle/scan" || entry.first=="tesla_vehicle/guided");
         assert(!m.tesla->runtime_owner.get() && peer_open_calls==0);
         p->get("discovery_revision")->updateUint(host_vin_scan(m.bluetooth,"5YJ3E1EA7KF000001",ev.index,ev.mac));
         String error; api.commands.at("tesla_vehicle/start")(0,error); assert(error.empty());

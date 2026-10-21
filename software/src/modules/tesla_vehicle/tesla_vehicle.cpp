@@ -1,4 +1,5 @@
 #include "tesla_vehicle.h"
+#include "bluetooth_memory.h"
 
 #include <algorithm>
 #include <cmath>
@@ -15,13 +16,19 @@
 #endif
 
 #ifndef TESLA_BLE_MODULE_HOST_TEST
-#if WARP_BLUETOOTH_COMPILED
+#if WARP_BLUETOOTH_COMPILED && !TESLA_BLE_USE_NIMBLE
 #include <esp_bt.h>
 #include <esp_bt_main.h>
 #endif
 
 #include "event_log_prefix.h"
 #include "generated/module_dependencies.h"
+#if WARP_TESLA_MEMORY_PHASES && WARP_BLUETOOTH_COMPILED
+// This explicit diagnostic-only environment contains Web Server. Do not expose
+// its headers to ordinary SDK-OFF or non-instrumented module compilations.
+#include "modules/web_server/web_server.h"
+extern WebServer server;
+#endif
 #include "tools.h"
 #endif
 #include "tesla_ble_storage.h"
@@ -67,6 +74,7 @@ static std::array<uint8_t, 6> encode_vehicle_mac(uint64_t mac)
 
 void TeslaVehicle::pre_setup()
 {
+    bluetooth_memory::sample(bluetooth_memory::Stage::Boot);
     bluetooth_config = Config::Object({{"enable", Config::Bool(false)}});
     bluetooth_update = Config::Object({{"enable", Config::Bool(false)}});
     bluetooth_state = Config::Object({
@@ -99,6 +107,19 @@ bool TeslaVehicle::prepare_tesla()
         {"entries", Config::Array({}, &tesla->profile, 0, EV_MAX_EVS)},
     }), [this](Config &update, ConfigSource source) { return validate_profiles(update, source); }};
     tesla->profile_command = Config::Object({{"ev_index", Config::Int(-1, -1, EV_MAX_EVS - 1)}});
+    tesla->guided_command = Config::Object({
+        {"phase", Config::Str("", 0, 12)}, {"request", Config::Str("", 0, 32)},
+        {"generation", Config::Str("", 0, 20)}, {"profile", make_profile()},
+    });
+    tesla->guidance_profile = Config::Object({
+        {"ev_index", Config::Int(-1, -1, EV_MAX_EVS - 1)},
+        {"binding_fresh", Config::Bool(false)},
+        {"paired", Config::Bool(false)}, {"key_presence", Config::Str("unknown", 0, TESLA_BLE_PRESENCE_MAX_LENGTH)},
+    });
+    tesla->guidance = Config::Object({
+        {"generation", Config::Str("", 0, 20)}, {"request", Config::Str("", 0, 32)}, {"ready", Config::Bool(false)},
+        {"profiles", Config::Array({}, &tesla->guidance_profile, 0, EV_MAX_EVS)},
+    });
     tesla->legacy_blocked = TeslaBleStorageAdapter::legacy_material_present();
 #else
     tesla->config = ConfigRoot{Config::Object({
@@ -306,6 +327,22 @@ void TeslaVehicle::register_bluetooth_urls()
     // Local transaction: addPersistentConfig's void writer cannot confirm commit.
     api.addState("bluetooth/config", &bluetooth_config);
     api.addState("bluetooth/state", &bluetooth_state);
+#if WARP_TESLA_MEMORY_PHASES && !defined(TESLA_BLE_MODULE_HOST_TEST)
+    server.on_HTTPThread("/bluetooth/memory", HTTP_GET, [](WebServerRequest request) {
+        request.beginChunkedResponse_json(200);
+        request.sendChunk("{\"version\":1,\"stack_unit\":\"bytes\",\"samples\":[");
+        char buffer[512];
+        for(unsigned i=0;i<static_cast<unsigned>(bluetooth_memory::Stage::Count);++i) {
+            if(!bluetooth_memory::json(static_cast<bluetooth_memory::Stage>(i),buffer,sizeof(buffer))) {
+                return request.endChunkedResponse(); // Fixed maximum row, truncation never serialized.
+            }
+            if(i)request.sendChunk(",");
+            request.sendChunk(buffer);
+        }
+        request.sendChunk("]}");
+        return request.endChunkedResponse();
+    });
+#endif
     api.addCommand("bluetooth/config_update", &bluetooth_update, {}, [this](Language, String &errmsg) {
         save_bluetooth(bluetooth_update.get("enable")->asBool(), errmsg);
     }, false);
@@ -400,6 +437,53 @@ void TeslaVehicle::register_urls()
     register_tesla_urls();
 }
 
+void TeslaVehicle::request_pair(int index, String &errmsg)
+{
+#if TESLA_BLE_MANUAL_VEHICLE_UI
+    if (!live_profile(index)) { errmsg = checked_error_string("Selected WARP profile is inactive or its SLAC binding changed"); return; }
+#else
+    (void)index;
+#endif
+    if (!accepts_commands()) { errmsg = checked_error_string("Tesla BLE is not enabled"); return; }
+    Runtime *r = tesla->runtime_owner.get();
+#if TESLA_BLE_MANUAL_VEHICLE_UI
+    if (r->authorized.load()) { errmsg = checked_error_string("Profile already authorized; no re-pairing needed"); return; }
+    if (!runtime_binding_matches()) { errmsg = checked_error_string("Fresh VIN search match expired or changed; scan and select again"); return; }
+#endif
+    if (r->manual_poll_pending.load()) { errmsg = checked_error_string("Tesla poll is pending"); return; }
+    const auto identity = r->session.identity();
+    if (!identity || identity->index != r->configured_ev_index || identity->mac == 0) {
+        errmsg = checked_error_string("Configured Tesla is not currently connected"); return;
+    }
+    if (!r->command_outcome.accept_pair(*identity)) { errmsg = checked_error_string("Tesla pairing is pending or deletion is active"); return; }
+    r->pair_requested.store(true);
+    tesla->state.get("pair_request_sent")->updateBool(false);
+    tesla->state.get("pairing_pending")->updateBool(true);
+}
+
+void TeslaVehicle::request_poll(int index, String &errmsg)
+{
+#if TESLA_BLE_MANUAL_VEHICLE_UI
+    if (!live_profile(index)) { errmsg = checked_error_string("Selected WARP profile is inactive or its SLAC binding changed"); return; }
+#else
+    (void)index;
+#endif
+    if (!accepts_commands() || !tesla->runtime_owner.get()->command_outcome.forward_available()) {
+        errmsg = checked_error_string("Tesla BLE is not enabled"); return;
+    }
+    Runtime *r = tesla->runtime_owner.get();
+#if TESLA_BLE_MANUAL_VEHICLE_UI
+    const auto identity = r->session.identity();
+    if (!r->profile_key_present.load()) { errmsg = checked_error_string("This profile has no known local key; first setup requires key-card pairing"); return; }
+    if (!runtime_binding_matches()) { errmsg = checked_error_string("Verified VIN transport binding required"); return; }
+    if (tesla->state.get("pairing_pending")->asBool() || !identity || identity->index != r->configured_ev_index || identity->mac == 0 ||
+        r->manual_poll_pending.exchange(true)) {
+        errmsg = checked_error_string("Tesla poll pending or configured vehicle not active"); return;
+    }
+#endif
+    r->poll_requested.store(true);
+}
+
 void TeslaVehicle::register_tesla_urls()
 {
 #if TESLA_BLE_MANUAL_VEHICLE_UI
@@ -432,6 +516,10 @@ void TeslaVehicle::register_tesla_urls()
 #endif
 
 #if TESLA_BLE_MANUAL_VEHICLE_UI
+    api.addState("tesla_vehicle/guidance", &tesla->guidance, {}, {"profiles"});
+    api.addCommand("tesla_vehicle/guided", &tesla->guided_command, {"profile"}, [this](Language, String &errmsg) {
+        guided_command(errmsg);
+    }, true);
     api.addCommand("tesla_vehicle/start", &tesla->profile_command, {}, [this](Language, String &errmsg) {
         select_profile(tesla->profile_command.get("ev_index")->asInt(), false, errmsg);
     }, true);
@@ -456,33 +544,13 @@ void TeslaVehicle::register_tesla_urls()
         &empty_command,
 #endif
         {}, [this](Language, String &errmsg) {
+        request_pair(
 #if TESLA_BLE_MANUAL_VEHICLE_UI
-        if (!live_profile(tesla->profile_command.get("ev_index")->asInt())) {
-            errmsg = checked_error_string("Selected WARP profile is inactive or its SLAC binding changed"); return;
-        }
+            tesla->profile_command.get("ev_index")->asInt(),
+#else
+            -1,
 #endif
-        if (!accepts_commands()) {
-            errmsg = checked_error_string("Tesla BLE is not enabled");
-            return;
-        }
-        Runtime *r = tesla->runtime_owner.get();
-#if TESLA_BLE_MANUAL_VEHICLE_UI
-        if (r->authorized.load()) { errmsg = checked_error_string("Profile already authorized; no re-pairing needed"); return; }
-        if (!runtime_binding_matches()) { errmsg=checked_error_string("Fresh VIN search match expired or changed; scan and select again");return; }
-#endif
-        if (r->manual_poll_pending.load()) { errmsg = checked_error_string("Tesla poll is pending"); return; }
-        const auto identity = r->session.identity();
-        if (!identity || identity->index != r->configured_ev_index || identity->mac == 0) {
-            errmsg = checked_error_string("Configured Tesla is not currently connected");
-            return;
-        }
-        if (!r->command_outcome.accept_pair(*identity)) {
-            errmsg = checked_error_string("Tesla pairing is pending or deletion is active");
-            return;
-        }
-        r->pair_requested.store(true);
-        tesla->state.get("pair_request_sent")->updateBool(false);
-        tesla->state.get("pairing_pending")->updateBool(true);
+            errmsg);
     }, true);
 
     api.addCommand("tesla_vehicle/poll",
@@ -492,26 +560,13 @@ void TeslaVehicle::register_tesla_urls()
         &empty_command,
 #endif
         {}, [this](Language, String &errmsg) {
+        request_poll(
 #if TESLA_BLE_MANUAL_VEHICLE_UI
-        if (!live_profile(tesla->profile_command.get("ev_index")->asInt())) {
-            errmsg = checked_error_string("Selected WARP profile is inactive or its SLAC binding changed"); return;
-        }
+            tesla->profile_command.get("ev_index")->asInt(),
+#else
+            -1,
 #endif
-        if (!accepts_commands() || !tesla->runtime_owner.get()->command_outcome.forward_available()) {
-            errmsg = checked_error_string("Tesla BLE is not enabled");
-            return;
-        }
-        Runtime *r = tesla->runtime_owner.get();
-#if TESLA_BLE_MANUAL_VEHICLE_UI
-        const auto identity = r->session.identity();
-        if (!r->profile_key_present.load()) { errmsg = checked_error_string("This profile has no known local key; first setup requires key-card pairing"); return; }
-        if (!runtime_binding_matches()) { errmsg=checked_error_string("Verified VIN transport binding required");return; }
-        if (tesla->state.get("pairing_pending")->asBool() || !identity || identity->index != r->configured_ev_index || identity->mac == 0 ||
-            r->manual_poll_pending.exchange(true)) {
-            errmsg = checked_error_string("Tesla poll pending or configured vehicle not active"); return;
-        }
-#endif
-        r->poll_requested.store(true);
+            errmsg);
     }, true);
 
 #if TESLA_BLE_MANUAL_VEHICLE_UI
@@ -569,7 +624,15 @@ void TeslaVehicle::publish_discovery()
 {
     if(!tesla) { return; }
     TeslaBleDiscovery::Snapshot s;
-    if(!bluetooth.discovery_snapshot(s) || s.revision==tesla->discovery_revision) { return; }
+    if(!bluetooth.discovery_snapshot(s)) { return; }
+    if (s.revision == tesla->discovery_revision) {
+        auto rows = tesla->discovery_state.get("targets");
+        const bool scope_current = ev.get_live_identity().generation == s.scope.generation && ev.get_profile_mac(s.scope.index) == s.scope.mac;
+        for (size_t i = 0; i < rows->count() && i < s.count; ++i) {
+            rows->get(i)->get("matches_vin")->updateBool(scope_current && bluetooth.discovery_matches(s.scope, s.revision, s.targets[i].address, s.targets[i].address_type));
+        }
+        return;
+    }
     auto &state=tesla->discovery_state;
     auto rows=state.get("targets");rows->removeAll();
     bool ok=true;
@@ -624,6 +687,7 @@ bool TeslaVehicle::start_runtime(bool storage_only)
 #else
     tesla->start_attempted = true;
     return tesla->runtime_owner.start(storage_only || bluetooth_boot_enabled, [this, storage_only]() -> std::unique_ptr<Runtime> {
+        bluetooth_memory::sample(bluetooth_memory::Stage::RuntimeBefore);
         auto r = std::unique_ptr<Runtime>(new (std::nothrow) Runtime(this));
         if (!r) {
             publish_error("Failed to allocate Tesla runtime");
@@ -644,6 +708,7 @@ bool TeslaVehicle::start_runtime(bool storage_only)
             return nullptr;
         }
         const auto &vin = tesla->config.get("vin")->asString();
+        bluetooth_memory::sample(bluetooth_memory::Stage::QueuesReady);
         const auto &address = tesla->config.get("ble_address")->asString();
         const bool service =
 #if TESLA_BLE_MANUAL_VEHICLE_UI
@@ -685,6 +750,7 @@ bool TeslaVehicle::start_runtime(bool storage_only)
             publish_error("Failed to start Tesla BLE task");
             return false;
         }
+        bluetooth_memory::sample(bluetooth_memory::Stage::TaskCreated);
         return true;
     });
 #endif
@@ -700,6 +766,7 @@ bool TeslaVehicle::create_vehicle()
     r->vehicle.reset(new (std::nothrow) tesla_clean::Vehicle(*r->keys,
         {reinterpret_cast<const uint8_t *>(r->vin.c_str()), 17},
         {r->routing_address.data(), r->routing_address.size()}, r->transport_adapter.ports()));
+    bluetooth_memory::sample(bluetooth_memory::Stage::ProtocolReady,true);
     return r->vehicle != nullptr;
 }
 
@@ -710,6 +777,7 @@ void TeslaVehicle::task_entry(void *context)
 
 void TeslaVehicle::task_loop()
 {
+    bluetooth_memory::sample(bluetooth_memory::Stage::WorkerBegin,true);
     Runtime *r = tesla->runtime_owner.get();
     if (!r->stop_requested.load()) {
         r->worker_watch.begin(millis());
@@ -793,6 +861,7 @@ void TeslaVehicle::task_loop()
             r->worker_watch.finish(); vTaskDelay(pdMS_TO_TICKS(20)); continue;
         }
 #endif
+        bluetooth_memory::sample(bluetooth_memory::Stage::WorkerActive,true,1000);
         process_rx();
         process_commands();
         process_pair_verification();
@@ -835,6 +904,7 @@ void TeslaVehicle::task_loop()
     r->worker_watch.finish();
     // ACK is independent of the lossy event queue. After publishing it, this
     // task must never touch runtime again. Main deletes this parked task.
+    bluetooth_memory::sample(bluetooth_memory::Stage::WorkerStopped,true);
     r->worker_stopped.store(true, std::memory_order_release);
     for (;;) {
         vTaskSuspend(nullptr);
@@ -867,6 +937,7 @@ void TeslaVehicle::teardown_entry(void *context)
     auto *owner = static_cast<TeslaVehicle *>(context);
     Runtime *r = owner->tesla->runtime_owner.get();
     const bool ok = owner->release_bluetooth(*r);
+    bluetooth_memory::sample(bluetooth_memory::Stage::TeardownStopped,true);
     r->teardown.complete(ok);
     // No runtime/BLE access after completion; only an acknowledged task is deleted.
     for (;;) { vTaskSuspend(nullptr); }
@@ -1467,6 +1538,7 @@ void TeslaVehicle::loop()
     flush_error();
 #if TESLA_BLE_MANUAL_VEHICLE_UI
     publish_profile();
+    publish_guidance();
 #endif
     const bool changed = tesla->runtime_update_requested.exchange(false);
     if (changed) {

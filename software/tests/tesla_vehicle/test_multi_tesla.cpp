@@ -4,6 +4,7 @@
 #include "host/vin_scan_fixture.h"
 #include "cleanroom/controller_fixture.hpp"
 #include <cstdio>
+#include "../../src/modules/tesla_vehicle/bluetooth_memory.h"
 struct TeslaBleModuleTest {
  static constexpr uint64_t A=0x112233445500ULL,B=0x112233445501ULL;
  static void entry(Config *p,int index) {
@@ -56,7 +57,7 @@ struct TeslaBleModuleTest {
   on_gatt_close=[&] {esp_ble_gattc_cb_param_t p;p.close.conn_id=4;TeslaVehicle::gatt_callback(ESP_GATTC_CLOSE_EVT,1,&p);p.disconnect.conn_id=4;TeslaVehicle::gatt_callback(ESP_GATTC_DISCONNECT_EVT,1,&p);pending.clear();};
   const auto inject=[&](const Frame &frame) {
    std::vector<uint8_t> wire{uint8_t(frame.length>>8),uint8_t(frame.length)};wire.insert(wire.end(),frame.data.begin(),frame.data.begin()+frame.length);
-   for(size_t at=0;at<wire.size();at+=7){esp_ble_gattc_cb_param_t p;p.notify.conn_id=4;p.notify.handle=20;memcpy(p.notify.remote_bda,r->remote_address,6);p.notify.value=wire.data()+at;p.notify.value_len=std::min<size_t>(7,wire.size()-at);TeslaVehicle::gatt_callback(ESP_GATTC_NOTIFY_EVT,1,&p);m.process_rx();}
+   for(size_t at=0;at<wire.size();at+=7){esp_ble_gattc_cb_param_t p;p.notify.conn_id=4;p.notify.handle=20;p.notify.is_notify=!(host_rx_properties&ESP_GATT_CHAR_PROP_BIT_INDICATE);memcpy(p.notify.remote_bda,r->remote_address,6);p.notify.value=wire.data()+at;p.notify.value_len=std::min<size_t>(7,wire.size()-at);TeslaVehicle::gatt_callback(ESP_GATTC_NOTIFY_EVT,1,&p);m.process_rx();}
   };
   bool tested=false;
   on_delay=[&] {
@@ -66,10 +67,16 @@ struct TeslaBleModuleTest {
    m.tesla->profile_command.get("ev_index")->updateInt(0);error.clear();api.commands.at("tesla_vehicle/pair")(0,error);assert(error.empty());
    m.process_commands();r->vehicle->tick();assert(!sent.empty() && sent.back().pair);m.process_module_events();
    assert(peer_open_calls==1 && peer_open_type==(generating?1:0));
+   assert(host_cccd_value==((host_rx_properties&ESP_GATT_CHAR_PROP_BIT_INDICATE)?2u:1u));
    assert(m.tesla->state.get("pairing_pending")->asBool() && !r->authorized.load());
    assert(LittleFS.files.count("/config/tesla_p00_112233445500_private_key"));
    assert(!LittleFS.files.count("/config/tesla_p00_112233445500_authorized"));
    if(!generating) {
+    // A predecessor-generation fragment must not poison current framing,
+    // including the indication path. If consumed, this oversized frame fails.
+    assert(r->physical_generation.load()>0);TeslaVehicle::RxFragment stale;
+    stale.connection_generation=r->physical_generation.load()-1;stale.length=2;stale.data[0]=0xff;stale.data[1]=0xff;
+    assert(xQueueSend(r->queues.rx(),&stale,0)==pdTRUE);m.process_rx();assert(r->connected.load());
     peer.address=r->routing_address;clock_ms.fetch_add(1000);m.process_pair_verification();r->vehicle->tick();assert(sent.back().hello);
     inject(peer.hello(sent.back()));r->vehicle->tick();assert(!sent.back().hello);
     auto status=sent.back();inject(peer.response(status,{awake,sizeof(awake)},1,0,true));m.process_module_events();
@@ -92,6 +99,8 @@ struct TeslaBleModuleTest {
   on_gatt_bytes={};on_gatt_write={};on_gatt_close={};
   std::printf("PROFILE_PAIRING %s PASS explicit first pairing, durable key, no approval from unauthenticated response, profile auth persistence\n",generating?"generate":"authenticated");
  }
+ #include "host/subscription_contracts.inc"
+ #include "host/guided_contracts.inc"
  static void run(const std::string &mode) {
   TeslaVehicle m;m.pre_setup();m.setup();
   assert(peer_open_calls==0 && scan_start_calls==0 && !m.tesla);
@@ -142,7 +151,38 @@ struct TeslaBleModuleTest {
   assert(m.validate_profiles(m.tesla->profiles,ConfigSource::File).empty());
   entries->get(1)->get("ev_index")->updateInt(0);assert(!m.validate_profiles(m.tesla->profiles,ConfigSource::File).empty());entry(entries->get(1),1);
   ev.profiles.erase(1);assert(!m.validate_profiles(m.tesla->profiles,ConfigSource::File).empty());ev.profiles[1]=B;
+  if(mode.rfind("guided",0)==0) {
+   assert(api.commands.count("tesla_vehicle/guided"));
+   guided(m,mode);return;
+  }
+  if(mode=="permission-only") {
+   auto *p=entries->get(size_t{0});p->get("vin")->updateString("");p->get("ble_address")->updateString("");
+   entries->get(size_t{1})->get("enable")->updateBool(false);entries->get(size_t{1})->get("ble_address")->updateString("");
+   const auto saved=LittleFS.files;
+   assert(m.validate_profiles(m.tesla->profiles,ConfigSource::API).empty());
+   m.loop();assert(!m.tesla->runtime_owner.get() && peer_open_calls==0 && scan_start_calls==0 && LittleFS.files==saved);
+   std::puts("PERMISSION_ONLY_PASS enabled empty binding saved without worker/radio/charging");return;
+  }
+  if(mode=="idle-enabled") {
+   seed(0);seed(1);const auto saved=LittleFS.files;
+   HostBluetoothDriver driver(m.bluetooth,TeslaVehicle::gatt_callback);
+   for(unsigned pass=0;pass<8;++pass) {m.loop();m.publish_bluetooth_state();}
+   assert(m.bluetooth.active() && !m.tesla->runtime_owner.get() && !m.service_start_requested);
+   assert(task_launches==1 && queues_live==0 && peer_open_calls==0 && scan_start_calls==0 && LittleFS.files==saved);
+#if WARP_TESLA_MEMORY_PHASES
+   using namespace bluetooth_memory;Sample snapshot;
+   for(auto stage:{Stage::Boot,Stage::ContextBefore,Stage::ContextAfter,Stage::ControllerInit,Stage::ControllerEnabled,Stage::HostInit,Stage::HostEnabled,Stage::GattReady,Stage::BtActive})assert(read(stage,snapshot)&&snapshot.samples>0);
+   assert(read(Stage::RuntimeBefore,snapshot)&&snapshot.samples==0);
+#endif
+   std::puts("IDLE_ENABLED PASS active Bluetooth with two stored Tesla profiles: no Tesla runtime/worker/queues/protocol, no scan/connection/storage changes");return;
+  }
+  if(mode=="indicate-only" || mode=="notify-only" || mode=="indicate-and-notify") {
+   host_rx_properties=mode=="notify-only"?ESP_GATT_CHAR_PROP_BIT_NOTIFY:ESP_GATT_CHAR_PROP_BIT_INDICATE;
+   if(mode=="indicate-and-notify")host_rx_properties|=ESP_GATT_CHAR_PROP_BIT_NOTIFY;
+   pairing(m,false);return;
+  }
   if(mode=="pairing" || mode=="generate") {pairing(m,mode=="generate");return;}
+  if(mode=="neither" || mode=="wrong-descriptor" || mode=="stale-setup" || mode=="reconnect" || mode=="reconnect-reverse") {subscription(m,mode);return;}
   if(mode=="delete-first") {
    seed(0);seed(1);const auto before=LittleFS.files;
    entries->get(1)->get("enable")->updateBool(false);entries->get(1)->get("vin")->updateString("");entries->get(1)->get("ble_address")->updateString("");
@@ -203,6 +243,11 @@ struct TeslaBleModuleTest {
   };
   run_task(r->task_handle);on_delay={};assert(phase==3 && peer_open_calls==0 && ev.applied==3);
   m.loop();if(r->teardown_handle)run_task(r->teardown_handle);m.loop();
+#if WARP_TESLA_MEMORY_PHASES
+  using namespace bluetooth_memory;Sample snapshot;
+  // Deliberately after Runtime retirement; no handle to a deleted task needed.
+  for(auto stage:{Stage::RuntimeBefore,Stage::QueuesReady,Stage::TaskCreated,Stage::WorkerBegin,Stage::ProtocolReady,Stage::ProfileApplied,Stage::WorkerStopped,Stage::TeardownStopped})assert(read(stage,snapshot)&&snapshot.samples>0);
+#endif
   std::puts("MULTI_TESLA PASS 2 profiles/isolated keys+sessions/A-B-A no re-pair/delete B preserves A/duplicate rejection/live SLAC recheck/final SoC gate");
  }
 };

@@ -2,6 +2,9 @@
 #include "bluetooth_support.h"
 #include <atomic>
 #include <memory>
+#if TESLA_BLE_USE_NIMBLE
+#include "tesla_nimble_central.h"
+#endif
 #if TESLA_BLE_MANUAL_VEHICLE_UI
 #include "tesla_ble_discovery.h"
 #endif
@@ -10,7 +13,7 @@
 #else
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
-#if WARP_BLUETOOTH_COMPILED
+#if WARP_BLUETOOTH_COMPILED && !TESLA_BLE_USE_NIMBLE
 #include <esp_gattc_api.h>
 #if TESLA_BLE_MANUAL_VEHICLE_UI
 #include <esp_gap_ble_api.h>
@@ -22,7 +25,10 @@
 // queues, peer, storage, protocol, diagnostics or Tesla state construction.
 class BluetoothLifecycle {
 public:
-#if WARP_BLUETOOTH_COMPILED
+#if TESLA_BLE_USE_NIMBLE
+    using Handler = TeslaNimbleCentral::Handler;
+    TeslaNimbleCentral *central();
+#elif WARP_BLUETOOTH_COMPILED
     using Handler = void (*)(esp_gattc_cb_event_t, esp_gatt_if_t, esp_ble_gattc_cb_param_t *);
 #else
     using Handler = void (*)();
@@ -55,12 +61,15 @@ private:
     std::atomic<bool> latched{false}; // Main supervision and Tesla teardown read this latch.
     static std::atomic<Context *> owner;
     static void entry(void *);
-#if WARP_BLUETOOTH_COMPILED
+#if TESLA_BLE_USE_NIMBLE
+    static void gatt(const TeslaNimbleEvent &);
+    static void host_entry(void *);
+#elif WARP_BLUETOOTH_COMPILED
     static void gatt(esp_gattc_cb_event_t, esp_gatt_if_t, esp_ble_gattc_cb_param_t *);
 #endif
     static void run(Context &);
     static bool teardown(Context &);
-#if TESLA_BLE_MANUAL_VEHICLE_UI && WARP_BLUETOOTH_COMPILED
+#if TESLA_BLE_MANUAL_VEHICLE_UI && WARP_BLUETOOTH_COMPILED && !TESLA_BLE_USE_NIMBLE
     static void gap(esp_gap_ble_cb_event_t, esp_ble_gap_cb_param_t *);
     static bool discovery_tick(Context &);
 #endif

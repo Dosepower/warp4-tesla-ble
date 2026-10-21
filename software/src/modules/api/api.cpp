@@ -18,6 +18,8 @@
  */
 
 #include "api.h"
+#include <esp_heap_caps.h>
+#include "tools/memory_snapshot.h"
 
 #include <esp_task.h>
 #include <LittleFS.h>
@@ -786,6 +788,13 @@ void API::register_urls()
     });
 #endif
 
+    server.on_HTTPThread("/info/memory", HTTP_GET, [](WebServerRequest request) {
+        char buffer[512];
+        if (!memory_snapshot_json(buffer, sizeof(buffer)))
+            return request.send_plain(500, "Memory snapshot overflow");
+        return request.send_json(200, buffer);
+    });
+
     server.on_HTTPThread("/debug_report", HTTP_GET, [this](WebServerRequest request) {
         constexpr size_t BUF_SIZE = std::max({
             static_cast<size_t>(OPTIONS_API_JSON_MAX_LENGTH() + 1024)
@@ -976,7 +985,11 @@ void API::register_events() {
         return result;
     };
     this->states = migrate(reg_collector->states, IRAM, "states");
-    this->commands = migrate(reg_collector->commands, IRAM, "commands");
+    // Command registrations contain std::function state and are accessed from
+    // ordinary task context, not cache-disabled interrupt handlers. Keep this
+    // growing table in byte-addressable PSRAM instead of the scarce IRAM arena.
+    // migrate retains the original vector if PSRAM allocation also fails.
+    this->commands = migrate(reg_collector->commands, PSRAM, "commands");
     this->responses = migrate(reg_collector->responses, DRAM, "responses");
 
     // Spans are non-owning: any fallback vector must remain alive for the API's

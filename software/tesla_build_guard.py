@@ -16,9 +16,28 @@ sdk.validate_targets(COMMAND_LINE_TARGETS)
 package = Path(os.environ.get('TESLA_BLE_FRAMEWORK_LIBS', ''))
 if not package.is_absolute():
     raise ValueError('TESLA_BLE_FRAMEWORK_LIBS must identify the rebuilt, manifest-bound secure SDK')
-verified = sdk.verify_package(package)
+# Candidate selection is explicit; the package verifier rejects unknown policies
+# and binds the exact policy, effective config/header and all archive hashes.
+policy = os.environ.get('TESLA_BLE_SDK_POLICY', 'tesla-psram-first-v1')
+verified = sdk.verify_package(package, policy=policy)
 if verified['disposition'] != 'noninstallable-fallback-review':
     raise ValueError('Unsupported SDK disposition; source-review fallback only')
+if policy == sdk.NIMBLE_POLICY:
+    sdk.source_policy_inventory(Path(os.environ['TESLA_BLE_SDK_SOURCE_ROOT']) / 'esp-idf-secure', policy)
+
+if policy in (sdk.CLASSIC_RELEASE_POLICY, sdk.NIMBLE_POLICY):
+    framework = Path(env.PioPlatform().get_package_dir('framework-arduinoespressif32'))
+    selected = Path(os.environ.get('TESLA_BLE_FRAMEWORK_CORE', ''))
+    if not selected.is_absolute() or framework.resolve() != selected.resolve():
+        raise ValueError('Classic candidate requires the exact separately selected Arduino core')
+    sdk.verify_classic_core(framework / 'cores/esp32/esp32-hal-bt.c')
+    source = Path(os.environ['TESLA_BLE_SDK_SOURCE_ROOT']) / 'builder/components/arduino/cores/esp32'
+    if (framework / 'cores/esp32/esp32-hal-misc.c').read_bytes() != (source / 'esp32-hal-misc.c').read_bytes():
+        raise ValueError('Classic candidate boot policy differs from tested SDK sources')
+    # PlatformIO does not consume Arduino platform.txt's release interception.
+    # Both entrypoints MUST share the core tracking, not a direct SDK bypass.
+    env.Append(LINKFLAGS=['-Wl,--wrap=esp_bt_mem_release',
+                          '-Wl,--wrap=esp_bt_controller_mem_release'])
 
 # A verified SDK alone does not prove LittleFS close/error semantics. Rerun
 # native acceptance against this build's sources; never reuse old attestations.

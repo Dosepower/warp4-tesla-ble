@@ -1,10 +1,13 @@
 """Fail-closed real-WARP4 build preparation, no device or signing operations."""
 import importlib.util
+import os
 from pathlib import Path
 import tempfile
 import unittest
 
 S = Path(__file__).resolve().parents[2]
+PACKAGE = Path(os.environ.get('TESLA_BLE_FRAMEWORK_LIBS', S/'.pio/tesla-sdk/builder/out/tools/esp32-arduino-libs'))
+POLICY = os.environ.get('TESLA_BLE_SDK_POLICY', 'tesla-psram-first-v1')
 spec = importlib.util.spec_from_file_location('tesla_sdk', S / 'lib-builder/tesla_sdk.py')
 sdk = importlib.util.module_from_spec(spec)
 
@@ -16,8 +19,10 @@ class SecureSDK(unittest.TestCase):
     def test_manifest_disposition_cannot_be_elevated(self):
         import copy, json
         from unittest.mock import patch
-        package = S/'.pio/tesla-sdk/builder/out/tools/esp32-arduino-libs'
-        original = json.loads((package/'tesla-sdk.json').read_text())
+        package = PACKAGE
+        manifest_text = (package/'tesla-sdk.json').read_text()
+        real_loads = json.loads
+        original = real_loads(manifest_text)
         # Exercise the full verifier without copying the SDK or altering it.
         mutations = []
         for key in ('installable', 'exact_upstream_package'):
@@ -35,16 +40,16 @@ class SecureSDK(unittest.TestCase):
             candidate = copy.deepcopy(original)
             if value == 'DELETE': candidate.pop(key, None)
             else: candidate[key] = value
-            with self.subTest(key=key,value=value), patch.object(sdk.json, 'loads', return_value=candidate):
-                with self.assertRaises(ValueError): sdk.verify_package(package)
+            with self.subTest(key=key,value=value), patch.object(sdk.json, 'loads', side_effect=lambda text: candidate if text == manifest_text else real_loads(text)):
+                with self.assertRaises(ValueError): sdk.verify_package(package, policy=POLICY)
         elevated = copy.deepcopy(original)
         elevated.update(installable=True, exact_upstream_package=True, unresolved_upstream_revisions=[])
-        with patch.object(sdk.json, 'loads', return_value=elevated), self.assertRaises(ValueError):
-            sdk.verify_package(package)
+        with patch.object(sdk.json, 'loads', side_effect=lambda text: elevated if text == manifest_text else real_loads(text)), self.assertRaises(ValueError):
+            sdk.verify_package(package, policy=POLICY)
         spoofed = original | {'disposition': 'installable-exact'}
-        with patch.object(sdk.json, 'loads', return_value=spoofed):
-            self.assertEqual(sdk.verify_package(package)['disposition'], 'noninstallable-fallback-review')
-        verified = sdk.verify_package(package)
+        with patch.object(sdk.json, 'loads', side_effect=lambda text: spoofed if text == manifest_text else real_loads(text)):
+            self.assertEqual(sdk.verify_package(package, policy=POLICY)['disposition'], 'noninstallable-fallback-review')
+        verified = sdk.verify_package(package, policy=POLICY)
         self.assertEqual(verified['disposition'], 'noninstallable-fallback-review')
         hook = (S/'tesla_build_guard.py').read_text()
         self.assertIn("verified['disposition']", hook)
@@ -54,7 +59,7 @@ class SecureSDK(unittest.TestCase):
         from unittest.mock import patch, Mock
         script=types.ModuleType('SCons.Script');setattr(script,'COMMAND_LINE_TARGETS',['tesla-review'])
         fake_env=Mock();fake_env.subst.return_value=str(S);fake_env.GetProjectOption.return_value=[]
-        fake_sdk=types.SimpleNamespace(validate_targets=sdk.validate_targets, verify_package=Mock())
+        fake_sdk=types.SimpleNamespace(CLASSIC_RELEASE_POLICY=sdk.CLASSIC_RELEASE_POLICY,NIMBLE_POLICY=sdk.NIMBLE_POLICY,validate_targets=sdk.validate_targets, verify_package=Mock())
         fake_spec=types.SimpleNamespace(loader=types.SimpleNamespace(exec_module=lambda module: None))
         for disposition in ('noninstallable-fallback-review','installable-exact'):
             fake_sdk.verify_package.return_value={'disposition':disposition}
@@ -62,7 +67,7 @@ class SecureSDK(unittest.TestCase):
                  patch('importlib.util.spec_from_file_location',return_value=fake_spec), \
                  patch('importlib.util.module_from_spec',return_value=fake_sdk), \
                  patch('subprocess.run') as run, \
-                 patch.dict('os.environ',{'TESLA_BLE_FRAMEWORK_LIBS':str(S/'.pio/tesla-sdk/builder/out/tools/esp32-arduino-libs')}):
+                 patch.dict('os.environ',{'TESLA_BLE_FRAMEWORK_LIBS':str(S/'.pio/tesla-sdk/builder/out/tools/esp32-arduino-libs'), 'TESLA_BLE_SDK_POLICY':'tesla-psram-first-v1'}):
                 def execute():
                     runpy.run_path(str(S/'tesla_build_guard.py'),init_globals={'Import':lambda _:None,'env':fake_env})
                 if disposition=='noninstallable-fallback-review':
