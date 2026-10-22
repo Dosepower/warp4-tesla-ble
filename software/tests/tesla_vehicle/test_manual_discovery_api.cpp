@@ -41,6 +41,21 @@ struct TeslaBleModuleTest {
     TeslaBleDiscovery::Snapshot s;assert(m.bluetooth.discovery_snapshot(s));
     assert(s.status==TeslaBleDiscovery::Status::Complete);
     assert(s.count==(mode=="success"?1u:0u));
+    m.publish_discovery();
+    auto &published=m.tesla->discovery_state;
+    assert(published.get("result_age_ms") && published.get("result_ttl_ms"));
+    assert(published.get("result_ttl_ms")->asUint()==120000);
+    assert(published.get("searched_vin")->asString()=="5YJ3E1EA7KF000001");
+    assert(published.get("ev_mac")->asString()=="11:22:33:44:55:00");
+    assert(published.get("generation")->asString()==std::to_string(ev.get_live_identity().generation));
+    assert(published.get("result_age_ms")->asUint()==millis()-s.completed_at_ms);
+    const auto completed=s.completed_at_ms;
+    for(uint32_t age:{999u,119999u,120000u,120001u}) {
+     clock_ms=completed+age;m.publish_discovery();
+     assert(published.get("result_age_ms")->asUint()==age);
+     assert(peer_open_calls==0 && !m.tesla->runtime_owner.get());
+    }
+    clock_ms=completed; // deterministic test clock only, worker retirement below.
     assert(peer_open_calls==0 && !m.tesla->runtime_owner.get());finished=true;m.bluetooth.request_stop();
    }
   };

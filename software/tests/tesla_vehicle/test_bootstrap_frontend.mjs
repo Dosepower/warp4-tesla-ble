@@ -24,6 +24,7 @@ const module={exports:{}};
 vm.runInNewContext(compiled.outputFiles[0].text,{module,exports:module.exports,fixture:f,structuredClone,Date:{now:()=>Date.now()+(f.offset??0)},setTimeout:(fn,ms)=>setTimeout(()=>{f.offset=(f.offset??0)+(f.advance??0);fn();},f.advance?0:ms),clearTimeout,AbortController,crypto:globalThis.crypto});
 f.values['ev/config']={evs:[0,1].map(i=>({name:`Synthetic ${i}`,mac:`11:22:33:44:55:0${i}`}))};
 f.values['ev/state']={active_ev_index:0,mac:'11:22:33:44:55:00',soc:null};
+f.values['bluetooth/config']={enable:true};
 f.values['bluetooth/state']={supported:true,phase:'active'};
 f.values['tesla_vehicle/profiles']={entries:[0,1].map(i=>({ev_index:i,ev_mac:f.values['ev/config'].evs[i].mac,enable:false,vin:i?'5YJ3E1EA7KF000002':'5YJ3E1EA7KF000001',ble_address:'',ble_address_type:0,discovery_revision:0,poll_interval:300,wake_once:false}))};
 f.values['tesla_vehicle/state']={profile_ev_index:-1,running:false,key_presence:'unknown'};

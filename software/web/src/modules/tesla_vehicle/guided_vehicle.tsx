@@ -39,7 +39,14 @@ export class TeslaVehicle extends ConfigComponent<"tesla_vehicle/profiles", {}, 
     private scan_waiting = false;
     private search_context = "";
     private search_saved = "";
-    private discovery_received = 0;
+    private search_generation = "";
+    private discovery_received = NaN;
+    private discovery_wall_received = NaN;
+    private discovery_age = Infinity;
+    private discovery_ttl = 0;
+    private scan_revision = 0;
+    private discovery_result_seen = false;
+    private discovery_timer: ReturnType<typeof setTimeout>;
     private discovery_revision = -1;
     private identity = "";
     private ev_config = "";
@@ -73,19 +80,20 @@ export class TeslaVehicle extends ConfigComponent<"tesla_vehicle/profiles", {}, 
         const listen = (topic: keyof API.EventMap, callback: () => void) =>
             util.addApiEventListener(topic, () => { if (!this.disposed) callback(); }, {signal: this.listeners.signal});
         listen("tesla_vehicle/state", () => { this.updateCredentialEvidence(); this.setState({tesla_state: API.get("tesla_vehicle/state")}); });
-        listen("tesla_vehicle/guidance", () => { this.updateCredentialEvidence(); this.setState({guidance: API.get("tesla_vehicle/guidance")}); });
+        listen("tesla_vehicle/guidance", () => {
+            this.updateCredentialEvidence();
+            if (this.search_context && API.get("tesla_vehicle/guidance")?.generation !== this.search_generation) this.search_context = "";
+            this.setState({guidance: API.get("tesla_vehicle/guidance")});
+        });
         listen("tesla_vehicle/discovery", () => {
             const discovery = API.get("tesla_vehicle/discovery");
             if (discovery && !discovery.busy && discovery.status !== 'searching') this.scan_waiting = false;
-            if (discovery?.revision !== this.discovery_revision) {
-                this.discovery_revision = discovery?.revision;
-                this.discovery_received = Date.now();
-            }
+            this.sampleDiscovery(discovery);
             this.setState({discovery});
         });
         listen("ev/state", () => {
             const identity = this.vehicleIdentity();
-            if (identity !== this.identity) { ++this.revision; this.identity = identity; }
+            if (identity !== this.identity) { ++this.revision; this.identity = identity; this.search_context = ""; }
             this.setState({ev_state: API.get("ev/state")});
         });
         listen("ev/config", () => {
@@ -96,17 +104,20 @@ export class TeslaVehicle extends ConfigComponent<"tesla_vehicle/profiles", {}, 
         listen("tesla_vehicle/profiles", () => {
             const config = JSON.stringify(API.get("tesla_vehicle/profiles"));
             if (config !== this.saved_config) {
-                if (config !== this.pending_save) ++this.revision;
+                if (config !== this.pending_save) { ++this.revision; this.search_context = ""; }
                 this.saved_config = config;
             }
             this.setState({});
         });
         listen("bluetooth/state", () => this.setState({}));
+        // Visibility follows persisted intent, not the radio phase before reboot.
+        listen("bluetooth/config", () => this.setState({}));
     }
 
     override componentWillUnmount() {
         this.disposed = true; ++this.revision;
         this.listeners.abort(); clearTimeout(this.timer); this.cancelWait?.();
+        clearTimeout(this.discovery_timer);
         // No network/action at unmount. An uncommitted backend lease expires.
     }
 
@@ -169,12 +180,56 @@ export class TeslaVehicle extends ConfigComponent<"tesla_vehicle/profiles", {}, 
             !!s && !s.legacy_blocked && !s.action_busy && !s.pairing_pending && !s.stopping && !s.restart_required && !this.saving && !this.searchBusy();
     }
     private searchAllowed() { return this.idle() && this.state.edit_index >= 0 && /^[A-HJ-NPR-Z0-9]{17}$/.test(this.profile().vin); }
+    private discoveryAge() {
+        // Age starts at the backend's completion-relative sample, not navigation
+        // or event receipt. Wallclock is only an additional conservative expiry
+        // fence (sleep/clock skew), never a manufactured discovery timestamp.
+        const monotonic = typeof performance === 'undefined' ? NaN : performance.now();
+        const elapsed = monotonic - this.discovery_received, wall = Date.now() - this.discovery_wall_received;
+        if (!Number.isFinite(elapsed) || !Number.isFinite(wall) || elapsed < 0 || wall < 0) { this.discovery_age = Infinity; return Infinity; }
+        return this.discovery_age + Math.max(elapsed, wall);
+    }
+    private sampleDiscovery(d: View['discovery']) {
+        const same = d?.revision === this.discovery_revision;
+        const previous = same ? this.discoveryAge() : 0;
+        const valid = d?.status === 'complete' && Number.isInteger(d.revision) && d.revision >= this.discovery_revision && Number.isInteger(d.result_age_ms) && d.result_age_ms >= 0 &&
+            Number.isInteger(d.result_ttl_ms) && d.result_ttl_ms > 0 && d.result_ttl_ms <= 120000 &&
+            (!same || this.discovery_ttl === d.result_ttl_ms);
+        this.discovery_age = valid ? Math.max(previous, d.result_age_ms) : Infinity;
+        this.discovery_ttl = valid ? d.result_ttl_ms : 0;
+        this.discovery_revision = Math.max(this.discovery_revision, d?.revision ?? -1);
+        this.discovery_received = typeof performance === 'undefined' ? NaN : performance.now();
+        this.discovery_wall_received = Date.now();
+        if (d?.status === 'complete' && d.ev_index === this.state.edit_index && d.revision > this.scan_revision)
+            this.discovery_result_seen = true;
+        this.scheduleDiscoveryTick();
+    }
+    private scheduleDiscoveryTick() {
+        clearTimeout(this.discovery_timer);
+        const remaining = this.discovery_ttl - this.discoveryAge();
+        if (this.disposed || !this.search_context || !(remaining > 0)) return;
+        this.discovery_timer = setTimeout(() => {
+            if (!this.disposed) { this.setState({}); this.scheduleDiscoveryTick(); }
+        }, Math.min(1000, remaining));
+    }
+    private discoveryFresh() { return this.discoveryAge() < this.discovery_ttl; }
+    private discoveryAgeText() {
+        const age = this.discoveryAge();
+        return age < 10000 ? __("tesla_vehicle.content.found_recently") :
+            __("tesla_vehicle.content.found_seconds").replace('{seconds}', String(Math.floor(age / 1000)));
+    }
     private matchingTargets() {
         const d = this.state.discovery;
+        const p = this.profile();
         if (this.search_context !== this.searchContext() || this.search_saved !== JSON.stringify(API.get("tesla_vehicle/profiles")) ||
-            d?.ev_index !== this.state.edit_index || d.status !== 'complete' || d.busy || d.truncated || Date.now() - this.discovery_received >= 110000) return [];
+            !this.search_generation || d?.generation !== this.search_generation || d.generation !== this.state.guidance?.generation ||
+            d.searched_vin !== p.vin || d.ev_mac !== p.ev_mac ||
+            d?.ev_index !== this.state.edit_index || d.status !== 'complete' || d.busy || d.truncated ||
+            !Number.isInteger(d.revision) || d.revision <= this.scan_revision || !this.discoveryFresh()) return [];
         const matches = d.targets.filter(t => t.matches_vin);
-        return matches.length === 1 ? matches : [];
+        const t = matches[0];
+        return matches.length === 1 && /^(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$/.test(t.ble_address) &&
+            !/^(00:){5}00$|^(FF:){5}FF$/i.test(t.ble_address) && (t.ble_address_type === 0 || t.ble_address_type === 1) ? matches : [];
     }
     private search = async () => {
         if (this.command_in_progress || !this.searchAllowed()) return;
@@ -184,6 +239,11 @@ export class TeslaVehicle extends ConfigComponent<"tesla_vehicle/profiles", {}, 
             if (!await this.confirm('search')) return;
             if (!this.searchAllowed() || context !== this.searchContext() || revision !== this.revision) return;
             this.scan_waiting = true; this.search_context = context;
+            this.scan_revision = API.get("tesla_vehicle/discovery")?.revision ?? 0;
+            this.search_generation = API.get("tesla_vehicle/guidance")?.generation ?? "";
+            this.discovery_result_seen = false;
+            this.discovery_age = Infinity; this.discovery_ttl = 0;
+            clearTimeout(this.discovery_timer);
             this.search_saved = JSON.stringify(API.get("tesla_vehicle/profiles"));
             const p = this.profile();
             await API.call("tesla_vehicle/scan", {vin: p.vin, ev_index: p.ev_index, ev_mac: p.ev_mac}, () => __("tesla_vehicle.content.search_failed"));
@@ -333,7 +393,9 @@ export class TeslaVehicle extends ConfigComponent<"tesla_vehicle/profiles", {}, 
     private deleteAllowed() { return this.idle() && !this.configurationDirty() && this.profile().ev_index >= 0; }
 
     render(props: {}, state: TeslaConfig & View) {
-        if (!util.render_allowed()) return null;
+        // Own the complete extension boundary here: separator, heading and body.
+        // Unknown config fails closed; no wrapper is emitted by Fahrzeuge.
+        if (!util.render_allowed() || API.get("bluetooth/config")?.enable !== true) return null;
         if (!API.get("tesla_vehicle/profiles")) return <Fragment><FormSeparator /><h2>{__("tesla_vehicle.bluetooth.tesla_title")}</h2></Fragment>;
         const p = this.profile(), status = this.profileStatus(), evs = API.get("ev/config")?.evs ?? [];
         const items: [string, string][] = [["-1", __("tesla_vehicle.content.select_vehicle")], ...evs.map((ev, index): [string, string] => [String(index), ev.name])];
@@ -358,10 +420,19 @@ export class TeslaVehicle extends ConfigComponent<"tesla_vehicle/profiles", {}, 
             {!teslaBluetoothReady(API.get("bluetooth/state")) ? <p class="text-warning">{__("tesla_vehicle.content.bluetooth_blocked")}</p> : undefined}
             {!/^[A-HJ-NPR-Z0-9]{17}$/.test(p.vin) ? <p class="text-muted">{__("tesla_vehicle.content.vin_help")}</p> : undefined}
 
-            {state.discovery?.status === 'complete' && !this.searchBusy() && !state.adopted && this.search_context === this.searchContext() ? target ?
-                <Alert variant="success"><p>{__("tesla_vehicle.content.matching_vin")}</p>
-                    <Button type="button" className="w-100" disabled={state.command_busy || !this.searchAllowed()} onClick={() => this.selectTarget(target)}>{__("tesla_vehicle.content.select_target")}</Button></Alert>
-                : <Alert variant="info">{__("tesla_vehicle.content.search_empty")}</Alert> : undefined}
+            {(state.discovery?.status === 'complete' || this.discovery_result_seen) && !this.searchBusy() && !state.adopted && this.search_context === this.searchContext() ? target ?
+                <Alert variant="success">
+                    <h4 class="h5">{__("tesla_vehicle.content.match_found")}</h4>
+                    <dl class="mb-3">
+                        <div class="d-flex flex-wrap justify-content-between gap-2 my-2"><dt class="fw-normal">{__("tesla_vehicle.content.match_vin")}</dt><dd class="mb-0 text-end text-break">{'…' + p.vin.slice(-6)}</dd></div>
+                        <div class="d-flex flex-wrap justify-content-between gap-2 my-2"><dt class="fw-normal">{__("tesla_vehicle.content.match_address")}</dt><dd class="mb-0 text-end text-break">{target.ble_address}</dd></div>
+                        <div class="d-flex flex-wrap justify-content-between gap-2 my-2"><dt class="fw-normal">{__("tesla_vehicle.content.found")}</dt><dd class="mb-0 text-end">{this.discoveryAgeText()}</dd></div>
+                    </dl>
+                    <Button type="button" className="w-100" disabled={state.command_busy || !this.searchAllowed()} onClick={() => this.selectTarget(target)}>{__("tesla_vehicle.content.select_target")}</Button>
+                    <p class="mt-3 mb-0">{__("tesla_vehicle.content.adopt_help")}</p>
+                    {state.discovery.result_ttl_ms === 120000 ? <p class="small mt-2 mb-0">{__("tesla_vehicle.content.result_lifetime")}</p> : undefined}
+                </Alert>
+                : <Alert variant="info">{!this.discoveryFresh() || state.discovery?.status !== 'complete' ? __("tesla_vehicle.content.result_expired") : __("tesla_vehicle.content.search_empty")}</Alert> : undefined}
         </Fragment> : undefined;
         const commonSoc = state.ev_state?.soc;
         const currentSoc = state.ev_state?.active_ev_index === p.ev_index && state.ev_state?.mac === p.ev_mac &&

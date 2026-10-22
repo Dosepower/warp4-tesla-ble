@@ -42,6 +42,12 @@ export type poll = {ev_index: number};
 export type forget_key = {ev_index: number};
 export type scan = {vin: string; ev_index: number; ev_mac: string};
 export interface discovery {
+    // Completion-relative monotonic age sampled by the backend; no wallclock.
+    result_age_ms: number;
+    result_ttl_ms: number;
+    searched_vin: string;
+    ev_mac: string;
+    generation: string;
     status: 'idle' | 'searching' | 'complete' | 'error';
     busy: boolean;
     error: string;

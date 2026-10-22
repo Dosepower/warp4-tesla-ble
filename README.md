@@ -4,11 +4,11 @@
 
 ## Firmware herunterladen
 
-- **[Aktuell veröffentlichte Preview 3 – OTA, Anleitung und SHA256SUMS](https://github.com/Dosepower/warp4-tesla-ble/releases/tag/v0.2.2-warp4-experimental-preview3)** – Firmware `2.13.5+6ad9e156`.
+- **[Aktuell veröffentlichte Preview 4 – OTA, Anleitung und SHA256SUMS](https://github.com/Dosepower/warp4-tesla-ble/releases/tag/v0.2.3-warp4-experimental-preview4)** – Firmware `2.13.5+6ad9fd3c`.
 - [Alle Releases und ältere Versionen](https://github.com/Dosepower/warp4-tesla-ble/releases)
 - [Aktueller Entwicklungs-/Review-PR #2](https://github.com/Dosepower/warp4-tesla-ble/pull/2)
 
-Neue Vorschauänderungen sind in Arbeit. Ein laufender Build ist noch kein veröffentlichtes Update. Für die Installation gilt immer die Anleitung des konkret gewählten Releases; ausschließlich dessen normales WARP4-Web-OTA verwenden. Keine Fullflash-/Bootloader-/Partitionsinstallation und keine Sicherheitsfunktionen deaktivieren.
+Preview 4 ergänzt Fundinformationen mit Ablaufprüfung und blendet die Tesla-Erweiterung bei Bluetooth aus vollständig aus. Die Ausblendung wurde auf der eigenen WARP4 im Browser geprüft; neue Suche/Übernahme wurde für diesen Build nicht am Fahrzeug ausgeführt. Für die Installation gilt immer die Anleitung des konkret gewählten Releases; ausschließlich dessen normales WARP4-Web-OTA verwenden. Keine Fullflash-/Bootloader-/Partitionsinstallation und keine Sicherheitsfunktionen deaktivieren.
 
 ## Was die Erweiterung bietet
 
@@ -20,7 +20,7 @@ Neue Vorschauänderungen sind in Arbeit. Ein laufender Build ist noch kein verö
 
 ## Getestet / noch offen
 
-**Bestätigt:** Preview 3 auf eigener WARP4 installiert und bootvalidiert; Originalfirmware im zweiten gültigen Slot erhalten. Sicherheitsfunktionen aktiv, kein EVSE-Fehler bei Prüfung. Umfangreiche lokale Backend-/Frontend-/Sanitizer-Tests und unabhängige Abschlussprüfung. VIN-Suche und Trefferübernahme wurden in einem früheren Build am Gerät geprüft.
+**Bestätigt:** Preview 4 auf eigener WARP4 installiert und bootvalidiert; Originalfirmware im zweiten gültigen Slot erhalten. Sicherheitsfunktionen aktiv, kein EVSE-Fehler bei Prüfung. Umfangreiche lokale Backend-/Frontend-/Sanitizer-Tests und unabhängige Abschlussprüfung. VIN-Suche und Trefferübernahme wurden in einem früheren Build am Gerät geprüft.
 
 **Noch nicht fahrzeugbestätigt:** erfolgreiches Tesla-Pairing, authentifizierter realer SoC-Abruf, Mehrfahrzeug-Wiederverbindung und Langzeit-/Ladekoexistenz. Destruktive Zuordnungs-/Schlüsseltests sind keine behaupteten Live-Tests. Details und Grenzen stehen in jedem Release.
 
