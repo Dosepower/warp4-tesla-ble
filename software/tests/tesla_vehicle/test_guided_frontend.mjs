@@ -20,9 +20,10 @@ const compiled=await build({entryPoints:[fileURLToPath(new URL(`../../web/${tree
 // This is the real import-resolved implementation, never a detached authored fixture.
 assert(Object.keys(compiled.metafile.inputs).some(p=>p.endsWith(`/web/${tree}/modules/tesla_vehicle/guided_vehicle.tsx`)||p.endsWith(`web/${tree}/modules/tesla_vehicle/guided_vehicle.tsx`)), 'Production entrypoint must resolve the final guided component');
 const module={exports:{}};
-vm.runInNewContext(compiled.outputFiles[0].text,{module,exports:module.exports,fixture:f,structuredClone,Date:{now:()=>Date.now()+(f.offset??0)},setTimeout:(fn,ms)=>setTimeout(()=>{f.offset=(f.offset??0)+(f.advance??0);fn();},f.advance?0:ms),clearTimeout,AbortController,crypto:globalThis.crypto});
+vm.runInNewContext(compiled.outputFiles[0].text,{module,exports:module.exports,fixture:f,structuredClone,performance,Date:{now:()=>Date.now()+(f.offset??0)},setTimeout:(fn,ms)=>setTimeout(()=>{f.offset=(f.offset??0)+(f.advance??0);fn();},f.advance?0:ms),clearTimeout,AbortController,crypto:globalThis.crypto});
 f.values['ev/config']={evs:[0,1].map(i=>({name:`Synthetic ${i}`,mac:`11:22:33:44:55:0${i}`}))};
 f.values['ev/state']={active_ev_index:0,mac:'11:22:33:44:55:00',soc:null};
+f.values['bluetooth/config']={enable:true};
 f.values['bluetooth/state']={supported:true,phase:'active'};
 f.values['tesla_vehicle/profiles']={entries:[0,1].map(i=>({ev_index:i,ev_mac:f.values['ev/config'].evs[i].mac,enable:false,vin:i?'5YJ3E1EA7KF000002':'5YJ3E1EA7KF000001',ble_address:'',ble_address_type:0,discovery_revision:0,poll_interval:300,wake_once:false}))};
 f.values['tesla_vehicle/state']={profile_ev_index:-1,running:false,key_presence:'unknown'};
@@ -57,7 +58,7 @@ assert.equal(f.calls.length,0);
 assert(!findButton('pair'),'Before adopting a match show VIN/search, not a redundant disabled pairing step');
 await button('search').props.onClick();
 const target={name:'S3acc31774a738ea0C',ble_address:'01:02:03:04:05:06',ble_address_type:1,matches_vin:true,rssi:-50};
-f.values['tesla_vehicle/discovery']={status:'complete',busy:false,ev_index:0,revision:8,targets:[target]};event('tesla_vehicle/discovery');
+f.values['tesla_vehicle/discovery']={status:'complete',busy:false,ev_index:0,result_age_ms:0,result_ttl_ms:120000,searched_vin:'5YJ3E1EA7KF000001',ev_mac:'11:22:33:44:55:00',generation:'7',revision:8,targets:[target]};event('tesla_vehicle/discovery');
 await button('select_target').props.onClick();
 assert.equal(f.calls.at(-1).topic,'tesla_vehicle/profiles_update','Adopt itself saves the existing profile transaction; no second Save');
 assert.equal(f.calls.at(-1).payload.entries[0].ble_address_type,1);
@@ -101,6 +102,7 @@ const normal=()=>{
  f.values['tesla_vehicle/guidance']={generation:'7',request:'',ready:false,profiles:[{ev_index:0,paired:false,key_presence:'absent',binding_fresh:true}]};event('tesla_vehicle/guidance');
  f.values['tesla_vehicle/state']={profile_ev_index:-1,running:false,key_presence:'unknown'};event('tesla_vehicle/state');
  f.values['ev/state']={active_ev_index:0,mac:'11:22:33:44:55:00',soc:null};event('ev/state');
+ f.values['bluetooth/config']={enable:true};
  f.values['bluetooth/state']={supported:true,phase:'active'};event('bluetooth/state');
  page.selectProfile('0');f.show=async()=>true;f.call=async()=>{};
 };
@@ -150,26 +152,27 @@ f.values['ev/state'].soc=null;event('ev/state');assert(!nodes().some(n=>n.props.
 // Unique-only, TTL and unsaved/config scope protections for discovery adoption.
 await button('search').props.onClick();
 for(const targets of [[{...target,matches_vin:false}],[target,{...target,ble_address:'02:02:03:04:05:06'}],[]]){
- f.values['tesla_vehicle/discovery']={status:'complete',busy:false,ev_index:0,revision:20,targets};event('tesla_vehicle/discovery');
+ f.values['tesla_vehicle/discovery']={status:'complete',busy:false,ev_index:0,result_age_ms:0,result_ttl_ms:120000,searched_vin:'5YJ3E1EA7KF000001',ev_mac:'11:22:33:44:55:00',generation:'7',revision:20,targets};event('tesla_vehicle/discovery');
  assert(!button('select_target'));count=f.calls.length;await page.selectTarget(target);assert.equal(f.calls.length,count);
 }
 for(const vin of ['', '5YJ3E1EA7KF00000I', '5yj3E1EA7KF000001','5YJ3E1EA7KF0000010']){page.setProfile({vin});assert.equal(button('search').props.disabled,true);}
 normal();
 // An in-flight A adoption response never marks B (or A-B-A) as saved.
-await button('search').props.onClick();f.values['tesla_vehicle/discovery']={status:'complete',busy:false,ev_index:0,revision:21,targets:[target]};event('tesla_vehicle/discovery');
+await button('search').props.onClick();f.values['tesla_vehicle/discovery']={status:'complete',busy:false,ev_index:0,result_age_ms:0,result_ttl_ms:120000,searched_vin:'5YJ3E1EA7KF000001',ev_mac:'11:22:33:44:55:00',generation:'7',revision:21,targets:[target]};event('tesla_vehicle/discovery');
 let savedResponse;f.call=()=>new Promise(r=>{savedResponse=r;});const pendingSave=button('select_target').props.onClick();page.selectProfile('1');page.selectProfile('0');savedResponse();await pendingSave;assert.equal(page.state.adopted,false);normal();
 // OFF exposes no Tesla actions and cannot synthesize a writable config.
 const savedApi=f.values['tesla_vehicle/profiles'];delete f.values['tesla_vehicle/profiles'];
 assert(!button('pair')&&!button('search')&&!button('read_soc'));count=f.calls.length;nodes();assert.equal(f.calls.length,count);f.values['tesla_vehicle/profiles']=savedApi;
 // Unmount while the explicitly requested local preparation is in flight cannot commit later.
 f.advance=13000;count=f.calls.length;await button('pair').props.onClick();assert.equal(f.calls.length,count+1,'No commit on missing ACK/timeout');assert(page.state.command_error);f.advance=0;f.offset=0;normal();
-await button('search').props.onClick();f.values['tesla_vehicle/discovery']={status:'complete',busy:false,ev_index:0,revision:25,targets:[target]};event('tesla_vehicle/discovery');
-f.offset=110001;assert(!button('select_target'),'Client expiry hides even a cached matching result');f.offset=0;
-const staleAdopt=button('select_target').props.onClick;f.offset=110001;count=f.calls.length;await staleAdopt();assert.equal(f.calls.length,count,'Stale rendered adoption handler cannot save or crash');f.offset=0;
+await button('search').props.onClick();f.values['tesla_vehicle/discovery']={status:'complete',busy:false,ev_index:0,result_age_ms:0,result_ttl_ms:120000,searched_vin:'5YJ3E1EA7KF000001',ev_mac:'11:22:33:44:55:00',generation:'7',revision:25,targets:[target]};event('tesla_vehicle/discovery');
+const staleAdopt=button('select_target').props.onClick;
+f.offset=120001;assert(!button('select_target'),'Client expiry hides even a cached matching result');
+count=f.calls.length;await staleAdopt();assert.equal(f.calls.length,count,'Stale rendered adoption handler cannot save or crash');f.offset=0;
 const discoveryBefore=structuredClone(f.values['tesla_vehicle/discovery']);
 f.values['tesla_vehicle/discovery']={...discoveryBefore,revision:26,targets:[{...target,ble_address:'02:03:04:05:06:07'}]};event('tesla_vehicle/discovery');
 await staleAdopt();assert.equal(f.calls.length,count,'An old result click cannot adopt a newly replaced peer');
-f.values['tesla_vehicle/discovery']={...discoveryBefore,targets:[target]};event('tesla_vehicle/discovery');
+f.values['tesla_vehicle/discovery']={...discoveryBefore,revision:27,targets:[target]};event('tesla_vehicle/discovery');
 f.call=async(t,p)=>{if(t==='tesla_vehicle/profiles_update'){f.values['tesla_vehicle/profiles']=structuredClone(p);event('tesla_vehicle/profiles');}};
 await button('select_target').props.onClick();assert(page.state.adopted,'Own config ACK before HTTP response is not mistaken for a foreign update');normal();
 // New approved primary paired action and failed-pair recovery.
@@ -214,7 +217,7 @@ f.values['tesla_vehicle/discovery']={status:'error',busy:false,targets:[],error:
 assert(nodes().some(n=>n.props.children==='tesla_vehicle.content.search_failed'));normal();
 await button('search').props.onClick();assert(page.searchBusy());count=f.calls.length;await button('search').props.onClick();assert.equal(f.calls.length,count);
 await assert.rejects(page.sendSave('tesla_vehicle/profiles',{entries:page.state.entries}));
-f.values['tesla_vehicle/discovery']={status:'complete',busy:false,ev_index:0,revision:30,targets:[target],truncated:true};event('tesla_vehicle/discovery');assert(!button('select_target'));
+f.values['tesla_vehicle/discovery']={status:'complete',busy:false,ev_index:0,result_age_ms:0,result_ttl_ms:120000,searched_vin:'5YJ3E1EA7KF000001',ev_mac:'11:22:33:44:55:00',generation:'7',revision:30,targets:[target],truncated:true};event('tesla_vehicle/discovery');assert(!button('select_target'));
 normal();
 // A disabled persisted profile remains disabled after a failed adoption save.
 f.values['tesla_vehicle/profiles'].entries[0].enable=false;
@@ -222,13 +225,13 @@ f.values['tesla_vehicle/profiles'].entries[0].ble_address='';
 f.values['tesla_vehicle/profiles'].entries[0].discovery_revision=0;
 page.state.entries=structuredClone(f.values['tesla_vehicle/profiles'].entries);event('tesla_vehicle/profiles');
 await button('search').props.onClick();
-f.values['tesla_vehicle/discovery']={status:'complete',busy:false,ev_index:0,revision:31,targets:[target]};event('tesla_vehicle/discovery');
+f.values['tesla_vehicle/discovery']={status:'complete',busy:false,ev_index:0,result_age_ms:0,result_ttl_ms:120000,searched_vin:'5YJ3E1EA7KF000001',ev_mac:'11:22:33:44:55:00',generation:'7',revision:31,targets:[target]};event('tesla_vehicle/discovery');
 f.call=async()=>{throw Error('injected persistence refusal');};count=f.calls.length;
 await button('select_target').props.onClick();
 assert.equal(f.calls.length,count+1);assert(!page.state.adopted && !page.state.entries[0].enable && !f.values['tesla_vehicle/profiles'].entries[0].enable);
 assert(page.state.command_error && !page.state.command_busy);normal();
 // Double adoption is one save; its late ACK cannot cross A-B-A.
-await button('search').props.onClick();f.values['tesla_vehicle/discovery']={status:'complete',busy:false,ev_index:0,revision:32,targets:[target]};event('tesla_vehicle/discovery');
+await button('search').props.onClick();f.values['tesla_vehicle/discovery']={status:'complete',busy:false,ev_index:0,result_age_ms:0,result_ttl_ms:120000,searched_vin:'5YJ3E1EA7KF000001',ev_mac:'11:22:33:44:55:00',generation:'7',revision:32,targets:[target]};event('tesla_vehicle/discovery');
 let adoptionAck;f.call=()=>new Promise(r=>{adoptionAck=r;});count=f.calls.length;
 const adoptHandler=button('select_target').props.onClick;const adopting=adoptHandler();await adoptHandler();assert.equal(f.calls.length,count+1);
 page.selectProfile('1');page.selectProfile('0');adoptionAck();await adopting;assert(!page.state.adopted);normal();

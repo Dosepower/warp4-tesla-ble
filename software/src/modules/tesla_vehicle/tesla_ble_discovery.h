@@ -19,7 +19,7 @@ public:
     enum class Status { Idle, Searching, Complete, Error };
     enum class Action { None, Params, Start, Stop, Retire };
     enum class Event { Params, Start, Done, Stop };
-    struct Scope { int index=-1; uint64_t mac=0; char name[19]{}; uint64_t generation=0; };
+    struct Scope { int index=-1; uint64_t mac=0; char name[19]{}; uint64_t generation=0; char searched_vin[18]{}; };
     struct Target { uint8_t address[6]{}; uint8_t address_type=0; int rssi=0; char name[19]{}; bool ambiguous=false; };
     struct Snapshot {
         Status status=Status::Idle;
@@ -27,6 +27,8 @@ public:
         bool busy=false, truncated=false;
         unsigned count=0;
         uint32_t revision=0;
+        // Authoritative monotonic completion time, never a wallclock timestamp.
+        uint32_t completed_at_ms=0;
         Scope scope;
         Target targets[LIMIT]{};
     };
@@ -92,7 +94,7 @@ public:
         if(phase==Phase::StartQueued) { phase=Phase::Starting;since=now;scan_may_run=true;return Action::Start; }
         if(phase==Phase::Finished) {
             phase=Phase::Idle;since=now;scan_may_run=false;running.store(false);
-            view.status=Status::Complete;view.revision=++revision;return Action::None;
+            view.status=Status::Complete;view.completed_at_ms=now;view.revision=++revision;return Action::None;
         }
         if(phase==Phase::Failed) {
             if(scan_may_run && !stop_sent) { stop_sent=true;since=now;phase=Phase::Stopping;return Action::Stop; }

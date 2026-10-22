@@ -211,6 +211,9 @@ bool TeslaVehicle::prepare_tesla()
         {"status",Config::Str("idle",0,9)}, {"busy",Config::Bool(false)},
         {"error",Config::Str("",0,16)}, {"truncated",Config::Bool(false)},
         {"revision",Config::Uint(0,0,UINT32_MAX)}, {"ev_index",Config::Int(-1,-1,EV_MAX_EVS-1)},
+        {"result_age_ms",Config::Uint(TeslaBleDiscovery::RESULT_TTL_MS,0,UINT32_MAX)},
+        {"result_ttl_ms",Config::Uint(TeslaBleDiscovery::RESULT_TTL_MS,0,UINT32_MAX)},
+        {"searched_vin",Config::Str("",0,17)}, {"ev_mac",Config::Str("",0,17)}, {"generation",Config::Str("",0,20)},
         {"targets",Config::Array({},&tesla->discovery_target,0,TeslaBleDiscovery::LIMIT)},
     });
     tesla->scan_command=Config::Object({
@@ -505,6 +508,9 @@ void TeslaVehicle::register_tesla_urls()
             !tesla_ble_vehicle_name(tesla->scan_command.get("vin")->asString().c_str(),scope.name)) {
             errmsg=checked_error_string("Valid VIN and exact existing WARP profile required for search");return;
         }
+        // Informational scope copied with the completed discovery snapshot.
+        // Existing name/MAC/generation/revision checks remain adoption authority.
+        memcpy(scope.searched_vin,tesla->scan_command.get("vin")->asString().c_str(),17);
         if(!discovery_allowed() || !bluetooth.request_discovery(scope)) {
             errmsg=checked_error_string("Tesla search unavailable: Bluetooth inactive, restart pending, or action busy");return;
         }
@@ -626,6 +632,9 @@ void TeslaVehicle::publish_discovery()
     if(!tesla) { return; }
     TeslaBleDiscovery::Snapshot s;
     if(!bluetooth.discovery_snapshot(s)) { return; }
+    // Refresh age even when the result revision is unchanged. The existing live
+    // adoption check enforces this exact TTL independently of API publication.
+    tesla->discovery_state.get("result_age_ms")->updateUint(s.status==TeslaBleDiscovery::Status::Complete ? millis()-s.completed_at_ms : TeslaBleDiscovery::RESULT_TTL_MS);
     if (s.revision == tesla->discovery_revision) {
         auto rows = tesla->discovery_state.get("targets");
         const bool scope_current = ev.get_live_identity().generation == s.scope.generation && ev.get_profile_mac(s.scope.index) == s.scope.mac;
@@ -654,6 +663,14 @@ void TeslaVehicle::publish_discovery()
     state.get("truncated")->updateBool(s.truncated);
     state.get("revision")->updateUint(s.revision);
     state.get("ev_index")->updateInt(s.scope.index);
+    char mac_text[18]{},generation[21]{};
+    if (s.scope.mac) snprintf(mac_text,sizeof(mac_text),"%02X:%02X:%02X:%02X:%02X:%02X",
+        unsigned((s.scope.mac>>40)&255),unsigned((s.scope.mac>>32)&255),unsigned((s.scope.mac>>24)&255),
+        unsigned((s.scope.mac>>16)&255),unsigned((s.scope.mac>>8)&255),unsigned(s.scope.mac&255));
+    snprintf(generation,sizeof(generation),"%llu",static_cast<unsigned long long>(s.scope.generation));
+    state.get("searched_vin")->updateString(s.scope.searched_vin);
+    state.get("ev_mac")->updateString(mac_text);
+    state.get("generation")->updateString(generation);
     state.get("status")->updateString(!ok?"error":s.status==TeslaBleDiscovery::Status::Idle?"idle":
         s.status==TeslaBleDiscovery::Status::Searching?"searching":s.status==TeslaBleDiscovery::Status::Complete?"complete":"error");
     state.get("error")->updateString(ok?s.error:"memory");
