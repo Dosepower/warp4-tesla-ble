@@ -34,7 +34,11 @@ if metadata_json == None:
 
 metadata = json.loads(metadata_json)
 
-if len(metadata['signature_preset']) == 0:
+# Outer signing and embedded update-verification identity are independent.
+# Absent option preserves every existing target's historical default.
+verify_preset = metadata.get('signature_verify_preset', metadata['signature_preset'])
+
+if len(verify_preset) == 0:
     publisher_literal = ''
     sodium_public_key = b''
 else:
@@ -42,9 +46,9 @@ else:
     config.read(make_signature_path('config.ini'))
 
     try:
-        preset = dict(config['preset:' + metadata['signature_preset']])
+        preset = dict(config['preset:' + verify_preset])
     except KeyError:
-        print(f"Preset {metadata['signature_preset']} is unknown, maybe the signature data is outdated")
+        print(f"Preset {verify_preset} is unknown, maybe the signature data is outdated")
         sys.exit(-1)
 
     if 'extends' in preset:
@@ -82,10 +86,22 @@ else:
 
     sodium_public_key = bytes.fromhex(sodium_public_key_json['sodium_public_key'])
 
+# Installer-only: validate the exact bytes about to be emitted, not a second
+# read of the current key path. Historical targets have no extra metadata key.
+if "installer_public_key_sha256" in metadata:
+    import hashlib
+    expected = metadata["installer_public_key_sha256"]
+    if type(expected) is not str or len(sodium_public_key) != 32 or hashlib.sha256(sodium_public_key).hexdigest() != expected:
+        raise ValueError("embedded public-key fingerprint mismatch")
+
+
 h = '// WARNING: This file is generated\n\n'
 h += 'extern const char *signature_publisher;\n\n'
 h += 'extern const unsigned char signature_sodium_public_key_data[];\n\n'
 h += f'#define signature_sodium_public_key_length {len(sodium_public_key)}\n'
+
+if verify_preset != metadata['signature_preset']:
+    h += '#define SIGNATURE_VERIFIER_INDEPENDENT 1\n'
 
 util.write_generated_file('generated/signature_verify.h', h)
 

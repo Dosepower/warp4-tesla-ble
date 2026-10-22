@@ -120,11 +120,19 @@ std::span<T> make_permanent(std::vector<T> &&src, RAM r) {
     // Have to use alloc + placement new here:
     // T can have const members that can't be set after allocating them with new.
     auto *dst = static_cast<T *>(perm_aligned_alloc(alignof(T), sizeof(T) * size, r));
+    // Allocation is fallible even with exceptions disabled. On failure, return
+    // an empty span without moving elements or changing the source vector.
+    // The caller must keep its source owner alive if it uses that storage.
+    if (dst == nullptr)
+        return std::span<T>{};
+
     for (size_t i = 0; i < size; ++i)
         new(dst + i) T{std::move(src[i])};
 
-    src.clear();
-    src.shrink_to_fit();
+    // shrink_to_fit is nonbinding (and can be a no-op without exceptions).
+    // Swap with an empty vector to destroy source elements and release their
+    // buffer without allocating, even when its collector has to stay alive.
+    std::vector<T>{}.swap(src);
     return {dst, size};
 }
 

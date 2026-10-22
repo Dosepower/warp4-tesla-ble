@@ -1066,6 +1066,9 @@ private:
 public:
     bool clearString();
     bool updateString(const String &value);
+    // Explicit acceptance (true also if unchanged). On OOM, false retains the
+    // prior valid string and update flags. No allocating by-value fallback.
+    bool updateStringChecked(const char *value);
     bool updateInt(int32_t value);
     bool updateUint(uint32_t value);
     bool updateFloat(float value);

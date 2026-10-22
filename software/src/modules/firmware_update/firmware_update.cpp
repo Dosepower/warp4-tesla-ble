@@ -304,7 +304,12 @@ void FirmwareUpdate::pre_setup()
     }};
 
     state = Config::Object({
+#if defined(SIGNATURE_VERIFIER_INDEPENDENT)
+        // Update trust identity is not the publisher of this custom artifact.
+        {"publisher", Config::Str("", 0, 0)},
+#else
         {"publisher", Config::Str(signature_publisher, 0, static_cast<uint16_t>(strlen(signature_publisher)))},
+#endif
         {"check_timestamp", Config::Uint53(0)},
         {"check_state", Config::Enum(CheckState::Idle)},
         {"update_version", Config::Str("", 0, SEMANTIC_VERSION_MAX_STRING_LENGTH)},
@@ -355,7 +360,11 @@ void FirmwareUpdate::setup()
     cert_id = config.get("cert_id")->asInt();
 
 #if signature_sodium_public_key_length != 0
+#if defined(SIGNATURE_VERIFIER_INDEPENDENT)
+    logger.printfln("Update verifier expects publisher: %s", signature_publisher);
+#else
     logger.printfln("Running firmware is signed by: %s", signature_publisher);
+#endif
 
     if (update_url.length() > 0) {
         api.addFeature("firmware_update");

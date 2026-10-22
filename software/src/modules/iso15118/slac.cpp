@@ -679,15 +679,17 @@ void SLAC::handle_cm_slac_match_request(const CM_SLACMatchRequest &cm_slac_match
     }
 #endif
 
-    // In autocharge-only mode, or the second round after reading SoC, we already
+    // For SoC-incompatible EVs, autocharge-only, or the second round after SoC, we already
     // have all the data we need once SLAC reaches matching.
     // Do NOT send CM_SLAC_MATCH.CNF: if we confirm the match, the EV joins the PLC
     // network and tries SDP/V2G, which times out after ~90-100s before falling back to IEC.
     // By not confirming, the EV's TT_MATCH_RESPONSE expires immediately after 200ms.
-    // With nonegotiation_autocharge the match is confirmed instead and the EV is
-    // answered with Failed_NoNegotiation at the supportedAppProtocol stage.
-    if ((iso15118.is_autocharge_only() || iso15118.nonegotiation_pending) && !iso15118.use_nonegotiation_autocharge()) {
-        iso15118.trace("%s: SLAC complete, NOT sending CM_SLAC_MATCH.CNF", iso15118.nonegotiation_pending ? "After SoC" : "Autocharge-only mode");
+    // With nonegotiation_autocharge a compatible EV's match is confirmed instead
+    // and answered with Failed_NoNegotiation at supportedAppProtocol. Tesla
+    // always takes IEC here, without entering SDP/V2G or depending on BLE.
+    if ((iso15118.is_slac_only() || iso15118.nonegotiation_pending) &&
+        (!iso15118.is_soc_compatible() || !iso15118.use_nonegotiation_autocharge())) {
+        iso15118.trace("%s: SLAC complete, NOT sending CM_SLAC_MATCH.CNF", iso15118.nonegotiation_pending ? "After SoC" : "SLAC-only mode");
         iso15118.nonegotiation_pending = false;
         iso15118.reslac_guard_deadline = 0_us;
         next_timeout = {};

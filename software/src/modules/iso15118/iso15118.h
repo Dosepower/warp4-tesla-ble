@@ -100,8 +100,11 @@ public:
                config.get("charge_via_iso15118")->asBool();
     }
 
-    // Keep vehicle exclusions here so the experimental override bypasses all of them.
+    // Tesla must never enter PLC SoC acquisition, even with the testing override.
     bool is_soc_compatible() const {
+        if (common.get_evcc_vendor() == EVCCVendor::Tesla) {
+            return false;
+        }
 #if OPTIONS_ISO15118_ENABLE_TESTING_OPTIONS()
         if (config_experimental.get("ignore_soc_compatibility")->asBool()) {
             return true;
@@ -119,10 +122,18 @@ public:
                !config.get("charge_via_iso15118")->asBool();
     }
 
+    // MAC observation is independent of authorization. Incompatible vehicles
+    // need the same IEC fallback even when autocharge is disabled. An explicit
+    // ISO charging setting must not re-enable their unsafe PLC SoC path.
+    bool is_slac_only() const {
+        return !is_soc_compatible() || is_autocharge_only();
+    }
+
     // Returns true if read_soc is enabled but charge_via_iso15118 is not.
     // In this mode, we read the SoC once via V2G and then switch to IEC 61851 temporary mode.
     bool is_read_soc_only() const {
         return config.get("read_soc")->asBool() &&
+               is_soc_compatible() &&
                !config.get("charge_via_iso15118")->asBool();
     }
 

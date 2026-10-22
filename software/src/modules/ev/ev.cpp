@@ -18,6 +18,7 @@
  */
 
 #include "ev.h"
+#include "ev_session_generation.h"
 
 #include "event_log_prefix.h"
 #include "generated/module_dependencies.h"
@@ -93,7 +94,7 @@ void Ev::pre_setup()
             0, EV_MAX_EVS,
             Config::type_id<Config::ConfObject>())
         }
-    }), [](Config &update, ConfigSource source) -> String {
+    }), [this](Config &update, ConfigSource source) -> String {
         Config *evs = static_cast<Config *>(update.get("evs"));
         size_t count = evs->count();
 
@@ -130,6 +131,11 @@ void Ev::pre_setup()
 #endif
         }
 
+        // Validation/replacement is main-task-only. Invalidate SLAC authority
+        // before publishing value-only profile data; admitted workers never
+        // retain a Config/String reference across the subsequent replacement.
+        if (source != ConfigSource::File) { live_revision.fetch_or(1); }
+        publish_profile_macs(update);
         return "";
     }};
 
@@ -185,6 +191,7 @@ void Ev::pre_setup()
 void Ev::setup()
 {
     api.restorePersistentConfig("ev/config", &config);
+    publish_profile_macs(config);
     initialized = true;
 }
 
@@ -245,7 +252,17 @@ void Ev::register_events()
 
 void Ev::on_ev_connected(const uint8_t mac[EV_MAC_ADDRESS_LENGTH], bool injected)
 {
+    live_revision.fetch_or(1); // Invalidate worker admission before any transition.
+    if (!ev_advance_session(session_generation, session_generation_exhausted, active_ev_index, active_ev_mac)) {
+        on_ev_disconnected(); // Clear API/session; never profile-match or authenticate this SLAC identity.
+        return;
+    }
     active_ev_index = -1;
+    active_ev_mac = 0;
+    active_ev_injected = injected;
+    for (size_t i = 0; i < EV_MAC_ADDRESS_LENGTH; ++i) {
+        active_ev_mac = (active_ev_mac << 8) | mac[i];
+    }
     clear_session();
 
     // Track this MAC in the seen_macs list
@@ -286,6 +303,7 @@ void Ev::on_ev_connected(const uint8_t mac[EV_MAC_ADDRESS_LENGTH], bool injected
     state.get("soc")->updateFloat(session.soc);
     state.get("capacity")->updateFloat(session.capacity);
     state.get("charging_efficiency")->updateFloat(session.charging_efficiency);
+    publish_live_identity();
 
     // If autocharge is enabled, an EV that identified itself via SLAC (or was
     // injected) acts as an authentication source.
@@ -307,7 +325,12 @@ void Ev::on_ev_connected(const uint8_t mac[EV_MAC_ADDRESS_LENGTH], bool injected
 
 void Ev::on_ev_disconnected()
 {
+    live_revision.fetch_or(1);
+    ev_advance_session(session_generation, session_generation_exhausted, active_ev_index, active_ev_mac);
     active_ev_index = -1;
+    active_ev_mac = 0;
+    active_ev_injected = false;
+    publish_live_identity();
     clear_session();
 
     // Update API state
@@ -354,6 +377,36 @@ int Ev::find_matching_ev_index(const uint8_t mac[EV_MAC_ADDRESS_LENGTH])
     }
 
     return -1;
+}
+
+uint64_t Ev::get_profile_mac(int index) const
+{
+    if (index < 0 || index >= EV_MAX_EVS) { return 0; }
+    const auto revision = profile_revision.load();
+    if (revision & 1) { return 0; }
+    const auto value = profile_macs[index].load();
+    return revision == profile_revision.load() ? value : 0;
+}
+
+void Ev::publish_profile_macs(const Config &update)
+{
+    ASSERT_MAIN_THREAD();
+    profile_revision.fetch_add(1); // odd: partial publication is never authority
+    const auto evs = update.get("evs");
+    for (unsigned i = 0; i < EV_MAX_EVS; ++i) {
+        uint64_t value = 0;
+        uint8_t mac[EV_MAC_ADDRESS_LENGTH]{}, mask[EV_MAC_ADDRESS_LENGTH]{};
+        if (i < evs->count() && parse_mac(evs->get(i)->get("mac")->asString().c_str(), mac, mask)) {
+            bool exact = true;
+            for (unsigned j = 0; j < EV_MAC_ADDRESS_LENGTH; ++j) {
+                exact = exact && mask[j] == 0xFF;
+                value = (value << 8) | mac[j];
+            }
+            if (!exact) { value = 0; }
+        }
+        profile_macs[i].store(value);
+    }
+    profile_revision.fetch_add(1); // even: complete value-only snapshot
 }
 
 int16_t Ev::get_user_id(const uint8_t mac[EV_MAC_ADDRESS_LENGTH])

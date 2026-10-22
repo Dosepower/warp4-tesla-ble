@@ -604,6 +604,9 @@ void ISO15118::register_events()
 
             cancel_pending_tasks();
 
+            // Physical identity ends even if PLC was disabled before unplugging.
+            common.reset_evcc_vendor();
+
             if (!is_enabled()) {
                 return EventResult::OK;
             }
@@ -611,7 +614,6 @@ void ISO15118::register_events()
             // Clean up session state
             iso15118.trace("ISO15118: EV disconnected (State A), cleaning up");
             common.reset_active_socket();
-            common.reset_evcc_vendor();
             qca700x.link_down();
             slac.cancel_link_up_task();
             slac.state = SLACState::ModemReset;

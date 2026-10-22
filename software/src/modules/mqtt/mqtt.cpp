@@ -277,6 +277,9 @@ void Mqtt::refresh_state(const char *path)
 
 bool Mqtt::pushStateUpdate(size_t stateIdx, const String &payload, const String &path)
 {
+    // Nearby radio identifiers are ephemeral browser setup data, not telemetry.
+    // Never copy them into retained broker state or an offline MQTT outbox.
+    if(path=="tesla_vehicle/discovery") { return true; }
     auto &last_send = this->state_last_send[stateIdx];
 
     if (!deadline_elapsed(last_send + this->send_interval)) {
@@ -294,10 +297,12 @@ bool Mqtt::pushStateUpdate(size_t stateIdx, const String &payload, const String 
 
 bool Mqtt::pushRawStateUpdate(const String &payload, const String &path)
 {
+    if(path=="tesla_vehicle/discovery") { return true; }
     return this->publish_with_prefix(path, payload);
 }
 
 IAPIBackend::WantsStateUpdate Mqtt::wantsStateUpdate(size_t stateIdx) {
+    if(strcmp(api.states[stateIdx].path,"tesla_vehicle/discovery")==0) { return IAPIBackend::WantsStateUpdate::No; }
     auto state = this->state.get("connection_state")->asEnum<MqttConnectionState>();
     if (state != MqttConnectionState::Connected) {
         return IAPIBackend::WantsStateUpdate::No;

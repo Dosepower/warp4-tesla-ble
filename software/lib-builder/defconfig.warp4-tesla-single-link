@@ -1,0 +1,12 @@
+# Explicit candidate ONLY: one reusable worker and one physical Tesla link.
+# Stored vehicle profiles remain independent and unlimited by this pool size.
+CONFIG_BT_ACL_CONNECTIONS=1
+CONFIG_BTDM_CTRL_BLE_MAX_CONN=1
+CONFIG_BTDM_CTRL_BLE_MAX_CONN_EFF=1
+# Exported sdkconfig also contains deprecated aliases. Keep them consistent:
+# Kconfig otherwise accepts a later legacy value over the canonical setting.
+CONFIG_BTDM_CONTROLLER_BLE_MAX_CONN=1
+CONFIG_BTDM_CONTROLLER_BLE_MAX_CONN_EFF=1
+CONFIG_BT_MULTI_CONNECTION_ENBALE=n
+# Retain SMP and conservative internal host stacks; not a stack tuning profile.
+CONFIG_BT_BLE_SMP_ENABLE=y

@@ -5,15 +5,15 @@ Subject: [PATCH] heap: Add MALLOC_CAP_IRAM, reserve regions for manual
  allocation
 
 ---
- components/heap/include/esp_heap_caps.h    |  6 ++++++
+ components/heap/include/esp_heap_caps.h    |  9 +++++++++
  components/heap/port/esp32/memory_layout.c | 24 +++++++++++++++-------
- 2 files changed, 23 insertions(+), 7 deletions(-)
+ 2 files changed, 26 insertions(+), 7 deletions(-)
 
 diff --git a/components/heap/include/esp_heap_caps.h b/components/heap/include/esp_heap_caps.h
 index c5aaed2fbc..526ad33c46 100644
 --- a/components/heap/include/esp_heap_caps.h
 +++ b/components/heap/include/esp_heap_caps.h
-@@ -50,8 +50,14 @@ extern "C" {
+@@ -50,8 +50,17 @@ extern "C" {
  #define MALLOC_CAP_SIMD             (1<<20) ///< Memory must be capable of being used for SIMD instructions (i.e. allow for SIMD-specific-bit data accesses)
  #define MALLOC_CAP_SPIRAM_NO_ENC    (1<<21) ///< Memory must be in the PSRAM region exempt from flash encryption (plaintext in PSRAM; see CONFIG_SPIRAM_ENC_EXEMPT)
  
@@ -21,7 +21,10 @@ index c5aaed2fbc..526ad33c46 100644
 +
  #define MALLOC_CAP_INVALID          (1<<31) ///< Memory can't be used / list end marker
  
++// Bluetooth ROM data owns this region while the controller is linked.
++#ifndef CONFIG_BT_ENABLED
 +#define MANUALLY_RESERVED_6432B_AT_0x3FFAE6E0_DRAM
++#endif
 +#define MANUALLY_RESERVED_15072B_AT_0x3FFE0440_DRAM
 +#define MANUALLY_RESERVED_8192B_AT_0x4009E000_IRAM
 +

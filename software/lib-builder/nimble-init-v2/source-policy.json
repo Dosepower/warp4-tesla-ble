@@ -1,0 +1,53 @@
+{
+  "schema": 1,
+  "policy": "tesla-psram-first-nimble-single-link-init-v2",
+  "upstream_identity_unchanged": true,
+  "approval": "candidate-for-independent-review-NOT-approved",
+  "sdk_patch_sha256": "631e515751a2dd927cb32e4f1e6a0519ad7dae4b7934b9f1e41cc9f1bb0d6a80",
+  "files": {
+    "components/bt/common/osal/src/bt_osal_freertos.c": {
+      "before_sha256": "bc27ab521847681e69437d140dcd60ee2d064b5216af73bcbb733e8cdb3c69d5",
+      "after_sha256": "4b2fc5445eb089eba98f293fbaef14950bf39edf1bc9b6f3eb28fc8cc47ccdeb"
+    },
+    "components/bt/host/nimble/esp-hci/src/esp_nimble_hci.c": {
+      "before_sha256": "ac0b49ffa456e7497c69ac6ac30dff7db4a6b45670b2be7cdfa59ef77b3eb5f6",
+      "after_sha256": "4ef4ee7cf424a5a325cd6bcf60cd3a116db7a9b10ef06360cbd9f5d3c1535e1f"
+    },
+    "components/bt/host/nimble/nimble/nimble/host/include/host/ble_hs.h": {
+      "before_sha256": "3504a9b5e9486a7bab96fff75333dcea12c99b296f95007fa464b3da11af116b",
+      "after_sha256": "45e0882e520a453629aafe383258f8ec646f280209db90a45af87b866318f646"
+    },
+    "components/bt/host/nimble/nimble/nimble/host/src/ble_hs.c": {
+      "before_sha256": "54e9d6b0c93a1bd1ad6218bfe667b8a2c39b9824c22f84987794d70416c46682",
+      "after_sha256": "a6cec9abed36763afdc8d398ee061eec926fbb668f6f2a25c14b648afefaa43b"
+    },
+    "components/bt/host/nimble/nimble/nimble/host/src/ble_hs_flow.c": {
+      "before_sha256": "c4bfa572750c4fcc7f07ed5d7e9bbaa05407d6b5f32adaec9c2d960374fe3f58",
+      "after_sha256": "385a7d1b7ee8834dfd075f63adbca1d644a96d54a71c2b621949ec710f7a603a"
+    },
+    "components/bt/host/nimble/nimble/nimble/host/src/ble_hs_hci.c": {
+      "before_sha256": "5c5f560bb30a6da8565f76cb63a2eeb384fd48ac75f94dd398852083945f3fd9",
+      "after_sha256": "84fdd11a386987293b837430e3b0472ca3c3f9e275ab6987731b4b92d941f3c7"
+    },
+    "components/bt/host/nimble/nimble/nimble/host/src/ble_hs_hci_priv.h": {
+      "before_sha256": "734efbca833548a555ac6ea8e64202af013042559853000e4fdba7cc5b42bffb",
+      "after_sha256": "c795fbf8118912e442feb472f717be0f8d43457de04b01f1bc317b4659d491b3"
+    },
+    "components/bt/host/nimble/nimble/nimble/host/src/ble_hs_priv.h": {
+      "before_sha256": "f1754c66480346231a3ded27c6908478ae01ebc77821de1956a2ded9f0071cc3",
+      "after_sha256": "c4bbedfada52b48a39c72583a1ac03aa360e4ed0cc8c9e6adff59578b2a5bbfe"
+    },
+    "components/bt/host/nimble/nimble/nimble/host/src/ble_hs_stop.c": {
+      "before_sha256": "ddd8a64e3b04f9ca48ebdf291d65205c48bc7471c2bd4c60d4384e4369c6d81d",
+      "after_sha256": "d1ec7ffce1b9fa74b01286b6e75bf6b271cff911f47a56dde6d1d2472abd6a8f"
+    },
+    "components/bt/host/nimble/nimble/porting/nimble/src/nimble_port.c": {
+      "before_sha256": "e7c41433687eacd9828592d49c9ef9d6ff22da482b14b61094fea421fe44940f",
+      "after_sha256": "26a6c87ba7f5e73ed32821acec816c7db5e346eb3d11c2cdb092e499372d4e98"
+    },
+    "components/bt/host/nimble/nimble/porting/npl/freertos/src/npl_os_freertos.c": {
+      "before_sha256": "b46840b2f54a9f1d2ecb253cfe5ad837ce6a972fe290745efafc38607b71adbe",
+      "after_sha256": "91029df9d6bd3d828b84400b75a84539ab7debbd9202bb099763d20ec480af36"
+    }
+  }
+}

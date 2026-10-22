@@ -1,0 +1,29 @@
+--- a/cores/esp32/esp32-hal-bt.c
++++ b/cores/esp32/esp32-hal-bt.c
+@@ -25,10 +25,12 @@
+ // Track whether BT memory has been released per mode.
+ // ESP-IDF provides no API to query release state, so we track it here.
+ static bool _bleMemReleased = false;
+-#if defined(CONFIG_BT_CLASSIC_ENABLED)
++// Controller ROM reserves Classic regions on Classic-capable silicon even
++// when the Classic HOST is disabled. Track the controller capability, not host.
++#if CONFIG_SOC_BT_CLASSIC_SUPPORTED
+ static bool _classicMemReleased = false;
+ #else
+-static bool _classicMemReleased = true;  // No Classic BT on this chip
++static bool _classicMemReleased = true;  // No Classic controller memory on this chip
+ #endif
+ 
+ // DEPRECATED: Remove this function in v4.0. Use btClassicInUse() and bleInUse() instead.
+@@ -98,6 +100,11 @@
+   // esp_bt_controller_enable(MODE) This mode must be equal as the mode in “cfg” of esp_bt_controller_init().
+   cfg.mode = esp_bt_mode;
+   if (cfg.mode == ESP_BT_MODE_CLASSIC_BT) {
++    // Refusing a permanently released mode must not free the surviving BLE
++    // region as a side effect. Do this before the legacy BLE-release branch.
++    if (_btAvailableMemForMode(ESP_BT_MODE_CLASSIC_BT) == ESP_BT_MODE_IDLE) {
++      return false;
++    }
+     btMemRelease(BT_MODE_BLE);
+   }
+ #else

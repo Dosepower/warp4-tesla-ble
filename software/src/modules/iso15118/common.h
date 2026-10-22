@@ -39,6 +39,14 @@
 #define SESSION_ID_LENGTH 8
 #define EXI_DATA_SIZE (10*1024) // TODO: How much do we need here?
 
+// Publish every namespace accepted by the application-handshake decoder.
+inline constexpr size_t SUPPORTED_APP_PROTOCOL_CAPACITY =
+    sizeof(appHand_supportedAppProtocolReq::AppProtocol.array) / sizeof(appHand_AppProtocolType);
+static_assert(SUPPORTED_APP_PROTOCOL_CAPACITY == appHand_AppProtocolType_5_ARRAY_SIZE,
+              "Application-handshake decoder bound changed");
+static_assert(SUPPORTED_APP_PROTOCOL_CAPACITY > 0 && SUPPORTED_APP_PROTOCOL_CAPACITY <= UINT8_MAX,
+              "Application-handshake scan indices must represent the decoder capacity");
+
 // Convert value * 10^exponent to float
 float physical_value_to_float(int16_t value, int8_t exponent);
 
@@ -119,10 +127,18 @@ public:
     void detect_evcc_vendor_from_mac(const uint8_t *mac);
     void detect_evcc_vendor_from_protocol(const char *protocol_namespace, size_t len);
     void set_evcc_vendor(EVCCVendor vendor);
-    void reset_evcc_vendor() { set_evcc_vendor(EVCCVendor::Unknown); }
+    void reset_evcc_vendor() {
+        evcc_vendor_mac_valid = false;
+        set_evcc_vendor(EVCCVendor::Unknown);
+    }
     EVCCVendor get_evcc_vendor() const { return api_state.get("evcc_vendor")->asEnum<EVCCVendor>(); }
 
 private:
+    // Preserve stronger protocol recognition across SLAC retries for this PEV.
+    // Physical disconnect/tentative-session abort invalidates the identity.
+    uint8_t evcc_vendor_mac[6] = {};
+    bool evcc_vendor_mac_valid = false;
+
     void handle_session_setup_req();
     void handle_supported_app_protocol_req();
 
