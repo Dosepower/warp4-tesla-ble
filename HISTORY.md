@@ -19,3 +19,5 @@ Für heutige Installationsgrenzen gelten die konkrete Release-Anleitung und die 
 Entfernte historische Entwicklungsbranches werden zuvor mit `archive/<ursprünglicher Branchname>` am exakten Commit gesichert. Diese Tags sind Quellarchive, keine Firmware-Releases und keine Installationsempfehlung. Es wird keine vollständige inhaltliche Gleichwertigkeit aller alten Experimente mit dem aktuellen Port behauptet.
 
 PR #1 bleibt als geschlossene historische Diskussion erhalten; sein Head und seine Vergleichsbasis sind archiviert. PR #2 bleibt offen, seine Head-/Basebranches bleiben bestehen. Veröffentlichte Firmware-Releases und Tags werden nicht gelöscht oder überschrieben. Der bisherige Defaultbranch wird ebenfalls exakt archiviert.
+
+Die genannten Phase-/Handoff-Dateien liegen je nach Stand nur in den historischen Archiven, nicht zwingend im aktuellen Port. [Frühere Projektstartseite und Unterlagen öffnen](https://github.com/Dosepower/warp4-tesla-ble/tree/archive/feature/tesla-ble-upstream-ready).
