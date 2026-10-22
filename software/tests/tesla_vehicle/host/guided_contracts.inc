@@ -2,7 +2,19 @@
  static void guided(TeslaVehicle &m,const std::string &mode) {
   HostBluetoothDriver driver(m.bluetooth,TeslaVehicle::gatt_callback);ev.index=0;ev.mac=A;
   if(mode=="guided-poll" || mode=="guided-repair")seed(0);
+  if(mode=="guided-adopt-disabled") {
+   m.find_profile(0)->get("enable")->updateBool(false);
+   m.find_profile(1)->get("enable")->updateBool(false);m.find_profile(1)->get("ble_address")->updateString("");
+   m.loop();assert(!m.find_profile(0)->get("enable")->asBool() && !m.tesla->runtime_owner.get() && !peer_open_calls && !scan_start_calls);
+  }
   explicit_scan(m,0);m.publish_guidance();
+  if(mode=="guided-adopt-disabled") {
+   assert(!m.find_profile(0)->get("enable")->asBool()); // Search alone cannot enable.
+   m.find_profile(0)->get("enable")->updateBool(true);String error;
+   assert(m.validate_profiles(m.tesla->profiles,ConfigSource::API).empty());
+   api.writeConfig("tesla_vehicle/profiles",&m.tesla->profiles);m.loop();
+   assert(!m.find_profile(1)->get("enable")->asBool() && !m.tesla->runtime_owner.get() && !peer_open_calls && scan_start_calls==1 && ev.applied==0);
+  }
   auto &c=m.tesla->guided_command;
   entry(c.get("profile"),0);c.get("profile")->get("discovery_revision")->updateUint(m.find_profile(0)->get("discovery_revision")->asUint());
   c.get("request")->updateString("00000000000000000000000000000001");
@@ -33,9 +45,9 @@
    if(mode=="guided-wrong-request")c.get("request")->updateString("00000000000000000000000000000002");
    if(mode=="guided-cancel"){c.get("phase")->updateString("cancel");api.commands.at("tesla_vehicle/guided")(0,error);c.get("phase")->updateString("commit");}
    error.clear();api.commands.at("tesla_vehicle/guided")(0,error);
-   const bool success=mode=="guided" || mode=="guided-poll";
+   const bool success=mode=="guided" || mode=="guided-adopt-disabled" || mode=="guided-poll";
    assert(error.empty()==success);
-   assert(r->pair_requested.load()==(mode=="guided"));
+   assert(r->pair_requested.load()==(mode=="guided" || mode=="guided-adopt-disabled"));
    assert(r->poll_requested.load()==(mode=="guided-poll"));
    if(success){error.clear();api.commands.at("tesla_vehicle/guided")(0,error);assert(!error.empty());}
   }

@@ -8,7 +8,7 @@ const {build}=require('esbuild');
 const root=new URL('../../',import.meta.url);
 const fixture={values:{'ev/config':{evs:[{name:'Synthetic A',mac:'11:22:33:44:55:00',capacity:60,charging_efficiency:0.9,read_soc:false,autocharge:false}]}},calls:[],listeners:{}};
 const mock=`const f=globalThis.fixture;
-export const get=t=>f.values[t];export const call=async(t,p)=>{f.calls.push({t,p});};export const save=call;export const postReboot=()=>{};
+export const get=t=>f.values[t];export const call=async(t,p)=>{f.calls.push({t,p});};export const save=call;export const postReboot=()=>{};export const download=async()=>{throw Error('Unexpected read');};
 export const __=k=>k==='ev.content.add_ev_message'?(()=>k):k;export const toLocaleFixed=(n,d)=>n.toFixed(d);export const format_timespan_ms=ms=>String(ms);
 export const addApiEventListener=(t,c)=>{f.listeners[t]=c;};export const render_allowed=()=>true;export const is_central_management_enabled=()=>false;
 export const async_modal_ref={current:{show:async()=>true}};

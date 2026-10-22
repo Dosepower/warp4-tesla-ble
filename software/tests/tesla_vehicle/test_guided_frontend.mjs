@@ -10,7 +10,7 @@ const mock=`const f=globalThis.fixture;
 export const get=t=>f.values[t]; export const call=async(t,p)=>{f.calls.push({topic:t,payload:structuredClone(p)});await f.call(t,p);};
 export const save=(t,p)=>call(t+'_update',p); export const __=k=>k;
 export const addApiEventListener=(t,c)=>{(f.listeners[t]??=[]).push(c);};export const render_allowed=()=>true;
-export const format_timespan_ms=ms=>String(ms);export const toLocaleFixed=(n,d)=>n.toFixed(d);export const postReboot=()=>{};
+export const format_timespan_ms=ms=>String(ms);export const toLocaleFixed=(n,d)=>n.toFixed(d);export const postReboot=()=>{};export const download=async()=>{throw Error('Unexpected read');};
 export const async_modal_ref={current:{show:async o=>{f.modals.push(o);return f.show();}}};
 export class ConfigComponent{constructor(t,e,u,x){this.state={...structuredClone(f.values[t]),...x};this.dirty=false;}setState(v){Object.assign(this.state,v);}isDirty(){return this.dirty;}setDirty=(v)=>{this.dirty=v;};set(){return()=>{};}toggle(){return()=>{};}}
 export const Button='Button',Alert='Alert',Table='Table',Bluetooth='Bluetooth',FormRow='FormRow',FormSeparator='FormSeparator',InputSelect='InputSelect',InputText='InputText',NavbarItem='NavbarItem',Switch='Switch',ConfigForm='ConfigForm',PageHeader='PageHeader',SubPage='SubPage';export const registerVehicleExtension=()=>{};`;
@@ -24,7 +24,7 @@ vm.runInNewContext(compiled.outputFiles[0].text,{module,exports:module.exports,f
 f.values['ev/config']={evs:[0,1].map(i=>({name:`Synthetic ${i}`,mac:`11:22:33:44:55:0${i}`}))};
 f.values['ev/state']={active_ev_index:0,mac:'11:22:33:44:55:00',soc:null};
 f.values['bluetooth/state']={supported:true,phase:'active'};
-f.values['tesla_vehicle/profiles']={entries:[0,1].map(i=>({ev_index:i,ev_mac:f.values['ev/config'].evs[i].mac,enable:true,vin:i?'5YJ3E1EA7KF000002':'5YJ3E1EA7KF000001',ble_address:'',ble_address_type:0,discovery_revision:0,poll_interval:300,wake_once:false}))};
+f.values['tesla_vehicle/profiles']={entries:[0,1].map(i=>({ev_index:i,ev_mac:f.values['ev/config'].evs[i].mac,enable:false,vin:i?'5YJ3E1EA7KF000002':'5YJ3E1EA7KF000001',ble_address:'',ble_address_type:0,discovery_revision:0,poll_interval:300,wake_once:false}))};
 f.values['tesla_vehicle/state']={profile_ev_index:-1,running:false,key_presence:'unknown'};
 f.values['tesla_vehicle/guidance']={generation:'7',request:'',ready:false,profiles:[{ev_index:0,paired:false,key_presence:'absent',binding_fresh:true}]};
 f.values['tesla_vehicle/discovery']={status:'idle',busy:false,targets:[]};
@@ -32,8 +32,25 @@ const page=new module.exports.TeslaVehicle();
 const event=t=>{for(const cb of f.listeners[t]??[])cb();};
 const walk=n=>!n||typeof n!=='object'?[]:[n,...[n.props?.children].flat(Infinity).flatMap(walk)];
 const nodes=()=>walk(page.render({},page.state));
-const button=k=>nodes().find(n=>n.type==='Button'&&(n.props.children===`tesla_vehicle.content.${k}` || k==='search'&&n.props.children==='tesla_vehicle.content.searching'));
+const findButton=k=>nodes().find(n=>n.type==='Button'&&(n.props.children===`tesla_vehicle.content.${k}` || k==='search'&&n.props.children==='tesla_vehicle.content.searching'));
+// Use the actual visible details/manage controls to reach a deliberate refresh.
+const button=k=>{if(k==='forget_key'&&!findButton(k)&&findButton('show_details')){f.values['tesla_vehicle/state']={profile_ev_index:0,key_presence:'present',key_present:true,paired:false};event('tesla_vehicle/state');findButton('show_details').props.onClick();}if(k==='search'&&!findButton(k)&&findButton('show_details'))findButton('show_details').props.onClick();if(k==='search'&&!findButton(k)&&findButton('edit_binding'))findButton('edit_binding').props.onClick();return findButton(k);};
+assert.equal(nodes().filter(n=>n.type==='Switch').length,0,'No per-vehicle permission switch');
+assert(!nodes().some(n=>n.type==='ConfigForm'),'No separate permission Save block');
+assert(!nodes().some(n=>n.type==='summary'||n.type==='details'),'Details must use standard WARP heading and fullwidth button');
+assert(nodes().some(n=>n.type==='h3'&&n.props.children==='tesla_vehicle.content.details'));
+assert.equal(findButton('show_details').props.className,'w-100');
+assert.equal(findButton('show_details').props.variant,'primary');
+assert(nodes().some(n=>n.type==='FormRow'&&walk(n).some(c=>c.type==='Button'&&c.props.children==='tesla_vehicle.content.show_details')&&n.props.contentColClasses==='col-12'&&n.props.labelColClasses==='d-none'),'Details toggle spans the whole page, not the 8-column input area');
+assert(!nodes().some(n=>n.props.label==='tesla_vehicle.content.ble_address'),'Details default collapsed');
+findButton('show_details').props.onClick();
+assert(findButton('hide_details'));
+for(const label of ['vin','ble_address','loaded_profile','active_profile'])assert(nodes().some(n=>n.props.label===`tesla_vehicle.content.${label}`));
+assert(!nodes().some(n=>n.props.label==='tesla_vehicle.content.address_type'));
+assert(nodes().filter(n=>n.type==='InputText'&&n.props.onValue===undefined).every(n=>n.props.readonly===true),'Diagnostics explicitly readonly');
+findButton('hide_details').props.onClick();
 assert.equal(f.calls.length,0);
+assert(!findButton('pair'),'Before adopting a match show VIN/search, not a redundant disabled pairing step');
 await button('search').props.onClick();
 const target={name:'S3acc31774a738ea0C',ble_address:'01:02:03:04:05:06',ble_address_type:1,matches_vin:true,rssi:-50};
 f.values['tesla_vehicle/discovery']={status:'complete',busy:false,ev_index:0,revision:8,targets:[target]};event('tesla_vehicle/discovery');
@@ -41,8 +58,12 @@ await button('select_target').props.onClick();
 assert.equal(f.calls.at(-1).topic,'tesla_vehicle/profiles_update','Adopt itself saves the existing profile transaction; no second Save');
 assert.equal(f.calls.at(-1).payload.entries[0].ble_address_type,1);
 assert.equal(f.calls.at(-1).payload.entries[0].discovery_revision,8);
+assert.equal(f.calls.at(-1).payload.entries[0].enable,true,'Explicit exact-match adoption persists permission for this profile without a hidden checkbox');
+assert.equal(f.calls.at(-1).payload.entries[1].enable,false,'Adoption never enables another stored profile');
+assert.deepEqual(f.calls.map(c=>c.topic),['tesla_vehicle/scan','tesla_vehicle/profiles_update'],'Search/adopt never prepare, connect, pair, poll, wake or charge');
 assert.equal(f.calls.at(-1).payload.entries[1].ble_address,'');
-assert(nodes().some(n=>n.props.children==='tesla_vehicle.content.adopted'));
+assert(nodes().some(n=>n.props.children==='tesla_vehicle.content.assigned'));
+assert(!findButton('search'),'Adopted default is compact; VIN/search can be reopened explicitly');
 assert(!nodes().some(n=>n.props.children==='tesla_vehicle.content.search_empty'),'Successful adoption must not contradict itself with an empty-result warning');
 // Permission persistence is local and remains available with global Bluetooth off.
 const beforePermission=structuredClone(page.state.entries);const beforeBluetooth=f.values['bluetooth/state'];
@@ -111,8 +132,11 @@ f.call=async(t,p)=>{if(p.phase==='prepare_pair'){
 }};count=f.calls.length;await button('pair').props.onClick();assert.equal(f.calls.length,count+1);normal();
 // Existing paired profile is compact and polls via preparation, never re-pairs.
 f.values['tesla_vehicle/guidance'].profiles[0]={ev_index:0,paired:true,key_presence:'present',binding_fresh:true};event('tesla_vehicle/guidance');
-assert(nodes().some(n=>n.type==='summary'&&n.props.children==='tesla_vehicle.content.manage'));
-assert.equal(button('pair').props.disabled,true);assert.equal(button('read_soc').props.disabled,false);
+assert(!findButton('pair'),'Paired view never invites re-pairing');
+assert.equal(button('read_soc').props.disabled,false);
+assert(findButton('forget_key'),'Unpair remains visible with Details collapsed');
+assert.equal(findButton('forget_key').props.variant,'danger');
+assert.equal(findButton('forget_key').props.className,'w-100');
 f.call=async(t,p)=>{if(p.phase==='prepare_poll'){f.values['tesla_vehicle/guidance']={...f.values['tesla_vehicle/guidance'],ready:true,request:p.request};event('tesla_vehicle/guidance');}};
 await button('read_soc').props.onClick();assert.deepEqual(f.calls.slice(-2).map(c=>c.payload.phase),['prepare_poll','commit']);
 assert(!nodes().some(n=>String(n.props.value).includes('null %')));
@@ -137,13 +161,37 @@ assert(!button('pair')&&!button('search')&&!button('read_soc'));count=f.calls.le
 f.advance=13000;count=f.calls.length;await button('pair').props.onClick();assert.equal(f.calls.length,count+1,'No commit on missing ACK/timeout');assert(page.state.command_error);f.advance=0;f.offset=0;normal();
 await button('search').props.onClick();f.values['tesla_vehicle/discovery']={status:'complete',busy:false,ev_index:0,revision:25,targets:[target]};event('tesla_vehicle/discovery');
 f.offset=110001;assert(!button('select_target'),'Client expiry hides even a cached matching result');f.offset=0;
+const staleAdopt=button('select_target').props.onClick;f.offset=110001;count=f.calls.length;await staleAdopt();assert.equal(f.calls.length,count,'Stale rendered adoption handler cannot save or crash');f.offset=0;
+const discoveryBefore=structuredClone(f.values['tesla_vehicle/discovery']);
+f.values['tesla_vehicle/discovery']={...discoveryBefore,revision:26,targets:[{...target,ble_address:'02:03:04:05:06:07'}]};event('tesla_vehicle/discovery');
+await staleAdopt();assert.equal(f.calls.length,count,'An old result click cannot adopt a newly replaced peer');
+f.values['tesla_vehicle/discovery']={...discoveryBefore,targets:[target]};event('tesla_vehicle/discovery');
 f.call=async(t,p)=>{if(t==='tesla_vehicle/profiles_update'){f.values['tesla_vehicle/profiles']=structuredClone(p);event('tesla_vehicle/profiles');}};
 await button('select_target').props.onClick();assert(page.state.adopted,'Own config ACK before HTTP response is not mistaken for a foreign update');normal();
-// Retain prior search/delete confirmation, submission refusal, and key-status coverage.
+// New approved primary paired action and failed-pair recovery.
+normal();f.values['tesla_vehicle/state']={profile_ev_index:0,key_presence:'present',key_present:true,paired:true};event('tesla_vehicle/state');
+assert(!findButton('pair'));assert.equal(findButton('forget_key').props.variant,'danger','Paired primary is solid red');
+assert.equal(findButton('forget_key').props.className,'w-100');
+assert(nodes().some(n=>n.type==='FormRow'&&walk(n).some(c=>c.type==='Button'&&c.props.children==='tesla_vehicle.content.forget_key')),'Same primary FormRow position/width as pair');
+findButton('show_details').props.onClick();assert.equal(nodes().filter(n=>n.type==='Button'&&n.props.children==='tesla_vehicle.content.forget_key').length,1,'No duplicate unpair below Details');
+normal();assert(!findButton('forget_key'),'No unpair primary without authenticated pairing');
+f.values['tesla_vehicle/state']={profile_ev_index:0,key_presence:'present',key_present:true,paired:false};event('tesla_vehicle/state');
+assert(findButton('pair'));assert(!findButton('forget_key'));findButton('show_details').props.onClick();assert(findButton('forget_key'),'Orphan credential has explicit recovery in Details');
 normal();
-assert.equal(nodes().filter(n=>n.type==='Switch').length,1);
+const configBeforeOff=f.values['tesla_vehicle/profiles'];delete f.values['tesla_vehicle/profiles'];assert(!nodes().some(n=>n.type==='Alert'&&n.props.variant==='info'),'Remove only permanent disabled blue alert');f.values['tesla_vehicle/profiles']=configBeforeOff;
+// Delete consent expires when selected credential evidence changes, even A->B->A.
+for(const mutate of [()=>{page.selectProfile('1');page.selectProfile('0');},()=>{const old=f.values['tesla_vehicle/state'];f.values['tesla_vehicle/state']={...old,key_presence:'absent',key_present:false,paired:false};event('tesla_vehicle/state');f.values['tesla_vehicle/state']=old;event('tesla_vehicle/state');},()=>{const old=f.values['tesla_vehicle/profiles'];f.values['tesla_vehicle/profiles']={entries:[]};event('tesla_vehicle/profiles');f.values['tesla_vehicle/profiles']=old;event('tesla_vehicle/profiles');}]){
+ normal();f.values['tesla_vehicle/state']={profile_ev_index:0,key_presence:'present',key_present:true,paired:true};event('tesla_vehicle/state');
+ let yes;f.show=()=>new Promise(r=>yes=r);const n=f.calls.length;const pending=button('forget_key').props.onClick();mutate();yes(true);await pending;assert.equal(f.calls.length,n,'Changed key/profile/config expires old deletion confirmation');
+}
+normal();f.values['tesla_vehicle/state']={profile_ev_index:0,key_presence:'present',key_present:true,paired:true};event('tesla_vehicle/state');
+f.show=async()=>false;await button('forget_key').props.onClick();assert.equal(f.modals.at(-1).title(),'tesla_vehicle.content.forget_title');assert.equal(f.modals.at(-1).yes_text(),'tesla_vehicle.content.forget_key');
+const deletionText=walk(f.modals.at(-1).body()).flatMap(n=>[n.props?.children].flat(Infinity)).filter(s=>typeof s==='string').join(' ');assert(deletionText.includes('Synthetic 0'),'Dialog identifies selected profile');
+// Retain prior search/delete confirmation, submission refusal, and key-status coverage.
+normal();f.values['tesla_vehicle/state']={profile_ev_index:0,key_presence:'present',key_present:true,paired:true};event('tesla_vehicle/state');
+assert.equal(nodes().filter(n=>n.type==='Switch').length,0);
 assert(!nodes().some(n=>n.type==='InputNumber'));
-const advanced=nodes().find(n=>n.type==='details');assert(walk(advanced).some(n=>n.props.children==='tesla_vehicle.content.forget_key'));
+assert(findButton('forget_key'));
 assert(!walk(nodes().find(n=>n.props.id==='tesla_vehicle_config_form')).some(n=>n.props.children==='tesla_vehicle.content.forget_key'));
 for(const [change,key]of [[{pairing_pending:true,pair_request_sent:false},'sending'],[{pairing_pending:true,pair_request_sent:true},'pending'],[{paired:true},'paired']]){
  f.values['tesla_vehicle/state']={profile_ev_index:0,key_presence:'present',key_present:true,...change};event('tesla_vehicle/state');
@@ -155,7 +203,7 @@ for(const action of ['search','forget_key']){
  page.selectProfile('1');page.selectProfile('0');yes(true);await pending;assert.equal(f.calls.length,count);normal();
 }
 await button('forget_key').props.onClick();assert.equal(f.calls.at(-1).topic,'tesla_vehicle/forget_key');assert.equal(f.calls.at(-1).payload.ev_index,0);
-assert.equal(f.modals.at(-1).body(),'tesla_vehicle.content.forget_confirm');normal();
+assert(walk(f.modals.at(-1).body()).some(n=>n.type==='p'));normal();
 page.dirty=true;assert(button('forget_key').props.disabled);page.dirty=false;
 f.call=async()=>{throw Error('injected search refusal');};await button('search').props.onClick();assert(page.state.search_error);assert(!page.state.command_busy);normal();
 f.values['tesla_vehicle/discovery']={status:'error',busy:false,targets:[],error:'timeout'};event('tesla_vehicle/discovery');
@@ -164,6 +212,25 @@ await button('search').props.onClick();assert(page.searchBusy());count=f.calls.l
 await assert.rejects(page.sendSave('tesla_vehicle/profiles',{entries:page.state.entries}));
 f.values['tesla_vehicle/discovery']={status:'complete',busy:false,ev_index:0,revision:30,targets:[target],truncated:true};event('tesla_vehicle/discovery');assert(!button('select_target'));
 normal();
+// A disabled persisted profile remains disabled after a failed adoption save.
+f.values['tesla_vehicle/profiles'].entries[0].enable=false;
+f.values['tesla_vehicle/profiles'].entries[0].ble_address='';
+f.values['tesla_vehicle/profiles'].entries[0].discovery_revision=0;
+page.state.entries=structuredClone(f.values['tesla_vehicle/profiles'].entries);event('tesla_vehicle/profiles');
+await button('search').props.onClick();
+f.values['tesla_vehicle/discovery']={status:'complete',busy:false,ev_index:0,revision:31,targets:[target]};event('tesla_vehicle/discovery');
+f.call=async()=>{throw Error('injected persistence refusal');};count=f.calls.length;
+await button('select_target').props.onClick();
+assert.equal(f.calls.length,count+1);assert(!page.state.adopted && !page.state.entries[0].enable && !f.values['tesla_vehicle/profiles'].entries[0].enable);
+assert(page.state.command_error && !page.state.command_busy);normal();
+// Double adoption is one save; its late ACK cannot cross A-B-A.
+await button('search').props.onClick();f.values['tesla_vehicle/discovery']={status:'complete',busy:false,ev_index:0,revision:32,targets:[target]};event('tesla_vehicle/discovery');
+let adoptionAck;f.call=()=>new Promise(r=>{adoptionAck=r;});count=f.calls.length;
+const adoptHandler=button('select_target').props.onClick;const adopting=adoptHandler();await adoptHandler();assert.equal(f.calls.length,count+1);
+page.selectProfile('1');page.selectProfile('0');adoptionAck();await adopting;assert(!page.state.adopted);normal();
+// Changing away and back during preparation cancels a later matching ACK.
+f.call=async(t,p)=>{if(p.phase==='prepare_pair'){page.selectProfile('1');page.selectProfile('0');f.values['tesla_vehicle/guidance']={...f.values['tesla_vehicle/guidance'],ready:true,request:p.request};event('tesla_vehicle/guidance');}};
+count=f.calls.length;await button('pair').props.onClick();assert.equal(f.calls.length,count+1);normal();
 let prepareResponse;f.call=()=>new Promise(r=>{prepareResponse=r;});const pendingUnmount=button('pair').props.onClick();await new Promise(setImmediate);
 count=f.calls.length;page.componentWillUnmount();prepareResponse();await pendingUnmount;assert.equal(f.calls.length,count);
 assert(f.calls.every(c=>['tesla_vehicle/scan','tesla_vehicle/profiles_update','tesla_vehicle/guided','tesla_vehicle/forget_key'].includes(c.topic)));

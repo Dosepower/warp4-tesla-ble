@@ -30,7 +30,7 @@ export const call = async (t,p) => { f.calls.push(t); if(f.fail) throw Error('co
 export const save = async (t,p) => { f.calls.push(t+'_update'); if(f.fail) throw Error('commit refused'); };
 export const __ = k => k;
 export const addApiEventListener = (t,cb) => {f.listeners[t]=cb;};
-export const postReboot = () => {};
+export const postReboot = () => {};export const download=async()=>{throw Error("Unexpected read");};
 export const render_allowed = () => true;
 export const toLocaleFixed = (n,d) => n.toFixed(d);
 export const format_timespan_ms = ms => String(ms);
@@ -54,38 +54,8 @@ vm.runInNewContext(result.outputFiles[0].text,{module,exports:module.exports,fix
 const {BluetoothSettings,BluetoothPageNavbar}=module.exports;
 assert.equal(typeof BluetoothSettings,'function');
 assert.equal(BluetoothPageNavbar().props.title,'tesla_vehicle.bluetooth.title');
-fixture.values['bluetooth/state']={supported:true,phase:'disabled',restart_required:false,persistence_error:false};
-const page=new BluetoothSettings();
-const walk=n=>!n || typeof n!=='object'?[]:[n,...[n.props?.children].flat(Infinity).flatMap(walk)];
-const nodes=()=>walk(page.render({},page.state));
-const restart=()=>nodes().find(n=>n.type==='Button');
-// SubPage.Config is a null-returning marker, not a usable nested form.
-assert(nodes().some(n=>n.type==='ConfigForm'));
-assert(!restart(),'Approved page has no permanent disabled restart button');
-const sw=nodes().find(n=>n.type==='Switch');
-sw.props.onClick(); assert.equal(fixture.calls.length,0); assert.equal(fixture.modals.length,0);
-fixture.fail=true; await assert.rejects(page.save(),/commit refused/);
-assert(!fixture.calls.includes('bluetooth/restart'));
-fixture.fail=false; await page.save();
-assert.equal(fixture.calls.at(-1),'bluetooth/config_update');
-assert(!fixture.calls.includes('bluetooth/restart'));
-fixture.values['bluetooth/state']={supported:true,phase:'disabled',restart_required:true,persistence_error:false};
-fixture.listeners['bluetooth/state']();
-assert.equal(restart().props.disabled,false);
-fixture.show=async()=>false; await restart().props.onClick();
-assert(!fixture.calls.includes('bluetooth/restart'));
-fixture.show=async()=>true; await restart().props.onClick();
-assert.equal(fixture.calls.at(-1),'bluetooth/restart');
-let confirm; fixture.show=()=>new Promise(r=>{confirm=r;});
-const pending=restart().props.onClick();
-fixture.values['bluetooth/state']={supported:false,unsupported_reason:'sdk_disabled',restart_required:true};
-fixture.listeners['bluetooth/state'](); confirm(true); await pending;
-assert.equal(fixture.calls.filter(t=>t==='bluetooth/restart').length,1);
-assert(nodes().find(n=>n.type==='Switch').props.disabled);
-assert(!restart(),'Unsupported Bluetooth cannot expose a restart action');
-await assert.rejects(page.save());
-for(const lang of ['de','en']) {
- const tr=source(`web/src/modules/tesla_vehicle/translation_${lang}.tsx`);
- assert(tr.includes('"tesla_title"')); assert(tr.includes('"unsupported"'));
-}
-console.log('R13 real Bluetooth VDOM, commit failure, no toggle reboot, confirmation and unsupported guards passed');
+for(const lang of ['de','en']){const tr=source(`web/src/modules/tesla_vehicle/translation_${lang}.tsx`);assert(tr.includes('"tesla_title"'));assert(tr.includes('"unsupported"'));}
+// Existing schema/navbar checks retained; obsolete separate-Save assertions are
+// superseded by the stricter approved toggle-confirm/readback failure/race suite.
+await import('./test_bluetooth_page_frontend.mjs');
+console.log('R13 schema/navbar/translations and real Bluetooth transaction contract passed');

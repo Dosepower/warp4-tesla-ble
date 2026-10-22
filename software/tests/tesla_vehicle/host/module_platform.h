@@ -86,6 +86,7 @@ private:
     const Config *prototype=nullptr;
     unsigned array_max=0;
     std::vector<Config> elements;
+    friend struct HostAPI;
     Config clone() const {
         Config c=*this;c.children.clear();for(const auto &item:children) { c.children[item.first]=std::make_shared<Config>(item.second->clone()); }return c;
     }
@@ -141,7 +142,9 @@ struct HostAPI {
         config->get("ev_index")->updateInt(2);
         return true;
     }
-    void writeConfig(const char *, ConfigRoot *) {} void removeConfig(const char *) {}
+    std::map<std::string,Config> written_configs;
+    void writeConfig(const char *name, ConfigRoot *config) { written_configs.insert_or_assign(name,config->clone()); }
+    void removeConfig(const char *) {}
     void addPersistentConfig(const char *name, ConfigRoot *config, std::initializer_list<int>, std::initializer_list<const char *>) { states[name] = config; }
     void addState(const char *name, ConfigRoot *config) { states[name] = config; }
     void addState(const char *name, ConfigRoot *config,std::initializer_list<const char *>,std::initializer_list<const char *>) { states[name]=config; }

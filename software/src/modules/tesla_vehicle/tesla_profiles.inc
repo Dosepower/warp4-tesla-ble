@@ -207,6 +207,20 @@ bool TeslaVehicle::select_profile(int index, bool deleting, String &errmsg)
         errmsg = checked_error_string("Selected WARP profile not active or exact EV MAC binding changed"); return false;
     }
     if (!mac) { errmsg = checked_error_string("Invalid saved EV MAC; no deletion attempted"); return false; }
+    if (deleting) {
+        if (tesla->config_revision == UINT32_MAX) { errmsg = checked_error_string("Profile sequence exhausted; reboot required"); return false; }
+        // Local removal revokes ONLY this saved profile's permission and
+        // transport binding before allocating/handing off cleanup. Even if
+        // worker preparation fails, no retained consent can reuse its key.
+        p->get("enable")->updateBool(false);
+        p->get("ble_address")->updateString("");
+        p->get("ble_address_type")->updateUint(0);
+        p->get("discovery_revision")->updateUint(0);
+        ++tesla->config_revision;
+        clear_guided();
+        tesla->guidance_refresh = true;
+        api.writeConfig("tesla_vehicle/profiles", &tesla->profiles);
+    }
     if (!deleting) {
         if (!fresh_binding(index,mac,p->get("vin")->asString().c_str(),p->get("ble_address")->asString().c_str(),
                 p->get("ble_address_type")->asUint(),p->get("discovery_revision")->asUint())) {

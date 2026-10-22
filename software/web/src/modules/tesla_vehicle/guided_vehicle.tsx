@@ -1,15 +1,15 @@
 import { h, Fragment } from "preact";
-import { Alert, Button, Table } from "react-bootstrap";
+import { Alert, Button } from "react-bootstrap";
 import * as API from "../../ts/api";
 import * as util from "../../ts/util";
 import { __ } from "../../ts/translation";
 import { ConfigComponent } from "../../ts/components/config_component";
-import { ConfigForm } from "../../ts/components/config_form";
+
 import { FormRow } from "../../ts/components/form_row";
 import { FormSeparator } from "../../ts/components/form_separator";
 import { InputSelect } from "../../ts/components/input_select";
 import { InputText } from "../../ts/components/input_text";
-import { Switch } from "../../ts/components/switch";
+
 import { teslaKeyStatus, teslaVehicleReady, teslaBluetoothReady } from "./action_policy";
 
 type TeslaConfig = API.getType["tesla_vehicle/profiles"];
@@ -25,6 +25,8 @@ interface View {
     search_error: boolean;
     command_error: boolean;
     adopted: boolean;
+    details_open: boolean;
+    edit_binding: boolean;
 }
 
 // Inline extension of Fahrzeuge, not a second registry or a standalone page.
@@ -45,21 +47,33 @@ export class TeslaVehicle extends ConfigComponent<"tesla_vehicle/profiles", {}, 
     private pending_save = "";
     private timer: ReturnType<typeof setTimeout>;
     private cancelWait: () => void;
+    private credential_evidence = "";
+    private deletion_revision = 0;
+
+    private credentialEvidence() {
+        const s = API.get("tesla_vehicle/state"), g = API.get("tesla_vehicle/guidance");
+        return JSON.stringify([s?.profile_ev_index, s?.key_presence, s?.key_present, s?.paired, s?.pairing_pending, g?.generation, g?.profiles]);
+    }
+    private updateCredentialEvidence() {
+        const evidence = this.credentialEvidence();
+        if (evidence !== this.credential_evidence) { ++this.deletion_revision; this.credential_evidence = evidence; }
+    }
 
     constructor() {
         super("tesla_vehicle/profiles", () => __("tesla_vehicle.script.save_failed"), undefined, {
             tesla_state: API.get("tesla_vehicle/state"), ev_state: API.get("ev/state"),
             discovery: API.get("tesla_vehicle/discovery"), guidance: API.get("tesla_vehicle/guidance"),
             edit_index: API.get("ev/config")?.evs.length ? 0 : -1,
-            command_busy: false, search_error: false, command_error: false, adopted: false,
+            command_busy: false, search_error: false, command_error: false, adopted: false, details_open: false, edit_binding: false,
         });
         this.identity = this.vehicleIdentity();
         this.ev_config = JSON.stringify(API.get("ev/config"));
         this.saved_config = JSON.stringify(API.get("tesla_vehicle/profiles"));
+        this.credential_evidence = this.credentialEvidence();
         const listen = (topic: keyof API.EventMap, callback: () => void) =>
             util.addApiEventListener(topic, () => { if (!this.disposed) callback(); }, {signal: this.listeners.signal});
-        listen("tesla_vehicle/state", () => this.setState({tesla_state: API.get("tesla_vehicle/state")}));
-        listen("tesla_vehicle/guidance", () => this.setState({guidance: API.get("tesla_vehicle/guidance")}));
+        listen("tesla_vehicle/state", () => { this.updateCredentialEvidence(); this.setState({tesla_state: API.get("tesla_vehicle/state")}); });
+        listen("tesla_vehicle/guidance", () => { this.updateCredentialEvidence(); this.setState({guidance: API.get("tesla_vehicle/guidance")}); });
         listen("tesla_vehicle/discovery", () => {
             const discovery = API.get("tesla_vehicle/discovery");
             if (discovery && !discovery.busy && discovery.status !== 'searching') this.scan_waiting = false;
@@ -111,7 +125,7 @@ export class TeslaVehicle extends ConfigComponent<"tesla_vehicle/profiles", {}, 
     }
     private selectProfile = (value: string) => {
         ++this.revision; this.search_context = ""; this.cancelWait?.();
-        this.setState({edit_index: parseInt(value), adopted: false, command_error: false, search_error: false});
+        this.setState({edit_index: parseInt(value), adopted: false, command_error: false, search_error: false, details_open: false, edit_binding: false});
     };
     private setProfile = (patch: Partial<Profile>) => {
         const profile = this.profile();
@@ -166,18 +180,20 @@ export class TeslaVehicle extends ConfigComponent<"tesla_vehicle/profiles", {}, 
         }
     };
     private async selectTarget(target: Target) {
-        if (this.command_in_progress || !this.searchAllowed() || this.matchingTargets()[0] !== target) return;
+        if (!target || this.command_in_progress || !this.searchAllowed() || this.matchingTargets()[0] !== target) return;
         const p = this.profile(), context = this.searchContext(), revision = this.revision;
 
         const entries = (this.state.entries ?? []).map(e => ({...e}));
         const at = entries.findIndex(e => e.ev_index === p.ev_index);
-        const adopted = {...p, ble_address: target.ble_address, ble_address_type: target.ble_address_type, discovery_revision: this.state.discovery.revision};
+        // Only this explicit unique-match adoption grants local profile permission.
+        // Saving metadata never starts a worker or grants pairing/radio consent.
+        const adopted = {...p, enable: true, ble_address: target.ble_address, ble_address_type: target.ble_address_type, discovery_revision: this.state.discovery.revision};
         if (at < 0) entries.push(adopted); else entries[at] = adopted;
         try {
             await this.sendSave("tesla_vehicle/profiles", {entries});
             // Never apply an asynchronous A response into a newly selected B.
             if (!this.disposed && context === this.searchContext() && revision === this.revision) {
-                this.setState({entries, adopted: true}); this.setDirty(false);
+                this.setState({entries, adopted: true, edit_binding: false}); this.setDirty(false);
             }
         } catch { if (!this.disposed) this.setState({command_error: true}); }
     }
@@ -216,16 +232,23 @@ export class TeslaVehicle extends ConfigComponent<"tesla_vehicle/profiles", {}, 
         return "";
     }
     private confirm(action: 'search' | 'pair' | 'poll' | 'delete') {
-        const title = action === 'search' ? () => __("tesla_vehicle.content.search") : action === 'pair' ? () => __("tesla_vehicle.content.pair") : action === 'delete' ? () => __("tesla_vehicle.content.forget_key") : () => __("tesla_vehicle.content.read_soc");
-        const body = action === 'search' ? () => __("tesla_vehicle.content.search_confirm") : action === 'pair' ? () => __("tesla_vehicle.content.pair_confirm") : action === 'delete' ? () => __("tesla_vehicle.content.forget_confirm") : () => __("tesla_vehicle.content.poll_confirm");
-        return util.async_modal_ref.current.show({title, body, no_text: () => __("tesla_vehicle.content.cancel"), yes_text: title, no_variant: 'secondary', yes_variant: action === 'delete' ? 'danger' : 'primary'});
+        const name = API.get("ev/config")?.evs[this.state.edit_index]?.name ?? '';
+        const title = action === 'search' ? () => __("tesla_vehicle.content.search") : action === 'pair' ? () => __("tesla_vehicle.content.pair") : action === 'delete' ? () => __("tesla_vehicle.content.forget_title") : () => __("tesla_vehicle.content.read_soc");
+        const body = action === 'search' ? () => __("tesla_vehicle.content.search_confirm") : action === 'pair' ? () => __("tesla_vehicle.content.pair_confirm") : action === 'delete' ? () => <Fragment>
+            <p>{__("tesla_vehicle.content.forget_local")} „{name}“ {__("tesla_vehicle.content.forget_local_end")}</p>
+            <p>{__("tesla_vehicle.content.forget_vehicle")}</p>
+            <p>{__("tesla_vehicle.content.forget_again")}</p>
+        </Fragment> : () => __("tesla_vehicle.content.poll_confirm");
+        return util.async_modal_ref.current.show({title, body, no_text: () => __("tesla_vehicle.content.cancel"), yes_text: action === 'delete' ? () => __("tesla_vehicle.content.forget_key") : title, no_variant: 'secondary', yes_variant: action === 'delete' ? 'danger' : 'primary'});
     }
     private async command(action: 'pair' | 'poll' | 'delete') {
         if (this.command_in_progress || (action === 'delete' ? !this.deleteAllowed() : !!this.actionReason(action === 'poll'))) return;
         const revision = this.revision, index = this.state.edit_index;
+        const deletion_revision = this.deletion_revision;
         const saved = JSON.stringify(API.get("tesla_vehicle/profiles")), evs = JSON.stringify(API.get("ev/config"));
         const generation = API.get("tesla_vehicle/guidance")?.generation;
         const current = () => !this.disposed && revision === this.revision && index === this.state.edit_index &&
+            (action !== 'delete' || deletion_revision === this.deletion_revision) &&
             saved === JSON.stringify(API.get("tesla_vehicle/profiles")) && evs === JSON.stringify(API.get("ev/config")) &&
             generation === API.get("tesla_vehicle/guidance")?.generation && !this.configurationDirty() && teslaBluetoothReady(API.get("bluetooth/state"));
         this.command_in_progress = true; this.setState({command_busy: true, command_error: false});
@@ -263,7 +286,7 @@ export class TeslaVehicle extends ConfigComponent<"tesla_vehicle/profiles", {}, 
 
     render(props: {}, state: TeslaConfig & View) {
         if (!util.render_allowed()) return null;
-        if (!API.get("tesla_vehicle/profiles")) return <Fragment><FormSeparator /><h2>{__("tesla_vehicle.bluetooth.tesla_title")}</h2><Alert variant="info">{__("tesla_vehicle.content.off_help")}</Alert></Fragment>;
+        if (!API.get("tesla_vehicle/profiles")) return <Fragment><FormSeparator /><h2>{__("tesla_vehicle.bluetooth.tesla_title")}</h2></Fragment>;
         const p = this.profile(), status = this.profileStatus(), evs = API.get("ev/config")?.evs ?? [];
         const items: [string, string][] = [["-1", __("tesla_vehicle.content.select_vehicle")], ...evs.map((ev, index): [string, string] => [String(index), ev.name])];
         const pairReason = this.actionReason(false), pollReason = this.actionReason(true);
@@ -272,36 +295,25 @@ export class TeslaVehicle extends ConfigComponent<"tesla_vehicle/profiles", {}, 
             key_unknown: __("tesla_vehicle.status.key_unknown"), key_only: __("tesla_vehicle.status.key_only"),
             cleanup_required: __("tesla_vehicle.status.cleanup_required"), not_paired: __("tesla_vehicle.status.not_paired"),
         }[teslaKeyStatus(status)];
-        const setup = <Fragment>
-            <ConfigForm small id="tesla_vehicle_config_form" title={__("tesla_vehicle.content.step_permission")} isDirty={this.isDirty()} onSave={this.save} onDirtyChange={this.setDirty}>
-                <FormRow label={__("tesla_vehicle.content.enable")} help={__("tesla_vehicle.content.enable_desc")}>
-                    <Switch checked={p.enable} disabled={state.command_busy || this.searchBusy()} onClick={() => this.setProfile({enable: !p.enable})} />
-                </FormRow>
-            </ConfigForm>
-            <h3 class="h5 mt-3">{__("tesla_vehicle.content.step_search")}</h3>
+        const assigned = !!p.ble_address && !!p.discovery_revision;
+        const target = this.matchingTargets()[0];
+        const setup = !assigned || state.edit_binding ? <Fragment>
             <FormRow label={__("tesla_vehicle.content.vin")} help={__("tesla_vehicle.content.vin_help")}>
-                <InputText value={p.vin} maxLength={17} onValue={vin => this.setProfile({vin})} />
+                <InputText value={p.vin} maxLength={17} disabled={state.command_busy || this.searchBusy()} onValue={vin => this.setProfile({vin})} />
             </FormRow>
             <FormRow help={__("tesla_vehicle.content.search_help")}>
-                <Button type="button" className="w-100" variant="secondary" disabled={state.command_busy || !this.searchAllowed()} onClick={this.search}>
+                <Button type="button" className="w-100" variant="outline-primary" disabled={state.command_busy || !this.searchAllowed()} onClick={this.search}>
                     {this.searchBusy() ? __("tesla_vehicle.content.searching") : __("tesla_vehicle.content.search")}
                 </Button>
             </FormRow>
             {!teslaBluetoothReady(API.get("bluetooth/state")) ? <p class="text-warning">{__("tesla_vehicle.content.bluetooth_blocked")}</p> : undefined}
             {!/^[A-HJ-NPR-Z0-9]{17}$/.test(p.vin) ? <p class="text-muted">{__("tesla_vehicle.content.vin_help")}</p> : undefined}
-            {state.search_error || state.discovery?.status === 'error' ? <Alert variant="danger">{__("tesla_vehicle.content.search_failed")}</Alert> : undefined}
-            {state.discovery?.status === 'complete' && !this.searchBusy() && !state.adopted && this.search_context === this.searchContext() ? this.matchingTargets().length === 1 ?
-                <Table responsive size="sm"><tbody>{this.matchingTargets().map(t => <tr key={t.ble_address}><td>{t.name}<div class="text-success">{__("tesla_vehicle.content.matching_vin")}</div><small>{t.ble_address} · {t.rssi} dBm</small></td>
-                    <td><Button type="button" disabled={state.command_busy || !this.searchAllowed()} onClick={() => this.selectTarget(t)}>{__("tesla_vehicle.content.select_target")}</Button></td></tr>)}</tbody></Table>
+
+            {state.discovery?.status === 'complete' && !this.searchBusy() && !state.adopted && this.search_context === this.searchContext() ? target ?
+                <Alert variant="success"><p>{__("tesla_vehicle.content.matching_vin")}</p>
+                    <Button type="button" className="w-100" disabled={state.command_busy || !this.searchAllowed()} onClick={() => this.selectTarget(target)}>{__("tesla_vehicle.content.select_target")}</Button></Alert>
                 : <Alert variant="info">{__("tesla_vehicle.content.search_empty")}</Alert> : undefined}
-            {state.adopted ? <Alert variant="success" role="status">{__("tesla_vehicle.content.adopted")}</Alert> : p.ble_address ? <p class="text-muted">{__("tesla_vehicle.content.binding_saved")}</p> : undefined}
-            <h3 class="h5 mt-3">{__("tesla_vehicle.content.step_pair")}</h3>
-            <p class="text-muted">{__("tesla_vehicle.content.pair_help")}</p>
-            <FormRow>
-                <Button type="button" className="w-100" disabled={!!pairReason} onClick={() => this.command('pair')}>{__("tesla_vehicle.content.pair")}</Button>
-            </FormRow>
-            {pairReason ? <p role="status" class="text-muted">{pairReason}</p> : undefined}
-        </Fragment>;
+        </Fragment> : undefined;
         const commonSoc = state.ev_state?.soc;
         const currentSoc = state.ev_state?.active_ev_index === p.ev_index && state.ev_state?.mac === p.ev_mac &&
             state.tesla_state?.profile_ev_index === p.ev_index && Number.isFinite(commonSoc) && Number.isFinite(state.tesla_state?.last_soc) && state.tesla_state.last_update > 0;
@@ -311,28 +323,39 @@ export class TeslaVehicle extends ConfigComponent<"tesla_vehicle/profiles", {}, 
                 <InputSelect items={items} value={String(state.edit_index)} onValue={this.selectProfile} />
             </FormRow>
             <FormRow label={__("tesla_vehicle.status.pairing")}><div class="form-control-plaintext" role="status">{keyText}</div></FormRow>
-            {status.paired ? <details class="mb-3"><summary>{__("tesla_vehicle.content.manage")}</summary>{setup}</details> : setup}
+            {setup}
+            {state.search_error || state.discovery?.status === 'error' ? <Alert variant="danger">{__("tesla_vehicle.content.search_failed")}</Alert> : undefined}
+            {assigned && !status.paired ? <FormRow label={__("tesla_vehicle.content.vehicle")}><div class="form-control-plaintext text-success" role="status">{__("tesla_vehicle.content.assigned")}</div></FormRow> : undefined}
+            {assigned && !status.paired ? <Fragment>
+                <FormRow><Button type="button" className="w-100" disabled={!!pairReason} onClick={() => this.command('pair')}>{__("tesla_vehicle.content.pair")}</Button></FormRow>
+                <p class="text-muted">{__("tesla_vehicle.content.pair_help")}</p>
+                {pairReason ? <p role="status" class="text-muted">{pairReason}</p> : undefined}
+            </Fragment> : undefined}
+            {status.paired ? <FormRow><Button type="button" variant="danger" className="w-100" disabled={state.command_busy || !this.deleteAllowed()} onClick={() => this.command('delete')}>{__("tesla_vehicle.content.forget_key")}</Button></FormRow> : undefined}
             {status.key_present || status.paired ? <Fragment>
-            <h3 class="h5 mt-3">{__("tesla_vehicle.content.step_soc")}</h3>
+
             <FormRow help={__("tesla_vehicle.content.manual_wake_help")}>
-                <Button type="button" className="w-100" variant="secondary" disabled={!!pollReason} onClick={() => this.command('poll')}>{__("tesla_vehicle.content.read_soc")}</Button>
+                <Button type="button" className="w-100" variant="primary" disabled={!!pollReason} onClick={() => this.command('poll')}>{__("tesla_vehicle.content.read_soc")}</Button>
             </FormRow>
             {pollReason ? <p role="status" class="text-muted">{pollReason}</p> : undefined}
-            {currentSoc ? <FormRow label={__("tesla_vehicle.status.soc")}><InputText value={util.toLocaleFixed(commonSoc, 1) + ' %'} /></FormRow> : <p role="status" class="text-muted">{__("tesla_vehicle.content.soc_unavailable")}</p>}
-            {currentSoc ? <FormRow label={__("tesla_vehicle.status.soc_time")}><InputText value={util.format_timespan_ms(state.tesla_state.last_update)} /></FormRow> : undefined}
-            <p class="text-muted">{__("tesla_vehicle.content.shared_soc")}</p>
+            {currentSoc ? <FormRow label={__("tesla_vehicle.status.soc")}><InputText readonly value={util.toLocaleFixed(commonSoc, 1) + ' %'} /></FormRow> : <p role="status" class="text-muted">{__("tesla_vehicle.content.soc_unavailable")}</p>}
+            {currentSoc ? <FormRow label={__("tesla_vehicle.status.soc_time")}><InputText readonly value={util.format_timespan_ms(state.tesla_state.last_update)} /></FormRow> : undefined}
             </Fragment> : undefined}
             {state.command_error ? <Alert variant="danger">{__("tesla_vehicle.content.preparation_failed")}</Alert> : undefined}
             {state.tesla_state?.last_error ? <Alert variant="danger">{state.tesla_state.last_error}</Alert> : undefined}
-            <details class="mt-3"><summary>{__("tesla_vehicle.content.advanced")}</summary>
-                <FormRow label={__("tesla_vehicle.content.ble_address")}><InputText value={p.ble_address || '–'} /></FormRow>
-                <FormRow label={__("tesla_vehicle.content.address_type")}><InputText value={p.ble_address_type === 1 ? __("tesla_vehicle.content.address_random") : __("tesla_vehicle.content.address_public")} /></FormRow>
-                <FormRow label={__("tesla_vehicle.content.loaded_profile")}><InputText value={evs[state.tesla_state?.profile_ev_index]?.name ?? '–'} /></FormRow>
-                <FormRow label={__("tesla_vehicle.content.active_profile")}><InputText value={evs[state.ev_state?.active_ev_index]?.name ?? '–'} /></FormRow>
-                <FormRow label={__("tesla_vehicle.status.ble")}><InputText value={status.connected ? __("tesla_vehicle.status.connected") : __("tesla_vehicle.status.disconnected")} /></FormRow>
-                <Alert variant="info">{__("tesla_vehicle.content.revocation_help")}</Alert>
-                <Button type="button" variant="danger" className="w-100" disabled={state.command_busy || !this.deleteAllowed()} onClick={() => this.command('delete')}>{__("tesla_vehicle.content.forget_key")}</Button>
-            </details>
+            <h3 class="mt-3">{__("tesla_vehicle.content.details")}</h3>
+            <FormRow labelColClasses="d-none" contentColClasses="col-12"><Button type="button" variant="primary" className="w-100" aria-expanded={state.details_open} aria-controls="tesla_vehicle_details" onClick={() => this.setState({details_open: !state.details_open})}>{state.details_open ? __("tesla_vehicle.content.hide_details") : __("tesla_vehicle.content.show_details")}</Button></FormRow>
+            {state.details_open ? <div id="tesla_vehicle_details">
+                <FormRow label={__("tesla_vehicle.content.vin")}><InputText readonly value={p.vin || '–'} /></FormRow>
+                <FormRow label={__("tesla_vehicle.content.ble_address")}><InputText readonly value={p.ble_address || '–'} /></FormRow>
+                <FormRow label={__("tesla_vehicle.content.loaded_profile")}><InputText readonly value={state.tesla_state?.running ? evs[state.tesla_state.profile_ev_index]?.name ?? '–' : '–'} /></FormRow>
+                <FormRow label={__("tesla_vehicle.content.active_profile")}><InputText readonly value={evs[state.ev_state?.active_ev_index]?.name ?? '–'} /></FormRow>
+                <FormRow label={__("tesla_vehicle.status.ble")}><InputText readonly value={status.connected ? __("tesla_vehicle.status.connected") : __("tesla_vehicle.status.disconnected")} /></FormRow>
+                <p class="text-muted">{__("tesla_vehicle.content.key_connection_help")}</p>
+                <p class="text-muted">{__("tesla_vehicle.content.shared_soc")}</p>
+                {assigned ? <FormRow><Button type="button" variant="outline-secondary" className="w-100" disabled={state.command_busy || this.searchBusy()} onClick={() => this.setState({edit_binding: true, details_open: false})}>{__("tesla_vehicle.content.edit_binding")}</Button></FormRow> : undefined}
+                {!status.paired && status.key_presence !== 'absent' ? <FormRow><Button type="button" variant="outline-danger" className="w-100" disabled={state.command_busy || !this.deleteAllowed()} onClick={() => this.command('delete')}>{__("tesla_vehicle.content.forget_key")}</Button></FormRow> : undefined}
+            </div> : undefined}
         </Fragment>;
     }
 }
