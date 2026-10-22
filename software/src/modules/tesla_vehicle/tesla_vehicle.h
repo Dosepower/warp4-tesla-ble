@@ -299,7 +299,9 @@ private:
             bool pair = false;
         } guided;
         uint32_t config_revision = 0;
+        uint32_t reset_discovery_revision[TeslaBleStorageAdapter::MAX_PROFILES]{};
         bool guidance_refresh = true;
+        uint64_t guidance_macs[TeslaBleStorageAdapter::MAX_PROFILES]{};
         int guidance_key_signature = -1;
 #endif
         TeslaBleRuntimeOwner<Runtime> runtime_owner;

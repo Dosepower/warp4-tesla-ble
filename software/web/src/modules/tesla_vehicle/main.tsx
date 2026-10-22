@@ -34,6 +34,9 @@ export class BluetoothSettings extends Component<{}, BluetoothViewState> {
     private saving = false;
     private own_config_seen = false;
     private own_runtime_seen = false;
+    // Successful reboot hands off navigation asynchronously. Keep retry hidden
+    // after finally, until runtime settles or a genuinely different config arrives.
+    private rebooting = false;
     constructor() {
         super();
         this.state = {enable: API.get("bluetooth/config")?.enable, bluetooth_state: API.get("bluetooth/state"), busy: false, error: ""};
@@ -41,6 +44,7 @@ export class BluetoothSettings extends Component<{}, BluetoothViewState> {
             if (this.disposed) return;
             const config = JSON.stringify(API.get("bluetooth/config"));
             if (config !== this.config) {
+                this.rebooting = false;
                 // The existing API has no transaction ID. Accept only the one
                 // exact expected own ACK transition; every other change expires consent.
                 if (this.saving && !this.own_config_seen && config === JSON.stringify({enable: this.intended})) this.own_config_seen = true;
@@ -52,6 +56,7 @@ export class BluetoothSettings extends Component<{}, BluetoothViewState> {
         util.addApiEventListener("bluetooth/state", () => {
             if (this.disposed) return;
             const s = API.get("bluetooth/state"), value = JSON.stringify(s);
+            if (!s?.restart_required) this.rebooting = false;
             if (value !== this.runtime) {
                 const before: BluetoothState = JSON.parse(this.runtime ?? 'null');
                 const expected = {...before, restart_required: true, restart_reason: 'configuration_changed'};
@@ -118,8 +123,12 @@ export class BluetoothSettings extends Component<{}, BluetoothViewState> {
             if (!current()) throw new Error(__("tesla_vehicle.bluetooth.changed"));
             // Standard backend handler retains its persistence/lifecycle/charging restart gates.
             await API.call("bluetooth/restart", {}, () => __("tesla_vehicle.bluetooth.save_failed"));
-            if (current()) util.postReboot(__("util.reboot_title"), __("util.reboot_text"));
+            if (current()) {
+                this.rebooting = true;
+                util.postReboot(__("util.reboot_title"), __("util.reboot_text"));
+            }
         } catch (e) {
+            this.rebooting = false;
             if (!this.disposed) this.setState({error: e instanceof Error ? e.message : String(e)});
         } finally {
             this.saving = false; this.in_progress = false;
@@ -138,7 +147,7 @@ export class BluetoothSettings extends Component<{}, BluetoothViewState> {
             {s?.persistence_error ? <Alert variant="danger">{__("tesla_vehicle.bluetooth.save_failed")}</Alert> : undefined}
             {s?.supported && s.phase === 'error' ? <Alert variant="danger">{__("tesla_vehicle.bluetooth.error")}</Alert> : undefined}
             {state.error ? <Alert variant="danger">{state.error}</Alert> : undefined}
-            {s?.restart_required && !s.persistence_error && this.available() ? <FormRow>
+            {s?.restart_required && !state.busy && !this.in_progress && !this.rebooting && !s.persistence_error && this.available() ? <FormRow>
                 <Button type="button" variant="danger" className="w-100" disabled={state.busy} onClick={this.retryRestart}>
                     {state.enable ? __("tesla_vehicle.bluetooth.activate_restart") : __("tesla_vehicle.bluetooth.deactivate_restart")}
                 </Button>

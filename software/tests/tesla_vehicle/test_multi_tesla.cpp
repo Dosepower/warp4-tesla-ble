@@ -101,6 +101,7 @@ struct TeslaBleModuleTest {
  }
  #include "host/subscription_contracts.inc"
  #include "host/guided_contracts.inc"
+ #include "host/bootstrap_contracts.inc"
  static void run(const std::string &mode) {
   TeslaVehicle m;m.pre_setup();m.setup();
   assert(peer_open_calls==0 && scan_start_calls==0 && !m.tesla);
@@ -147,6 +148,7 @@ struct TeslaBleModuleTest {
   m.bluetooth_boot_enabled=true;m.bluetooth_config.get("enable")->updateBool(true);
   assert(m.prepare_tesla());m.register_urls();
   assert(api.states.count("tesla_vehicle/profiles") && !api.states.count("tesla_vehicle/config"));
+  if(mode.rfind("bootstrap-",0)==0) {bootstrap(m,mode);return;}
   auto *entries=m.tesla->profiles.get("entries");assert(entries->setCount(2));entry(entries->get(size_t{0}),0);entry(entries->get(size_t{1}),1);
   assert(m.validate_profiles(m.tesla->profiles,ConfigSource::File).empty());
   entries->get(1)->get("ev_index")->updateInt(0);assert(!m.validate_profiles(m.tesla->profiles,ConfigSource::File).empty());entry(entries->get(1),1);

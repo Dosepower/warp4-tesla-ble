@@ -109,15 +109,16 @@ bool TeslaVehicle::prepare_tesla()
     tesla->profile_command = Config::Object({{"ev_index", Config::Int(-1, -1, EV_MAX_EVS - 1)}});
     tesla->guided_command = Config::Object({
         {"phase", Config::Str("", 0, 12)}, {"request", Config::Str("", 0, 32)},
-        {"generation", Config::Str("", 0, 20)}, {"profile", make_profile()},
+        {"generation", Config::Str("", 0, 20)}, {"revision", Config::Uint(0, 0, UINT32_MAX)}, {"profile", make_profile()},
     });
     tesla->guidance_profile = Config::Object({
         {"ev_index", Config::Int(-1, -1, EV_MAX_EVS - 1)},
+        {"ev_mac", Config::Str("", 0, 17)}, {"namespace_clean", Config::Bool(false)},
         {"binding_fresh", Config::Bool(false)},
         {"paired", Config::Bool(false)}, {"key_presence", Config::Str("unknown", 0, TESLA_BLE_PRESENCE_MAX_LENGTH)},
     });
     tesla->guidance = Config::Object({
-        {"generation", Config::Str("", 0, 20)}, {"request", Config::Str("", 0, 32)}, {"ready", Config::Bool(false)},
+        {"generation", Config::Str("", 0, 20)}, {"revision", Config::Uint(0, 0, UINT32_MAX)}, {"request", Config::Str("", 0, 32)}, {"ready", Config::Bool(false)},
         {"profiles", Config::Array({}, &tesla->guidance_profile, 0, EV_MAX_EVS)},
     });
     tesla->legacy_blocked = TeslaBleStorageAdapter::legacy_material_present();

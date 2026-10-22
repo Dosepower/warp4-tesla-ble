@@ -74,3 +74,19 @@ const retry=nodes().find(n=>n.type==='Button');assert(retry);f.show=async()=>fal
 reset();f.save=async(t,p)=>{f.values[t]=p;f.values['bluetooth/state'].restart_required=false;event(t);};await toggle().props.onClick();assert.equal(f.reboots,0,'No-op runtime ACK never reboots');
 reset();let prevented=false;f.show=async()=>false;await toggle().props.onClick({preventDefault(){prevented=true;}});assert(prevented,'Native switch does not visually change before confirmation');
 console.log('BLUETOOTH_FAILURE_RACES_NOOP_RETRY_PASS');
+// Retry must not flash on own restart_required, at postReboot, or finally.
+for(const order of ['config-first','runtime-first']) {
+ reset();const frames=[];const sample=()=>frames.push(nodes().some(n=>n.type==='Button'));
+ const set=page.setState;page.setState=v=>{set(v);sample();};
+ let ack,readback,restart;const originalRead=f.read;
+ f.save=async(t,p)=>{f.values[t]=p;f.values['bluetooth/state'].restart_required=true;f.values['bluetooth/state'].restart_reason='configuration_changed';
+  for(const topic of order==='config-first'?[t,'bluetooth/state']:['bluetooth/state',t])event(topic);
+  await new Promise(r=>ack=r);
+ };
+ let first=true;f.read=async t=>{if(first){first=false;await new Promise(r=>readback=r);}return originalRead(t);};
+ f.call=async()=>{sample();await new Promise(r=>restart=r);sample();};
+ const pending=toggle().props.onClick();await new Promise(setImmediate);sample();ack();await new Promise(setImmediate);sample();readback();await new Promise(setImmediate);sample();restart();await pending;sample();
+ assert.equal(f.reboots,1);assert(frames.length>5);assert(frames.every(v=>!v),`No retry flash in ${order}, including successful finally`);
+ event('bluetooth/state');sample();assert(!frames.at(-1),'Still hidden while reboot navigation is pending');
+}
+console.log('BLUETOOTH_NO_RETRY_FLASH_TRANSACTION_FINALLY_PASS');

@@ -10,7 +10,7 @@ const mock=`const f=globalThis.fixture;
 export const get=t=>f.values[t]; export const call=async(t,p)=>{f.calls.push({topic:t,payload:structuredClone(p)});await f.call(t,p);};
 export const save=(t,p)=>call(t+'_update',p); export const __=k=>k;
 export const addApiEventListener=(t,c)=>{(f.listeners[t]??=[]).push(c);};export const render_allowed=()=>true;
-export const format_timespan_ms=ms=>String(ms);export const toLocaleFixed=(n,d)=>n.toFixed(d);export const postReboot=()=>{};export const download=async()=>{throw Error('Unexpected read');};
+export const format_timespan_ms=ms=>String(ms);export const toLocaleFixed=(n,d)=>n.toFixed(d);export const postReboot=()=>{};export const download=async url=>({text:async()=>JSON.stringify(f.values[url.slice(1)])});
 export const async_modal_ref={current:{show:async o=>{f.modals.push(o);return f.show();}}};
 export class ConfigComponent{constructor(t,e,u,x){this.state={...structuredClone(f.values[t]),...x};this.dirty=false;}setState(v){Object.assign(this.state,v);}isDirty(){return this.dirty;}setDirty=(v)=>{this.dirty=v;};set(){return()=>{};}toggle(){return()=>{};}}
 export const Button='Button',Alert='Alert',Table='Table',Bluetooth='Bluetooth',FormRow='FormRow',FormSeparator='FormSeparator',InputSelect='InputSelect',InputText='InputText',NavbarItem='NavbarItem',Switch='Switch',ConfigForm='ConfigForm',PageHeader='PageHeader',SubPage='SubPage';export const registerVehicleExtension=()=>{};`;
@@ -34,7 +34,11 @@ const walk=n=>!n||typeof n!=='object'?[]:[n,...[n.props?.children].flat(Infinity
 const nodes=()=>walk(page.render({},page.state));
 const findButton=k=>nodes().find(n=>n.type==='Button'&&(n.props.children===`tesla_vehicle.content.${k}` || k==='search'&&n.props.children==='tesla_vehicle.content.searching'));
 // Use the actual visible details/manage controls to reach a deliberate refresh.
-const button=k=>{if(k==='forget_key'&&!findButton(k)&&findButton('show_details')){f.values['tesla_vehicle/state']={profile_ev_index:0,key_presence:'present',key_present:true,paired:false};event('tesla_vehicle/state');findButton('show_details').props.onClick();}if(k==='search'&&!findButton(k)&&findButton('show_details'))findButton('show_details').props.onClick();if(k==='search'&&!findButton(k)&&findButton('edit_binding'))findButton('edit_binding').props.onClick();return findButton(k);};
+const button=k=>{if(k==='forget_key'&&!findButton(k)&&findButton('show_details')){f.values['tesla_vehicle/state']={profile_ev_index:0,key_presence:'present',key_present:true,paired:false};event('tesla_vehicle/state');findButton('show_details').props.onClick();}if(k==='search'&&!findButton(k)&&findButton('show_details'))findButton('show_details').props.onClick();if(k==='search'&&!findButton(k))page.state.edit_binding=true;return findButton(k);};
+// Existing Details control alone gets the approved destructive appearance.
+page.state.entries[0].ble_address='01:02:03:04:05:06';page.state.entries[0].discovery_revision=2;
+page.state.details_open=true;assert.equal(findButton('edit_binding').props.variant,'danger','Existing VIN/reset control must be solid red');
+page.state.entries[0].ble_address='';page.state.entries[0].discovery_revision=0;page.state.details_open=false;
 assert.equal(nodes().filter(n=>n.type==='Switch').length,0,'No per-vehicle permission switch');
 assert(!nodes().some(n=>n.type==='ConfigForm'),'No separate permission Save block');
 assert(!nodes().some(n=>n.type==='summary'||n.type==='details'),'Details must use standard WARP heading and fullwidth button');
@@ -231,6 +235,37 @@ page.selectProfile('1');page.selectProfile('0');adoptionAck();await adopting;ass
 // Changing away and back during preparation cancels a later matching ACK.
 f.call=async(t,p)=>{if(p.phase==='prepare_pair'){page.selectProfile('1');page.selectProfile('0');f.values['tesla_vehicle/guidance']={...f.values['tesla_vehicle/guidance'],ready:true,request:p.request};event('tesla_vehicle/guidance');}};
 count=f.calls.length;await button('pair').props.onClick();assert.equal(f.calls.length,count+1);normal();
+// Actual reset control confirmation + persistence/readback, never a reopen-only action.
+normal();page.state.edit_binding=false;page.state.details_open=true;
+f.values['tesla_vehicle/guidance'].revision=12;
+f.values['tesla_vehicle/state']={profile_ev_index:0,key_presence:'absent',key_present:false,paired:false};event('tesla_vehicle/state');
+const resetHandler=findButton('edit_binding').props.onClick;
+f.show=async()=>false;count=f.calls.length;await resetHandler();assert.equal(f.calls.length,count,'Reset cancel is inert');
+f.show=async()=>true;
+f.call=async(t,p)=>{if(p.phase==='reset'){
+ assert.equal(p.revision,12);assert.equal(p.profile.ev_index,0);
+ const cfg=structuredClone(f.values['tesla_vehicle/profiles']);Object.assign(cfg.entries[0],{enable:false,ble_address:'',ble_address_type:0,discovery_revision:0});
+ f.values['tesla_vehicle/profiles']=cfg;event('tesla_vehicle/profiles');
+ f.values['tesla_vehicle/guidance'].revision++;event('tesla_vehicle/guidance');
+}};
+const B=structuredClone(f.values['tesla_vehicle/profiles'].entries[1]);const initialVIN=page.state.entries[0].vin;
+await resetHandler();assert.equal(f.calls.at(-1).payload.phase,'reset');
+assert.equal(page.state.entries[0].ble_address,'','Confirmed reset must apply exact readback to UI');
+assert.equal(page.state.entries[0].vin,initialVIN);assert(page.state.edit_binding);assert(!page.state.details_open);
+assert.equal(JSON.stringify(page.state.entries[1]),JSON.stringify(B));assert(findButton('search'));assert(!page.dirty);
+// Paired and uncertain states block reset, including programmatically stale click.
+for(const presence of ['present','unknown','cleanup']){
+ normal();page.state.details_open=true;f.values['tesla_vehicle/state']={profile_ev_index:0,key_presence:presence,key_present:presence==='present',paired:presence==='present'};event('tesla_vehicle/state');
+ assert(findButton('edit_binding').props.disabled);count=f.calls.length;await findButton('edit_binding').props.onClick();assert.equal(f.calls.length,count);
+ assert(nodes().some(n=>n.props.children===`tesla_vehicle.content.${presence==='present'?'unpair_first':'reset_key_unknown'}`));
+ const before=page.profile().vin;page.setProfile({vin:'5YJ3E1EA7KF000009'});assert.equal(page.profile().vin,before);
+}
+for(const mutate of [()=>{page.selectProfile('1');page.selectProfile('0');},()=>{f.values['tesla_vehicle/guidance'].revision++;event('tesla_vehicle/guidance');},()=>{f.values['tesla_vehicle/state'].paired=true;event('tesla_vehicle/state');}]){
+ normal();page.state.details_open=true;let yes;f.show=()=>new Promise(r=>yes=r);count=f.calls.length;
+ const pending=page.resetBinding();await page.resetBinding();mutate();yes(true);await pending;assert.equal(f.calls.length,count,'Reset stale/ABA/duplicate consent rejected');
+}
+normal();page.state.details_open=true;f.call=async()=>{throw Error('reset refused');};count=f.calls.length;await page.resetBinding();assert.equal(f.calls.length,count+1);assert(page.state.command_error);assert(page.profile().ble_address);
+normal();
 let prepareResponse;f.call=()=>new Promise(r=>{prepareResponse=r;});const pendingUnmount=button('pair').props.onClick();await new Promise(setImmediate);
 count=f.calls.length;page.componentWillUnmount();prepareResponse();await pendingUnmount;assert.equal(f.calls.length,count);
 assert(f.calls.every(c=>['tesla_vehicle/scan','tesla_vehicle/profiles_update','tesla_vehicle/guided','tesla_vehicle/forget_key'].includes(c.topic)));
