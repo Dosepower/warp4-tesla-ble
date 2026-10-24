@@ -1,5 +1,19 @@
 // Included inside friend test struct. Synthetic profiles, actual production entrypoint.
  static void guided(TeslaVehicle &m,const std::string &mode) {
+  if(mode=="guided-refresh-other-expired") {
+   HostBluetoothDriver driver(m.bluetooth,TeslaVehicle::gatt_callback);ev.index=0;ev.mac=A;
+   m.find_profile(1)->get("discovery_revision")->updateUint(1);
+   auto update=Config::Object({{"entries",Config::Array({},&m.tesla->profile,0,EV_MAX_EVS)}});
+   auto entries=update.get("entries");assert(entries->setCount(2));entry(entries->get(size_t{0}),0);entry(entries->get(size_t{1}),1);
+   entries->get(size_t{1})->get("discovery_revision")->updateUint(1);
+   const auto files=LittleFS.files;
+   entries->get(size_t{0})->get("ble_address_type")->updateUint(1);
+   entries->get(size_t{0})->get("discovery_revision")->updateUint(host_vin_scan(m.bluetooth,"5YJ3E1EA7KF000001",0,A,1,1));
+   assert(m.validate_profiles(update,ConfigSource::API).empty() && "Unchanged expired B must not block explicit fresh A adoption");
+   assert(LittleFS.files==files && !m.tesla->runtime_owner.get() && !peer_open_calls && !ev.applied);
+   entries->get(size_t{1})->get("ble_address_type")->updateUint(1);
+   assert(!m.validate_profiles(update,ConfigSource::API).empty() && "Changed stale B transport still requires fresh exact proof");return;
+  }
   if(mode.rfind("guided-reset",0)==0) {
    HostBluetoothDriver driver(m.bluetooth,TeslaVehicle::gatt_callback);ev.index=0;ev.mac=A;
    explicit_scan(m,0);seed(1);auto *p=m.find_profile(0);const auto vin=p->get("vin")->asString();
@@ -49,12 +63,14 @@
   entry(c.get("profile"),0);c.get("profile")->get("discovery_revision")->updateUint(m.find_profile(0)->get("discovery_revision")->asUint());
   c.get("request")->updateString("00000000000000000000000000000001");
   c.get("generation")->updateString(std::to_string(ev.generation));
+  c.get("revision")->updateUint(m.tesla->config_revision);
   c.get("phase")->updateString(mode=="guided-poll" || mode=="guided-no-key"?"prepare_poll":"prepare_pair");
   const auto before=LittleFS.files;String error;
   if(mode=="guided-old-generation")++ev.generation;
+  if(mode=="guided-stale-prepare")c.get("revision")->updateUint(m.tesla->config_revision+1);
   if(mode=="guided-wrong-config")c.get("profile")->get("ble_address_type")->updateUint(1);
   api.commands.at("tesla_vehicle/guided")(0,error);
-  if(mode=="guided-old-generation" || mode=="guided-wrong-config") {
+  if(mode=="guided-old-generation" || mode=="guided-wrong-config" || mode=="guided-stale-prepare") {
    assert(!error.empty()&&!m.tesla->runtime_owner.get()&&peer_open_calls==0&&LittleFS.files==before);std::puts("GUIDED_PREPARE_REJECT_PASS");return;
   }
   assert(error.empty());auto *r=m.tesla->runtime_owner.get();assert(r && r->profile_pending.load());
@@ -73,11 +89,18 @@
    }
    if(mode=="guided-config"){m.find_profile(1)->get("ble_address")->updateString("");assert(m.validate_profiles(m.tesla->profiles,ConfigSource::API).empty());}
    if(mode=="guided-wrong-request")c.get("request")->updateString("00000000000000000000000000000002");
+   if(mode=="guided-stale-commit")c.get("revision")->updateUint(m.tesla->config_revision+1);
+   if(mode=="guided-stale-cancel") {
+    c.get("phase")->updateString("cancel");c.get("revision")->updateUint(m.tesla->config_revision+1);
+    api.commands.at("tesla_vehicle/guided")(0,error);assert(!error.empty());
+    assert(m.tesla->guided.request[0] && "Stale cancellation must not consume current lease");
+    c.get("revision")->updateUint(m.tesla->config_revision);c.get("phase")->updateString("commit");
+   }
    if(mode=="guided-cancel"){c.get("phase")->updateString("cancel");api.commands.at("tesla_vehicle/guided")(0,error);c.get("phase")->updateString("commit");}
    error.clear();api.commands.at("tesla_vehicle/guided")(0,error);
-   const bool success=mode=="guided" || mode=="guided-adopt-disabled" || mode=="guided-poll";
+   const bool success=mode=="guided" || mode=="guided-adopt-disabled" || mode=="guided-poll" || mode=="guided-stale-cancel";
    assert(error.empty()==success);
-   assert(r->pair_requested.load()==(mode=="guided" || mode=="guided-adopt-disabled"));
+   assert(r->pair_requested.load()==(mode=="guided" || mode=="guided-adopt-disabled" || mode=="guided-stale-cancel"));
    assert(r->poll_requested.load()==(mode=="guided-poll"));
    if(success){error.clear();api.commands.at("tesla_vehicle/guided")(0,error);assert(!error.empty());}
   }

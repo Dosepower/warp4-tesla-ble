@@ -143,7 +143,13 @@ String TeslaVehicle::validate_profiles(Config &update, ConfigSource source)
             const auto type=p->get("ble_address_type")->asUint();
             const bool saved=store.select_profile(index,mac) && profile_material_authorized(store,vin.c_str(),mac) &&
                 profile_transport_matches(store,vin.c_str(),address.c_str(),type);
-            if (!saved && !fresh_binding(index,mac,vin.c_str(),address.c_str(),type,p->get("discovery_revision")->asUint())) {
+            // An unchanged mapping in another saved profile is retention, not
+            // fresh radio authority. Selection/commit still require fresh_binding.
+            auto *old = find_profile(index);
+            const bool retained = old && index != ev.get_live_identity().index && old->get("ev_mac")->asString() == p->get("ev_mac")->asString() && old->get("vin")->asString() == vin &&
+                old->get("ble_address")->asString() == address && old->get("ble_address_type")->asUint() == type &&
+                old->get("discovery_revision")->asUint() == p->get("discovery_revision")->asUint();
+            if (!saved && !retained && !fresh_binding(index,mac,vin.c_str(),address.c_str(),type,p->get("discovery_revision")->asUint())) {
                 return checked_error_string("Fresh exact VIN search match required; manual address, expired or replaced search rejected");
             }
         }
@@ -378,6 +384,32 @@ void TeslaVehicle::guided_command(String &errmsg)
     for (auto c : request) { if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) {
         errmsg = checked_error_string("Invalid explicit action request"); return;
     } }
+    // Strict JSON presence is enforced by ConfigRoot before this callback.
+    // Equality alone cannot detect A->B->A: all phases carry the monotonic
+    // revision captured with consent, not just the destructive reset phase.
+    const auto command_live = ev.get_live_identity();
+    char command_generation[21];
+    snprintf(command_generation, sizeof(command_generation), "%llu", static_cast<unsigned long long>(command_live.generation));
+    if (command.get("revision")->asUint() != tesla->config_revision ||
+        command.get("generation")->asString() != command_generation) {
+        errmsg = checked_error_string("Configuration or connected identity changed; confirm again"); return;
+    }
+    if (phase == "commit" || phase == "cancel") {
+        auto p = command.get("profile");
+        auto *saved = find_profile(p->get("ev_index")->asInt());
+        if (!saved || p->get("ev_index")->asInt() != tesla->guided.identity.index) {
+            errmsg = checked_error_string("Prepared profile changed; confirm again"); return;
+        }
+        for (const char *key : {"ev_mac", "vin", "ble_address"}) {
+            if (p->get(key)->asString() != saved->get(key)->asString()) { errmsg = checked_error_string("Saved profile changed; confirm again"); return; }
+        }
+        for (const char *key : {"ble_address_type", "discovery_revision", "poll_interval"}) {
+            if (p->get(key)->asUint() != saved->get(key)->asUint()) { errmsg = checked_error_string("Saved profile changed; confirm again"); return; }
+        }
+        if (p->get("enable")->asBool() != saved->get("enable")->asBool() || p->get("wake_once")->asBool() != saved->get("wake_once")->asBool()) {
+            errmsg = checked_error_string("Saved permission changed; confirm again"); return;
+        }
+    }
     if (phase == "reset") {
         // Local-only confirmed reset. Exact profile + monotonic config revision
         // + live identity generation reject stale/ABA/replayed consent.

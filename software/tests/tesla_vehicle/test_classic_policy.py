@@ -1,4 +1,4 @@
-import importlib.util,unittest
+import importlib.util,unittest,os
 from pathlib import Path
 S=Path(__file__).resolve().parents[2]
 spec=importlib.util.spec_from_file_location('sdk',S/'lib-builder/tesla_sdk.py')
@@ -9,7 +9,7 @@ class ClassicPolicy(unittest.TestCase):
   policy='tesla-psram-first-single-link-classic-release-v1'
   self.assertEqual(sdk.profile_config(policy),sdk.profile_config(sdk.SINGLE_LINK_POLICY))
  def test_old_tracking_source_cannot_be_selected(self):
-  old=Path('../tesla-sdk-source/builder/components/arduino/cores/esp32/esp32-hal-bt.c')
+  old=Path(os.environ['TESLA_CLASSIC_TEST_UNPATCHED_CORE'])/'esp32-hal-bt.c'
   with self.assertRaisesRegex(ValueError,'Classic release core'):
    sdk.verify_classic_core(old)
  def test_actual_framework_verified_and_both_sdk_entrypoints_wrapped(self):
@@ -19,7 +19,7 @@ class ClassicPolicy(unittest.TestCase):
   script=types.ModuleType('SCons.Script');setattr(script,'COMMAND_LINE_TARGETS',['tesla-review'])
   with tempfile.TemporaryDirectory(dir=os.environ['TMPDIR']) as td:
    root=Path(td);core=root/'core';(core/'cores/esp32').mkdir(parents=True)
-   source=Path('../tesla-framework-core/cores/esp32')
+   source=Path(os.environ['TESLA_CLASSIC_TEST_CORE'])/'cores/esp32'
    for name in ('esp32-hal-bt.c','esp32-hal-misc.c'):(core/'cores/esp32'/name).write_bytes((source/name).read_bytes())
    sdkroot=root/'sdk';expected=sdkroot/'builder/components/arduino/cores/esp32';expected.mkdir(parents=True)
    (expected/'esp32-hal-misc.c').write_bytes((source/'esp32-hal-misc.c').read_bytes())

@@ -23,7 +23,7 @@ interface View {
     edit_index: number;
     command_busy: boolean;
     search_error: boolean;
-    command_error: boolean;
+    command_error: boolean | string;
     adopted: boolean;
     details_open: boolean;
     edit_binding: boolean;
@@ -56,6 +56,30 @@ export class TeslaVehicle extends ConfigComponent<"tesla_vehicle/profiles", {}, 
     private cancelWait: () => void;
     private credential_evidence = "";
     private deletion_revision = 0;
+    private guidance_revision: number;
+    private guidance_generation: string;
+    private owned_revision = -1;
+    private bluetooth_context = "";
+    private pending_command: {request: string; generation: string; revision: number; profile: Profile};
+
+    private cancelCommand() {
+        const payload = this.pending_command;
+        this.pending_command = undefined;
+        // Revocation only; never retries preparation, commit or any radio action.
+        if (payload) void API.call("tesla_vehicle/guided", {...payload, phase: 'cancel'}).catch(() => {});
+    }
+    private commandFailure(error: unknown) {
+        return error && typeof error === 'object' && 'message' in error ? String((error as {message: unknown}).message) :
+            typeof error === 'string' ? error : __("tesla_vehicle.content.preparation_failed");
+    }
+    private bluetoothContext() {
+        const b = API.get("bluetooth/state");
+        return JSON.stringify([API.get("bluetooth/config")?.enable, b?.supported, b?.phase, b?.restart_required, b?.persistence_error]);
+    }
+    private requestDiscovery(p: Profile) {
+        // Only explicit Search click or confirmed Pair/Poll may invoke this.
+        return API.call("tesla_vehicle/scan", {vin: p.vin, ev_index: p.ev_index, ev_mac: p.ev_mac});
+    }
 
     private credentialEvidence() {
         const s = API.get("tesla_vehicle/state"), g = API.get("tesla_vehicle/guidance");
@@ -77,11 +101,22 @@ export class TeslaVehicle extends ConfigComponent<"tesla_vehicle/profiles", {}, 
         this.ev_config = JSON.stringify(API.get("ev/config"));
         this.saved_config = JSON.stringify(API.get("tesla_vehicle/profiles"));
         this.credential_evidence = this.credentialEvidence();
+        this.guidance_revision = API.get("tesla_vehicle/guidance")?.revision;
+        this.guidance_generation = API.get("tesla_vehicle/guidance")?.generation;
+        this.bluetooth_context = this.bluetoothContext();
         const listen = (topic: keyof API.EventMap, callback: () => void) =>
             util.addApiEventListener(topic, () => { if (!this.disposed) callback(); }, {signal: this.listeners.signal});
         listen("tesla_vehicle/state", () => { this.updateCredentialEvidence(); this.setState({tesla_state: API.get("tesla_vehicle/state")}); });
         listen("tesla_vehicle/guidance", () => {
             this.updateCredentialEvidence();
+            const g = API.get("tesla_vehicle/guidance");
+            if (g?.revision !== this.guidance_revision || g?.generation !== this.guidance_generation) {
+                // Only our one exact transport-save transition may advance the
+                // consent revision. Every external edit or identity ABA cancels.
+                if (g?.revision !== this.owned_revision || g?.generation !== this.guidance_generation) ++this.revision;
+                else this.owned_revision = -1;
+                this.guidance_revision = g?.revision; this.guidance_generation = g?.generation;
+            }
             if (this.search_context && API.get("tesla_vehicle/guidance")?.generation !== this.search_generation) this.search_context = "";
             this.setState({guidance: API.get("tesla_vehicle/guidance")});
         });
@@ -109,16 +144,21 @@ export class TeslaVehicle extends ConfigComponent<"tesla_vehicle/profiles", {}, 
             }
             this.setState({});
         });
-        listen("bluetooth/state", () => this.setState({}));
+        const bluetoothChanged = () => {
+            const context = this.bluetoothContext();
+            if (context !== this.bluetooth_context) { ++this.revision; this.bluetooth_context = context; }
+            this.setState({});
+        };
+        listen("bluetooth/state", bluetoothChanged);
         // Visibility follows persisted intent, not the radio phase before reboot.
-        listen("bluetooth/config", () => this.setState({}));
+        listen("bluetooth/config", bluetoothChanged);
     }
 
     override componentWillUnmount() {
         this.disposed = true; ++this.revision;
         this.listeners.abort(); clearTimeout(this.timer); this.cancelWait?.();
         clearTimeout(this.discovery_timer);
-        // No network/action at unmount. An uncommitted backend lease expires.
+        this.cancelCommand(); // Best-effort complete-schema local lease revocation.
     }
 
     private profile(): Profile {
@@ -246,7 +286,7 @@ export class TeslaVehicle extends ConfigComponent<"tesla_vehicle/profiles", {}, 
             clearTimeout(this.discovery_timer);
             this.search_saved = JSON.stringify(API.get("tesla_vehicle/profiles"));
             const p = this.profile();
-            await API.call("tesla_vehicle/scan", {vin: p.vin, ev_index: p.ev_index, ev_mac: p.ev_mac}, () => __("tesla_vehicle.content.search_failed"));
+            await this.requestDiscovery(p);
         } catch {
             this.scan_waiting = false; this.search_context = "";
             if (!this.disposed) this.setState({search_error: true});
@@ -298,8 +338,7 @@ export class TeslaVehicle extends ConfigComponent<"tesla_vehicle/profiles", {}, 
         if (!teslaVehicleReady(p.ev_index, this.state.ev_state) || p.ev_mac !== this.state.ev_state?.mac || API.get("ev/config")?.evs[p.ev_index]?.mac !== p.ev_mac)
             return __("tesla_vehicle.content.vehicle_not_ready");
         if (!p.ble_address || !p.discovery_revision) return __("tesla_vehicle.content.find_first");
-        if (!this.state.guidance?.profiles.find(e => e.ev_index === p.ev_index)?.binding_fresh) return __("tesla_vehicle.content.binding_saved");
-        if (!this.state.guidance?.generation) return __("tesla_vehicle.content.preparation_unavailable");
+        if (!this.state.guidance?.generation || !Number.isInteger(this.state.guidance.revision)) return __("tesla_vehicle.content.preparation_unavailable");
         if (s.key_presence === 'cleanup') return __("tesla_vehicle.status.cleanup_required");
         if (s.key_presence === 'unknown') return __("tesla_vehicle.status.key_unknown");
         if (poll && !s.key_present) return __("tesla_vehicle.content.verify_requires_key");
@@ -320,39 +359,97 @@ export class TeslaVehicle extends ConfigComponent<"tesla_vehicle/profiles", {}, 
         if (this.command_in_progress || (action === 'delete' ? !this.deleteAllowed() : !!this.actionReason(action === 'poll'))) return;
         const revision = this.revision, index = this.state.edit_index;
         const deletion_revision = this.deletion_revision;
-        const saved = JSON.stringify(API.get("tesla_vehicle/profiles")), evs = JSON.stringify(API.get("ev/config"));
+        let saved = JSON.stringify(API.get("tesla_vehicle/profiles"));
+        const evs = JSON.stringify(API.get("ev/config")), identity = this.vehicleIdentity();
         const generation = API.get("tesla_vehicle/guidance")?.generation;
-        const current = () => !this.disposed && revision === this.revision && index === this.state.edit_index &&
+        let backend_revision = API.get("tesla_vehicle/guidance")?.revision;
+        const baseCurrent = () => !this.disposed && !this.isDirty() && revision === this.revision && index === this.state.edit_index &&
             (action !== 'delete' || deletion_revision === this.deletion_revision) &&
-            saved === JSON.stringify(API.get("tesla_vehicle/profiles")) && evs === JSON.stringify(API.get("ev/config")) &&
-            generation === API.get("tesla_vehicle/guidance")?.generation && !this.configurationDirty() && teslaBluetoothReady(API.get("bluetooth/state"));
+            evs === JSON.stringify(API.get("ev/config")) && identity === this.vehicleIdentity() &&
+            generation === API.get("tesla_vehicle/guidance")?.generation && teslaBluetoothReady(API.get("bluetooth/state")) &&
+            !this.state.tesla_state?.restart_required && !this.state.tesla_state?.stopping;
+        const current = () => baseCurrent() && saved === JSON.stringify(API.get("tesla_vehicle/profiles")) &&
+            backend_revision === API.get("tesla_vehicle/guidance")?.revision && Number.isInteger(backend_revision) && !this.configurationDirty();
+        const pause = async () => {
+            await new Promise<void>(resolve => { this.cancelWait = resolve; this.timer = setTimeout(resolve, 50); });
+            this.cancelWait = undefined;
+        };
         this.command_in_progress = true; this.setState({command_busy: true, command_error: false});
         try {
             if (!await this.confirm(action) || !current() || !this.idle()) return;
             if (action === 'delete') {
                 await API.call("tesla_vehicle/forget_key", {ev_index: index}, () => __("tesla_vehicle.script.command_failed")); return;
             }
+            // Radio discovery belongs ONLY to this explicitly confirmed action.
+            // A saved address is permission metadata, never fresh transport proof.
+            if (!API.get("tesla_vehicle/guidance")?.profiles.find(p => p.ev_index === index)?.binding_fresh) {
+                const p = {...this.profile()}, scan_revision = API.get("tesla_vehicle/discovery")?.revision ?? 0;
+                const deadline = Date.now() + 22000;
+                await this.requestDiscovery(p);
+                let target: Target;
+                while (current() && Date.now() < deadline) {
+                    const d = API.get("tesla_vehicle/discovery");
+                    if (d?.status === 'error') throw new Error(__("tesla_vehicle.content.refresh_failed") + (d.error ? ': ' + d.error : ''));
+                    if (d?.status === 'complete' && !d.busy && d.revision > scan_revision) {
+                        if (d.generation !== generation || d.ev_index !== index || d.ev_mac !== p.ev_mac || d.searched_vin !== p.vin ||
+                            !this.discoveryFresh()) throw new Error(__("tesla_vehicle.content.result_expired"));
+                        const matches = d.targets.filter(t => t.matches_vin);
+                        if (d.truncated || matches.length > 1) throw new Error(__("tesla_vehicle.content.refresh_ambiguous"));
+                        target = matches[0];
+                        if (!target || !/^(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$/.test(target.ble_address) ||
+                            /^(00:){5}00$|^(FF:){5}FF$/i.test(target.ble_address) || (target.ble_address_type !== 0 && target.ble_address_type !== 1))
+                            throw new Error(__("tesla_vehicle.content.refresh_empty"));
+                        const cfg = JSON.parse(saved) as TeslaConfig;
+                        const at = cfg.entries.findIndex(e => e.ev_index === index);
+                        cfg.entries[at] = {...p, ble_address: target.ble_address, ble_address_type: target.ble_address_type, discovery_revision: d.revision};
+                        if (!current() || backend_revision >= 0xffffffff) return;
+                        const expected = JSON.stringify(cfg), next_revision = backend_revision + 1;
+                        this.pending_save = expected; this.owned_revision = next_revision;
+                        await API.save("tesla_vehicle/profiles", cfg);
+                        // Accept precisely our one config ACK in either topic order.
+                        // Every other revision/config transition cancels consent.
+                        const ack_deadline = Date.now() + 3000;
+                        while (baseCurrent() && Date.now() < ack_deadline) {
+                            const bytes = JSON.stringify(API.get("tesla_vehicle/profiles")), rev = API.get("tesla_vehicle/guidance")?.revision;
+                            if ((bytes !== saved && bytes !== expected) || (rev !== backend_revision && rev !== next_revision)) break;
+                            if (bytes === expected && rev === next_revision) {
+                                saved = expected; backend_revision = next_revision;
+                                this.setState({entries: cfg.entries}); this.setDirty(false); break;
+                            }
+                            await pause();
+                        }
+                        this.pending_save = ""; this.owned_revision = -1;
+                        if (!current() || backend_revision !== next_revision) throw new Error(__("tesla_vehicle.content.refresh_changed"));
+                        break;
+                    }
+                    await pause();
+                }
+                if (!current()) return;
+                if (!target) throw new Error(__("tesla_vehicle.content.refresh_timeout"));
+            }
+            if (!current() || !this.idle()) return;
             const bytes = crypto.getRandomValues(new Uint8Array(16));
             const request = Array.from(bytes, b => ('0' + b.toString(16)).slice(-2)).join('');
-            const payload = {request, generation, profile: {...this.profile()}};
-            await API.call("tesla_vehicle/guided", {...payload, phase: action === 'pair' ? 'prepare_pair' : 'prepare_poll'}, () => __("tesla_vehicle.script.command_failed"));
+            const payload = {request, generation, revision: backend_revision, profile: {...this.profile()}};
+            this.pending_command = payload;
+            await API.call("tesla_vehicle/guided", {...payload, phase: action === 'pair' ? 'prepare_pair' : 'prepare_poll'});
             const deadline = Date.now() + 12000;
-            // Wait for the exact backend worker ACK using cached API events.
-            // No network polling, implicit scan, connect or pairing in this loop.
             while (current() && Date.now() < deadline) {
                 const g = API.get("tesla_vehicle/guidance"), s = API.get("tesla_vehicle/state");
-                if (s?.restart_required || s?.stopping || s?.last_error) throw new Error("Preparation refused");
+                if (s?.restart_required || s?.stopping || s?.last_error) throw new Error(s?.last_error || __("tesla_vehicle.content.preparation_failed"));
                 if (g?.request === request && g.ready) {
                     if (!current()) return;
-                    await API.call("tesla_vehicle/guided", {...payload, phase: 'commit'}, () => __("tesla_vehicle.script.command_failed"));
-                    return;
+                    // A lost response is not permission to replay the commit.
+                    await API.call("tesla_vehicle/guided", {...payload, phase: 'commit'});
+                    this.pending_command = undefined;
+                    return; // Accepted command is NOT displayed as authenticated pairing.
                 }
-                await new Promise<void>(resolve => { this.cancelWait = resolve; this.timer = setTimeout(resolve, 50); });
-                this.cancelWait = undefined;
+                await pause();
             }
-            if (!this.disposed) this.setState({command_error: true});
-        } catch { if (!this.disposed) this.setState({command_error: true}); }
+            if (current()) throw new Error(__("tesla_vehicle.content.preparation_timeout"));
+        } catch (error) { if (!this.disposed) this.setState({command_error: this.commandFailure(error)}); }
         finally {
+            this.cancelCommand(); this.pending_save = ""; this.owned_revision = -1;
             clearTimeout(this.timer); this.cancelWait = undefined; this.command_in_progress = false;
             if (!this.disposed) this.setState({command_busy: false});
         }
@@ -378,6 +475,7 @@ export class TeslaVehicle extends ConfigComponent<"tesla_vehicle/profiles", {}, 
                 no_text:()=>__("tesla_vehicle.content.cancel"),yes_text:()=>__("tesla_vehicle.content.edit_binding"),no_variant:'secondary',yes_variant:'danger'}) || !current() || !this.idle()) return;
             const request=Array.from(crypto.getRandomValues(new Uint8Array(16)),b=>('0'+b.toString(16)).slice(-2)).join('');
             this.pending_save=JSON.stringify({entries:this.state.entries.map(p=>p.ev_index===index ? {...p,enable:false,ble_address:'',ble_address_type:0,discovery_revision:0} : p)});
+            this.owned_revision=backend_revision+1;
             await API.call("tesla_vehicle/guided",{phase:'reset',request,generation,revision:backend_revision,profile},()=>__("tesla_vehicle.script.command_failed"));
             // Exact persisted API readback before returning to the existing edit/search workflow.
             const config=JSON.parse(await (await util.download('/tesla_vehicle/profiles',true,10000)).text()) as TeslaConfig;
@@ -387,8 +485,8 @@ export class TeslaVehicle extends ConfigComponent<"tesla_vehicle/profiles", {}, 
                 this.search_context="";this.search_saved="";this.cancelWait?.();
                 this.setState({entries:config.entries,adopted:false,edit_binding:true,details_open:false});this.setDirty(false);
             }
-        } catch {if(!this.disposed)this.setState({command_error:true});}
-        finally {this.pending_save="";this.command_in_progress=false;if(!this.disposed)this.setState({command_busy:false});}
+        } catch (error) {if(!this.disposed)this.setState({command_error:this.commandFailure(error)});}
+        finally {this.pending_save="";this.owned_revision=-1;this.command_in_progress=false;if(!this.disposed)this.setState({command_busy:false});}
     };
     private deleteAllowed() { return this.idle() && !this.configurationDirty() && this.profile().ev_index >= 0; }
 
@@ -461,7 +559,7 @@ export class TeslaVehicle extends ConfigComponent<"tesla_vehicle/profiles", {}, 
             {currentSoc ? <FormRow label={__("tesla_vehicle.status.soc")}><InputText readonly value={util.toLocaleFixed(commonSoc, 1) + ' %'} /></FormRow> : <p role="status" class="text-muted">{__("tesla_vehicle.content.soc_unavailable")}</p>}
             {currentSoc ? <FormRow label={__("tesla_vehicle.status.soc_time")}><InputText readonly value={util.format_timespan_ms(state.tesla_state.last_update)} /></FormRow> : undefined}
             </Fragment> : undefined}
-            {state.command_error ? <Alert variant="danger">{__("tesla_vehicle.content.preparation_failed")}</Alert> : undefined}
+            {state.command_error ? <Alert variant="danger">{typeof state.command_error === 'string' ? state.command_error : __("tesla_vehicle.content.preparation_failed")}</Alert> : undefined}
             {state.tesla_state?.last_error ? <Alert variant="danger">{state.tesla_state.last_error}</Alert> : undefined}
             <h3 class="mt-3">{__("tesla_vehicle.content.details")}</h3>
             <FormRow labelColClasses="d-none" contentColClasses="col-12"><Button type="button" variant="primary" className="w-100" aria-expanded={state.details_open} aria-controls="tesla_vehicle_details" onClick={() => this.setState({details_open: !state.details_open})}>{state.details_open ? __("tesla_vehicle.content.hide_details") : __("tesla_vehicle.content.show_details")}</Button></FormRow>

@@ -3,11 +3,12 @@ import assert from 'node:assert/strict';
 import {createRequire} from 'node:module';
 import {fileURLToPath} from 'node:url';
 import vm from 'node:vm';
+import {validateGuided} from './guided_schema.mjs';
 const require=createRequire(new URL('../../web/package.json',import.meta.url));
 const {build}=require('esbuild');
-const f={values:{},listeners:{},calls:[],modals:[],show:async()=>true,call:async()=>{}};
+const f={values:{},listeners:{},calls:[],modals:[],show:async()=>true,call:async()=>{},validateGuided};
 const mock=`const f=globalThis.fixture;
-export const get=t=>f.values[t]; export const call=async(t,p)=>{f.calls.push({topic:t,payload:structuredClone(p)});await f.call(t,p);};
+export const get=t=>f.values[t]; export const call=async(t,p)=>{f.calls.push({topic:t,payload:structuredClone(p)});if(t==='tesla_vehicle/guided'){try{f.validateGuided(p);}catch(e){console.error(e.message);throw e;}}await f.call(t,p);};
 export const save=(t,p)=>call(t+'_update',p); export const __=k=>k;
 export const addApiEventListener=(t,c)=>{(f.listeners[t]??=[]).push(c);};export const render_allowed=()=>true;
 export const format_timespan_ms=ms=>String(ms);export const toLocaleFixed=(n,d)=>n.toFixed(d);export const postReboot=()=>{};export const download=async url=>({text:async()=>JSON.stringify(f.values[url.slice(1)])});
@@ -20,14 +21,14 @@ const compiled=await build({entryPoints:[fileURLToPath(new URL(`../../web/${tree
 // This is the real import-resolved implementation, never a detached authored fixture.
 assert(Object.keys(compiled.metafile.inputs).some(p=>p.endsWith(`/web/${tree}/modules/tesla_vehicle/guided_vehicle.tsx`)||p.endsWith(`web/${tree}/modules/tesla_vehicle/guided_vehicle.tsx`)), 'Production entrypoint must resolve the final guided component');
 const module={exports:{}};
-vm.runInNewContext(compiled.outputFiles[0].text,{module,exports:module.exports,fixture:f,structuredClone,performance,Date:{now:()=>Date.now()+(f.offset??0)},setTimeout:(fn,ms)=>setTimeout(()=>{f.offset=(f.offset??0)+(f.advance??0);fn();},f.advance?0:ms),clearTimeout,AbortController,crypto:globalThis.crypto});
+vm.runInNewContext(compiled.outputFiles[0].text,{module,exports:module.exports,console,fixture:f,structuredClone,performance,Date:{now:()=>Date.now()+(f.offset??0)},setTimeout:(fn,ms)=>setTimeout(()=>{f.offset=(f.offset??0)+(f.advance??0);fn();},f.advance?0:ms),clearTimeout,AbortController,crypto:globalThis.crypto});
 f.values['ev/config']={evs:[0,1].map(i=>({name:`Synthetic ${i}`,mac:`11:22:33:44:55:0${i}`}))};
 f.values['ev/state']={active_ev_index:0,mac:'11:22:33:44:55:00',soc:null};
 f.values['bluetooth/config']={enable:true};
 f.values['bluetooth/state']={supported:true,phase:'active'};
 f.values['tesla_vehicle/profiles']={entries:[0,1].map(i=>({ev_index:i,ev_mac:f.values['ev/config'].evs[i].mac,enable:false,vin:i?'5YJ3E1EA7KF000002':'5YJ3E1EA7KF000001',ble_address:'',ble_address_type:0,discovery_revision:0,poll_interval:300,wake_once:false}))};
 f.values['tesla_vehicle/state']={profile_ev_index:-1,running:false,key_presence:'unknown'};
-f.values['tesla_vehicle/guidance']={generation:'7',request:'',ready:false,profiles:[{ev_index:0,paired:false,key_presence:'absent',binding_fresh:true}]};
+f.values['tesla_vehicle/guidance']={generation:'7',revision:12,request:'',ready:false,profiles:[{ev_index:0,paired:false,key_presence:'absent',binding_fresh:true}]};
 f.values['tesla_vehicle/discovery']={status:'idle',busy:false,targets:[]};
 const page=new module.exports.TeslaVehicle();
 const event=t=>{for(const cb of f.listeners[t]??[])cb();};
@@ -94,12 +95,28 @@ assert(!button('start'),'No separate local-load action');
 assert.equal(page.state.command_busy,false);
 console.log('GUIDED_EXPLICIT_SEQUENCE_PASS');
 f.values['tesla_vehicle/guidance'].profiles[0].binding_fresh=false;event('tesla_vehicle/guidance');
-assert.equal(button('pair').props.disabled,true,'Expired discovery explains and disables pairing');
-console.log('GUIDED_FRESHNESS_GATE_PASS');
+assert.equal(button('pair').props.disabled,false,'Saved mapping opens explicit consent even after TTL/session expiry');
+f.call=async(t,p)=>{
+ if(t==='tesla_vehicle/scan'){
+  f.values['tesla_vehicle/discovery']={status:'complete',busy:false,ev_index:0,result_age_ms:0,result_ttl_ms:120000,searched_vin:page.profile().vin,ev_mac:page.profile().ev_mac,generation:'7',revision:10,targets:[{...target,ble_address:'02:03:04:05:06:07',ble_address_type:0}]};event('tesla_vehicle/discovery');
+ }
+ if(t==='tesla_vehicle/profiles_update'){
+  f.values['tesla_vehicle/profiles']=structuredClone(p);event('tesla_vehicle/profiles');
+  f.values['tesla_vehicle/guidance'].revision++;f.values['tesla_vehicle/guidance'].profiles[0].binding_fresh=true;event('tesla_vehicle/guidance');
+ }
+ if(p.phase==='prepare_pair'){f.values['tesla_vehicle/guidance']={...f.values['tesla_vehicle/guidance'],ready:true,request:p.request};event('tesla_vehicle/guidance');}
+};
+const refreshStart=f.calls.length;
+await button('pair').props.onClick();
+assert.deepEqual(f.calls.slice(refreshStart).map(c=>c.payload.phase??c.topic),['tesla_vehicle/scan','tesla_vehicle/profiles_update','prepare_pair','commit']);
+assert.equal(f.calls.at(-1).payload.revision,13);
+assert.equal(f.calls.at(-1).payload.profile.ble_address,'02:03:04:05:06:07');
+assert.equal(f.calls.at(-1).payload.profile.ble_address_type,0);
+console.log('GUIDED_CONSENT_BOUND_REFRESH_PASS');
 const good=structuredClone(f.values['tesla_vehicle/profiles']);
 const normal=()=>{
  f.values['tesla_vehicle/profiles']=structuredClone(good);page.state.entries=structuredClone(good.entries);page.dirty=false;
- f.values['tesla_vehicle/guidance']={generation:'7',request:'',ready:false,profiles:[{ev_index:0,paired:false,key_presence:'absent',binding_fresh:true}]};event('tesla_vehicle/guidance');
+ f.values['tesla_vehicle/guidance']={generation:'7',revision:12,request:'',ready:false,profiles:[{ev_index:0,paired:false,key_presence:'absent',binding_fresh:true}]};event('tesla_vehicle/guidance');
  f.values['tesla_vehicle/state']={profile_ev_index:-1,running:false,key_presence:'unknown'};event('tesla_vehicle/state');
  f.values['ev/state']={active_ev_index:0,mac:'11:22:33:44:55:00',soc:null};event('ev/state');
  f.values['bluetooth/config']={enable:true};
@@ -131,11 +148,11 @@ for(const mutate of [()=>page.selectProfile('1'),()=>{page.selectProfile('1');pa
  const pending=button('pair').props.onClick();await button('pair').props.onClick();mutate();confirm(true);await pending;
  assert.equal(f.calls.length,count,'Changed selection/config/identity cancels modal consent (including A-B-A)');normal();
 }
-f.call=async()=>{throw Error('injected prepare refusal');};count=f.calls.length;await button('pair').props.onClick();assert.equal(f.calls.length,count+1);assert.equal(page.state.command_busy,false);normal();
+f.call=async()=>{throw Error('injected prepare refusal');};count=f.calls.length;await button('pair').props.onClick();assert.equal(f.calls.length,count+2);assert.equal(f.calls.at(-1).payload.phase,'cancel');assert.equal(page.state.command_error,'injected prepare refusal');assert.equal(page.state.command_busy,false);normal();
 // Correct request alone is insufficient: a generation change before ACK cancels commit.
 f.call=async(t,p)=>{if(p.phase==='prepare_pair'){
  f.values['tesla_vehicle/guidance']={...f.values['tesla_vehicle/guidance'],generation:'8',ready:true,request:p.request};event('tesla_vehicle/guidance');
-}};count=f.calls.length;await button('pair').props.onClick();assert.equal(f.calls.length,count+1);normal();
+}};count=f.calls.length;await button('pair').props.onClick();assert.equal(f.calls.length,count+2);assert.equal(f.calls.at(-1).payload.phase,'cancel');normal();
 // Existing paired profile is compact and polls via preparation, never re-pairs.
 f.values['tesla_vehicle/guidance'].profiles[0]={ev_index:0,paired:true,key_presence:'present',binding_fresh:true};event('tesla_vehicle/guidance');
 assert(!findButton('pair'),'Paired view never invites re-pairing');
@@ -164,7 +181,7 @@ let savedResponse;f.call=()=>new Promise(r=>{savedResponse=r;});const pendingSav
 const savedApi=f.values['tesla_vehicle/profiles'];delete f.values['tesla_vehicle/profiles'];
 assert(!button('pair')&&!button('search')&&!button('read_soc'));count=f.calls.length;nodes();assert.equal(f.calls.length,count);f.values['tesla_vehicle/profiles']=savedApi;
 // Unmount while the explicitly requested local preparation is in flight cannot commit later.
-f.advance=13000;count=f.calls.length;await button('pair').props.onClick();assert.equal(f.calls.length,count+1,'No commit on missing ACK/timeout');assert(page.state.command_error);f.advance=0;f.offset=0;normal();
+f.advance=13000;count=f.calls.length;await button('pair').props.onClick();assert.deepEqual(f.calls.slice(count).map(c=>c.payload.phase),['prepare_pair','cancel'],'No commit on missing ACK/timeout; explicit local cancellation');assert(page.state.command_error);f.advance=0;f.offset=0;normal();
 await button('search').props.onClick();f.values['tesla_vehicle/discovery']={status:'complete',busy:false,ev_index:0,result_age_ms:0,result_ttl_ms:120000,searched_vin:'5YJ3E1EA7KF000001',ev_mac:'11:22:33:44:55:00',generation:'7',revision:25,targets:[target]};event('tesla_vehicle/discovery');
 const staleAdopt=button('select_target').props.onClick;
 f.offset=120001;assert(!button('select_target'),'Client expiry hides even a cached matching result');
@@ -237,7 +254,7 @@ const adoptHandler=button('select_target').props.onClick;const adopting=adoptHan
 page.selectProfile('1');page.selectProfile('0');adoptionAck();await adopting;assert(!page.state.adopted);normal();
 // Changing away and back during preparation cancels a later matching ACK.
 f.call=async(t,p)=>{if(p.phase==='prepare_pair'){page.selectProfile('1');page.selectProfile('0');f.values['tesla_vehicle/guidance']={...f.values['tesla_vehicle/guidance'],ready:true,request:p.request};event('tesla_vehicle/guidance');}};
-count=f.calls.length;await button('pair').props.onClick();assert.equal(f.calls.length,count+1);normal();
+count=f.calls.length;await button('pair').props.onClick();assert.deepEqual(f.calls.slice(count).map(c=>c.payload.phase),['prepare_pair','cancel']);normal();
 // Actual reset control confirmation + persistence/readback, never a reopen-only action.
 normal();page.state.edit_binding=false;page.state.details_open=true;
 f.values['tesla_vehicle/guidance'].revision=12;
@@ -267,9 +284,55 @@ for(const mutate of [()=>{page.selectProfile('1');page.selectProfile('0');},()=>
  normal();page.state.details_open=true;let yes;f.show=()=>new Promise(r=>yes=r);count=f.calls.length;
  const pending=page.resetBinding();await page.resetBinding();mutate();yes(true);await pending;assert.equal(f.calls.length,count,'Reset stale/ABA/duplicate consent rejected');
 }
-normal();page.state.details_open=true;f.call=async()=>{throw Error('reset refused');};count=f.calls.length;await page.resetBinding();assert.equal(f.calls.length,count+1);assert(page.state.command_error);assert(page.profile().ble_address);
+normal();page.state.details_open=true;f.call=async()=>{throw Error('reset refused');};count=f.calls.length;await page.resetBinding();assert.equal(f.calls.length,count+1);assert.equal(page.state.command_error,'reset refused');assert(page.profile().ble_address);
+// Every malformed/ambiguous/expired refresh fails closed with a useful error.
+let negativeRevision=100;
+for(const kind of ['none','ambiguous','truncated','expired','generation','scope','wrong-vin','bad-type','bad-address','error','timeout','foreign-save','dirty-save']){
+ normal();f.values['tesla_vehicle/guidance'].profiles[0].binding_fresh=false;event('tesla_vehicle/guidance');
+ const startRevision=negativeRevision;negativeRevision+=2;
+ f.values['tesla_vehicle/discovery']={status:'idle',busy:false,revision:startRevision,targets:[]};event('tesla_vehicle/discovery');
+ const before=f.calls.length,oldB=JSON.stringify(f.values['tesla_vehicle/profiles'].entries[1]);
+ f.call=async(t,p)=>{
+  if(t==='tesla_vehicle/scan'){
+   let d={status:'complete',busy:false,ev_index:0,result_age_ms:0,result_ttl_ms:120000,searched_vin:page.profile().vin,ev_mac:page.profile().ev_mac,generation:'7',revision:startRevision+1,targets:[target]};
+   if(kind==='none')d.targets=[];
+   if(kind==='ambiguous')d.targets.push({...target,ble_address:'02:03:04:05:06:07'});
+   if(kind==='truncated')d.truncated=true;
+   if(kind==='expired')d.result_age_ms=120000;
+   if(kind==='generation')d.generation='8';
+   if(kind==='scope')d.ev_index=1;
+   if(kind==='wrong-vin')d.searched_vin='5YJ3E1EA7KF000002';
+   if(kind==='bad-type')d.targets=[{...target,ble_address_type:3}];
+   if(kind==='bad-address')d.targets=[{...target,ble_address:'00:00:00:00:00:00'}];
+   if(kind==='error'){d.status='error';d.error='injected radio failure';}
+   if(kind==='timeout')d.status='scanning';
+   f.values['tesla_vehicle/discovery']=d;event('tesla_vehicle/discovery');
+  }
+  if(t==='tesla_vehicle/profiles_update'){
+   f.values['tesla_vehicle/profiles']=structuredClone(p);event('tesla_vehicle/profiles');
+   f.values['tesla_vehicle/guidance'].revision+=kind==='foreign-save'?2:1;event('tesla_vehicle/guidance');
+   if(kind==='dirty-save')page.setDirty(true);
+  }
+  if(p.phase==='prepare_pair'){f.values['tesla_vehicle/guidance'].request=p.request;f.values['tesla_vehicle/guidance'].ready=true;event('tesla_vehicle/guidance');}
+ };
+ if(kind==='timeout')f.advance=23000;
+ await button('pair').props.onClick();f.advance=0;f.offset=0;
+ assert.equal(f.calls[before]?.topic,'tesla_vehicle/scan',kind+' exercises actual confirmed refresh');
+ assert(!f.calls.slice(before).some(c=>c.payload.phase?.startsWith('prepare')||c.payload.phase==='commit'),kind+' cannot prepare/commit');
+ assert(page.state.command_error,kind+' retains error');assert.equal(JSON.stringify(f.values['tesla_vehicle/profiles'].entries[1]),oldB,kind+' preserves B');
+ const expected=kind==='none'||kind.startsWith('bad-')?'refresh_empty':['ambiguous','truncated'].includes(kind)?'refresh_ambiguous':['expired','generation','scope','wrong-vin'].includes(kind)?'result_expired':kind==='error'?'refresh_failed':kind==='timeout'?'refresh_timeout':'refresh_changed';
+ assert(String(page.state.command_error).includes('tesla_vehicle.content.'+expected),kind+' exact useful failure path, not a stale fixture');
+}
+// Cancel, local/profile/SLAC/config/guidance/Bluetooth ABA during the scan.
+for(const mutate of [()=>page.selectProfile('1'),()=>{page.selectProfile('1');page.selectProfile('0');},()=>page.setDirty(true),()=>{f.values['ev/state'].active_ev_index=1;event('ev/state');f.values['ev/state'].active_ev_index=0;event('ev/state');},()=>{f.values['tesla_vehicle/guidance'].revision++;event('tesla_vehicle/guidance');f.values['tesla_vehicle/guidance'].revision--;event('tesla_vehicle/guidance');},()=>{f.values['bluetooth/state'].phase='disabled';event('bluetooth/state');f.values['bluetooth/state'].phase='active';event('bluetooth/state');}]){
+ normal();f.values['tesla_vehicle/guidance'].profiles[0].binding_fresh=false;event('tesla_vehicle/guidance');f.values['tesla_vehicle/discovery']={status:'idle',busy:false,revision:50,targets:[]};event('tesla_vehicle/discovery');
+ let release;f.call=async(t)=>{if(t==='tesla_vehicle/scan')await new Promise(r=>release=r);};count=f.calls.length;
+ const first=button('pair').props.onClick();await new Promise(setImmediate);await page.command('pair');mutate();release();await first;
+ assert.deepEqual(f.calls.slice(count).map(c=>c.topic),['tesla_vehicle/scan'],'No duplicate request, save, prepare or commit after invalidation');
+}
+console.log('GUIDED_REFRESH_NEGATIVE_RACES_PASS');
 normal();
-let prepareResponse;f.call=()=>new Promise(r=>{prepareResponse=r;});const pendingUnmount=button('pair').props.onClick();await new Promise(setImmediate);
-count=f.calls.length;page.componentWillUnmount();prepareResponse();await pendingUnmount;assert.equal(f.calls.length,count);
+let prepareResponse;f.call=async(t,p)=>{if(p.phase==='prepare_pair')await new Promise(r=>{prepareResponse=r;});};const pendingUnmount=button('pair').props.onClick();await new Promise(setImmediate);
+count=f.calls.length;page.componentWillUnmount();prepareResponse();await pendingUnmount;assert.equal(f.calls.length,count+1);assert.equal(f.calls.at(-1).payload.phase,'cancel');
 assert(f.calls.every(c=>['tesla_vehicle/scan','tesla_vehicle/profiles_update','tesla_vehicle/guided','tesla_vehicle/forget_key'].includes(c.topic)));
 console.log('GUIDED_BEHAVIOR_PASS no-auto/toggle-save/disabled-reasons/modal-cancel/double-click/A-B-A/config/SLAC/generation/rejection/paired-poll/common-SoC/ambiguous/invalid-VIN/stale-save/unmount');

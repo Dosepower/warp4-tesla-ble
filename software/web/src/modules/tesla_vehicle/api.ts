@@ -35,7 +35,7 @@ export interface guidance {
     ready: boolean;
     profiles: {ev_index: number; ev_mac: string; namespace_clean: boolean; paired: boolean; key_presence: state['key_presence']; binding_fresh: boolean}[];
 }
-export type guided = {phase: 'prepare_pair' | 'prepare_poll' | 'commit' | 'cancel' | 'reset'; request: string; generation: string; revision?: number; profile: TeslaProfile};
+export type guided = {phase: 'prepare_pair' | 'prepare_poll' | 'commit' | 'cancel' | 'reset'; request: string; generation: string; revision: number; profile: TeslaProfile};
 export type start = {ev_index: number};
 export type pair = {ev_index: number};
 export type poll = {ev_index: number};
