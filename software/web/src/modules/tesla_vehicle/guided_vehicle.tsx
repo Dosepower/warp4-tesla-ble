@@ -38,6 +38,7 @@ export class TeslaVehicle extends ConfigComponent<"tesla_vehicle/profiles", {}, 
     private selection_revision = 0;
     private backend_error = '';
     private backend_error_profile = -1;
+    private backend_error_revision = 0;
     private listeners = new AbortController();
     private scan_waiting = false;
     private search_context = "";
@@ -121,6 +122,7 @@ export class TeslaVehicle extends ConfigComponent<"tesla_vehicle/profiles", {}, 
                 this.errorText(this.backend_error) === this.errorText(this.state.command_error);
             // API.get is a mutable signal cache; retain scalar evidence, not a
             // reference whose old last_error has already been overwritten.
+            if (this.backend_error !== (next?.last_error || '') || this.backend_error_profile !== (next?.profile_ev_index ?? -1)) ++this.backend_error_revision;
             this.backend_error = next?.last_error || '';
             this.backend_error_profile = next?.profile_ev_index ?? -1;
             this.setState({tesla_state: next, ...(mirrored ? {command_error: false} : {})});
@@ -340,7 +342,9 @@ export class TeslaVehicle extends ConfigComponent<"tesla_vehicle/profiles", {}, 
             throw new Error("Tesla configuration unavailable");
         this.saving = true; this.setState({command_busy: true});
         this.pending_save = JSON.stringify(cfg);
-        try { await API.save(topic, cfg, () => __("tesla_vehicle.script.save_failed")); }
+        // This component owns the canonical error region. Supplying API's
+        // error callback would also create a duplicate global add_alert banner.
+        try { await API.save(topic, cfg); }
         finally { this.saving = false; this.pending_save = ""; if (!this.disposed) this.setState({command_busy: false}); }
     }
 
@@ -457,12 +461,17 @@ export class TeslaVehicle extends ConfigComponent<"tesla_vehicle/profiles", {}, 
             const bytes = crypto.getRandomValues(new Uint8Array(16));
             const request = Array.from(bytes, b => ('0' + b.toString(16)).slice(-2)).join('');
             const payload = {request, generation, revision: backend_revision, profile: {...this.profile()}};
+            const error_revision = this.backend_error_revision;
             this.pending_command = payload;
             await API.call("tesla_vehicle/guided", {...payload, phase: action === 'pair' ? 'prepare_pair' : 'prepare_poll'});
             const deadline = Date.now() + 12000;
             while (current() && Date.now() < deadline) {
                 const g = API.get("tesla_vehicle/guidance"), s = API.get("tesla_vehicle/state");
-                if (s?.restart_required || s?.stopping || s?.last_error) throw new Error(s?.last_error || __("tesla_vehicle.content.preparation_failed"));
+                // A cached failure from the previous attempt (or another
+                // profile) must not cancel a newly explicit retained-key retry.
+                // A clear->same failure transition is new evidence, not dedup.
+                const failure = s?.profile_ev_index === index && this.backend_error_revision !== error_revision ? s.last_error : '';
+                if (s?.restart_required || s?.stopping || failure) throw new Error(failure || __("tesla_vehicle.content.preparation_failed"));
                 if (g?.request === request && g.ready) {
                     if (!current()) return;
                     // A lost response is not permission to replay the commit.
@@ -503,7 +512,7 @@ export class TeslaVehicle extends ConfigComponent<"tesla_vehicle/profiles", {}, 
             const request=Array.from(crypto.getRandomValues(new Uint8Array(16)),b=>('0'+b.toString(16)).slice(-2)).join('');
             this.pending_save=JSON.stringify({entries:this.state.entries.map(p=>p.ev_index===index ? {...p,enable:false,ble_address:'',ble_address_type:0,discovery_revision:0} : p)});
             this.owned_revision=backend_revision+1;
-            await API.call("tesla_vehicle/guided",{phase:'reset',request,generation,revision:backend_revision,profile},()=>__("tesla_vehicle.script.command_failed"));
+            await API.call("tesla_vehicle/guided",{phase:'reset',request,generation,revision:backend_revision,profile});
             // Exact persisted API readback before returning to the existing edit/search workflow.
             const config=JSON.parse(await (await util.download('/tesla_vehicle/profiles',true,10000)).text()) as TeslaConfig;
             const p=config.entries.find(p=>p.ev_index===index);
@@ -550,7 +559,7 @@ export class TeslaVehicle extends ConfigComponent<"tesla_vehicle/profiles", {}, 
             <FormRow label={__("tesla_vehicle.content.vin")} help={__("tesla_vehicle.content.vin_help")}>
                 <InputText value={p.vin} maxLength={17} disabled={state.command_busy || this.searchBusy() || !this.vinEditable()} onValue={vin => this.setProfile({vin})} />
             </FormRow>
-            {!this.vinEditable() ? <p role="status" class="text-muted">{__("tesla_vehicle.content.unpair_first")}</p> : undefined}
+            {!this.vinEditable() ? <p role="status" class="text-muted">{status.paired ? __("tesla_vehicle.content.unpair_first") : status.key_presence === 'present' ? __("tesla_vehicle.content.retained_key_binding") : __("tesla_vehicle.content.reset_key_unknown")}</p> : undefined}
             <FormRow help={__("tesla_vehicle.content.search_help")}>
                 <Button type="button" className="w-100" variant="outline-primary" disabled={state.command_busy || !this.searchAllowed()} onClick={this.search}>
                     {this.searchBusy() ? __("tesla_vehicle.content.searching") : __("tesla_vehicle.content.search")}

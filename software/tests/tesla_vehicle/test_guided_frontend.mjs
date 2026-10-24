@@ -8,8 +8,8 @@ const require=createRequire(new URL('../../web/package.json',import.meta.url));
 const {build}=require('esbuild');
 const f={values:{},listeners:{},calls:[],modals:[],show:async()=>true,call:async()=>{},validateGuided};
 const mock=`const f=globalThis.fixture;
-export const get=t=>f.values[t]; export const call=async(t,p)=>{f.calls.push({topic:t,payload:structuredClone(p)});if(t==='tesla_vehicle/guided'){try{f.validateGuided(p);}catch(e){console.error(e.message);throw e;}}await f.call(t,p);};
-export const save=(t,p)=>call(t+'_update',p); export const __=k=>k;
+export const get=t=>f.values[t]; export const call=async(t,p,error)=>{if(error)throw Error('Duplicate global error surface requested');f.calls.push({topic:t,payload:structuredClone(p)});if(t==='tesla_vehicle/guided'){try{f.validateGuided(p);}catch(e){console.error(e.message);throw e;}}await f.call(t,p);};
+export const save=(t,p,error)=>call(t+'_update',p,error); export const __=k=>k;
 export const addApiEventListener=(t,c)=>{(f.listeners[t]??=[]).push(c);};export const render_allowed=()=>true;
 export const format_timespan_ms=ms=>String(ms);export const toLocaleFixed=(n,d)=>n.toFixed(d);export const postReboot=()=>{};export const download=async url=>({text:async()=>JSON.stringify(f.values[url.slice(1)])});
 export const async_modal_ref={current:{show:async o=>{f.modals.push(o);return f.show();}}};
@@ -353,6 +353,16 @@ for(const key_presence of ['present','cleanup','absent','unknown'])for(const con
 }
 normal();page.state.command_error='stale failure';f.call=async(t,p)=>{if(p.phase==='prepare_pair'){f.values['tesla_vehicle/guidance'].ready=true;f.values['tesla_vehicle/guidance'].request=p.request;event('tesla_vehicle/guidance');}};await button('pair').props.onClick();assert.equal(page.state.command_error,false);assert(!page.profileStatus().paired,'HTTP acceptance is not pairing');
 console.log('GUIDED_CANONICAL_ERRORS_LOCAL_CLEANUP_PASS');
+normal();
+f.values['tesla_vehicle/state']={profile_ev_index:0,key_presence:'present',key_present:true,paired:false,last_error:'previous attempt failed'};event('tesla_vehicle/state');
+f.call=async(t,p)=>{if(p.phase==='prepare_pair'){f.values['tesla_vehicle/guidance'].ready=true;f.values['tesla_vehicle/guidance'].request=p.request;event('tesla_vehicle/guidance');}};
+count=f.calls.length;await findButton('pair').props.onClick();assert.deepEqual(f.calls.slice(count).map(c=>c.payload.phase),['prepare_pair','commit'],'Explicit retained-key retry must not be cancelled by the old cached backend error');assert(!page.profileStatus().paired);
+f.call=async(t,p)=>{if(p.phase==='prepare_pair'){
+ f.values['tesla_vehicle/state'].last_error='';event('tesla_vehicle/state');
+ f.values['tesla_vehicle/state'].last_error='previous attempt failed';event('tesla_vehicle/state');
+ f.values['tesla_vehicle/guidance'].ready=true;f.values['tesla_vehicle/guidance'].request=p.request;event('tesla_vehicle/guidance');
+}};
+count=f.calls.length;await findButton('pair').props.onClick();assert.deepEqual(f.calls.slice(count).map(c=>c.payload.phase),['prepare_pair','cancel'],'A new clear->same error during preparation still blocks commit');assert.equal(page.state.command_error,'previous attempt failed');
 normal();
 let prepareResponse;f.call=async(t,p)=>{if(p.phase==='prepare_pair')await new Promise(r=>{prepareResponse=r;});};const pendingUnmount=button('pair').props.onClick();await new Promise(setImmediate);
 count=f.calls.length;page.componentWillUnmount();prepareResponse();await pendingUnmount;assert.equal(f.calls.length,count+1);assert.equal(f.calls.at(-1).payload.phase,'cancel');
