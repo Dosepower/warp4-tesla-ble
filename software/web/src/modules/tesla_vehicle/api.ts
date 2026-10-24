@@ -23,6 +23,12 @@ export interface state {
     paired: boolean;
     pairing_pending: boolean;
     pair_request_sent: boolean;
+    // Read-only sampled transport evidence, never proof of vehicle approval.
+    pair_tx_total_bytes: number;
+    pair_tx_attempted_bytes: number;
+    pair_tx_acked_bytes: number;
+    pair_tx_complete: boolean;
+    pair_result: number; // -1: no completion; otherwise VehicleResultCode
     restart_required: boolean;
     last_soc: number;
     last_update: number;

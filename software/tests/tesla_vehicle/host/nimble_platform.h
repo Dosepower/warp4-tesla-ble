@@ -13,6 +13,8 @@ constexpr int configMAX_PRIORITIES=25;
 #endif
 constexpr int BLE_HS_EUNKNOWN=1,BLE_HS_EDONE=14,BLE_HS_EAUTHEN=23,BLE_HS_IO_NO_INPUT_OUTPUT=3,BLE_GAP_REPEAT_PAIRING_IGNORE=0;
 constexpr int BLE_ERR_REM_USER_CONN_TERM=19;
+constexpr int BLE_HS_EALREADY=2;
+inline int ble_gap_conn_cancel();
 #ifndef TESLA_BLE_MODULE_HOST_TEST
 constexpr int ESP_BT_CONTROLLER_STATUS_IDLE=0;
 #endif
@@ -69,7 +71,9 @@ inline int ble_gap_disc(uint8_t,int32_t,const ble_gap_disc_params*p,GapFn cb,voi
 ++scan_start_calls;
 #endif
 test_scan_params=*p;test_scan=cb;test_scan_arg=arg;test_scanning=true;return test_api_rc;}
-inline int ble_gap_connect(uint8_t,const ble_addr_t *p,int32_t,const void *,GapFn f,void *a){++test_connects;test_peer=*p;test_gap=f;test_gap_arg=a;if(!test_api_rc&&test_submit)test_submit(1);return test_api_rc;}
+inline int test_connect_timeout=0;
+inline int ble_gap_connect(uint8_t,const ble_addr_t *p,int32_t timeout,const void *,GapFn f,void *a){test_connect_timeout=timeout;++test_connects;test_peer=*p;test_gap=f;test_gap_arg=a;if(!test_api_rc&&test_submit)test_submit(1);return test_api_rc;}
+inline int ble_gap_conn_cancel(){if(!test_api_rc&&test_submit)test_submit(7);return test_api_rc;}
 inline int ble_gap_terminate(uint16_t,uint8_t){++test_terminates;if(!test_api_rc&&test_submit)test_submit(6);return test_api_rc;}
 inline int ble_gattc_disc_svc_by_uuid(uint16_t,const ble_uuid_t *,SvcFn f,void *a){test_service=f;test_proc_arg=a;if(!test_api_rc&&test_submit)test_submit(2);return test_api_rc;}
 inline int ble_gattc_disc_all_chrs(uint16_t,uint16_t,uint16_t,ChrFn f,void *a){test_char=f;test_proc_arg=a;if(!test_api_rc&&test_submit)test_submit(3);return test_api_rc;}

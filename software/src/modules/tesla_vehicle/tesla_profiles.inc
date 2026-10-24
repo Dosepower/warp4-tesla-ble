@@ -285,6 +285,7 @@ void TeslaVehicle::apply_profile()
     if (r->stop_requested.load()) { return; }
     r->vehicle.reset(); r->keys.reset();
     r->profile_actionable.store(false);
+    r->reset_pair_diagnostics();
     r->deleting_profile = request.deleting;
     xQueueReset(r->queues.events());
     r->manual_poll_pending.store(false); r->poll_requested.store(false); r->pair_requested.store(false);

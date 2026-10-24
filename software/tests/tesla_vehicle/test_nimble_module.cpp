@@ -37,7 +37,7 @@ struct TeslaBleModuleTest {
  auto old=gen-1;TeslaVehicle::gatt_callback({TeslaNimbleEvent::Disconnected,old,4,0,0,nullptr,0});TeslaVehicle::gatt_callback({TeslaNimbleEvent::Rx,old,4,20,0,raw,sizeof(raw)});assert(r.connected.load()&&xQueueReceive(r.queues.rx(),&fragment,0)!=pdTRUE);
  e={};e.type=BLE_GAP_EVENT_ENC_CHANGE;e.enc_change.conn_handle=4;e.enc_change.status=23;test_gap(&e,test_gap_arg);assert(!r.connected.load()&&r.connection_generation.load()!=gen);nimble_force_disconnect();m.process_disconnect();assert(!r.connected.load());
  }
- static void pairing(TeslaVehicle &m,bool generating) {
+ static void pairing(TeslaVehicle &m,bool generating,bool delayed=false,const std::string &scenario="") {
   using namespace controller_fixture;
   Harness peer;
   if(!generating) {
@@ -51,9 +51,14 @@ struct TeslaBleModuleTest {
   assert(m.select_profile(0,false,error));auto *r=m.tesla->runtime_owner.get();
   std::vector<uint8_t> pending;std::vector<Sent> sent;
   on_gatt_bytes=[&](const uint8_t *bytes,size_t size) {
+   const bool pairing_frame=sent.empty();
+   if(scenario=="partial-pair") {m.process_module_events();assert(m.tesla->state.get("connected")->asBool());}
    pending.insert(pending.end(),bytes,bytes+size);if(pending.size()<2)return;
    size_t n=size_t(pending[0])*256+pending[1];assert(pending.size()<=n+2);
    if(pending.size()==n+2){Frame frame;frame.length=n;memcpy(frame.data.data(),pending.data()+2,n);sent.push_back(decode(frame));pending.clear();}
+   // Deterministic ATT ACK latency, not an RF/vehicle recording. Production
+   // framing+GATT+Vehicle must permit a valid multi-fragment request >500ms.
+   if((delayed||scenario=="partial-pair") && pairing_frame) clock_ms.fetch_add(scenario=="partial-pair"?4000:120);
   };
   test_submit=nimble_auto_submit;
   const auto inject=[&](const Frame &frame) {
@@ -67,12 +72,85 @@ struct TeslaBleModuleTest {
    assert(peer_open_calls==0 && !r->authorized.load());
    if(generating)assert(!LittleFS.files.count("/config/tesla_p00_112233445500_private_key"));
    m.tesla->profile_command.get("ev_index")->updateInt(0);error.clear();api.commands.at("tesla_vehicle/pair")(0,error);assert(error.empty());
-   m.process_commands();r->vehicle->tick();assert(!sent.empty() && sent.back().pair);m.process_module_events();
+   if(scenario=="connect-timeout") {
+    const auto start=millis();bool callback=false;
+    on_task_delay=[&](uint32_t) {
+     if(!callback && millis()-start>=uint32_t(test_connect_timeout+50)) {
+      callback=true;ble_gap_event e{};e.type=BLE_GAP_EVENT_CONNECT;e.connect.status=13;test_gap(&e,test_gap_arg);
+     }
+    };
+    test_submit={};m.process_commands();on_task_delay={};m.process_module_events();
+    assert(callback && !r->operation.retired() && !r->stop_requested.load());
+    assert(!r->connected.load() && !m.tesla->state.get("pairing_pending")->asBool());
+    assert(!m.tesla->state.get("restart_required")->asBool() && m.bluetooth.active());
+    test_submit=nimble_auto_submit;r->stop_requested=true;return;
+   }
+   m.process_commands();r->vehicle->tick();m.process_module_events();
+   if(scenario=="partial-pair") {
+    m.publish_bluetooth_state();assert(sent.empty() && !r->connected.load() && !r->stop_requested.load());
+    assert(!m.tesla->state.get("connected")->asBool() && "API must converge after local stream retirement");
+    assert(m.tesla->state.get("pair_tx_acked_bytes")->asUint()>0 && !m.tesla->state.get("pair_tx_complete")->asBool());
+    assert(m.tesla->state.get("pair_tx_acked_bytes")->asUint()<m.tesla->state.get("pair_tx_total_bytes")->asUint());
+    assert(!r->authorized.load() && !m.tesla->state.get("pairing_pending")->asBool());
+    const auto attempted=r->pair_tx_attempted.load();clock_ms.fetch_add(1000);r->vehicle->tick();assert(r->pair_tx_attempted.load()==attempted); // no framed retry
+    r->stop_requested=true;return;
+   }
+   assert(!sent.empty() && sent.back().pair);
    assert(peer_open_calls==1 && peer_open_type==(generating?1:0));
    assert(host_cccd_value==((host_rx_properties&ESP_GATT_CHAR_PROP_BIT_INDICATE)?2u:1u));
+   if(delayed) { std::printf("DELAYED_ACK elapsed>=600ms complete_pair_frames=%zu api_connected=%d actual_connected=%d pending=%d error=%s\n",sent.size(),m.tesla->state.get("connected")->asBool(),r->connected.load(),m.tesla->state.get("pairing_pending")->asBool(),m.tesla->state.get("last_error")->asString().c_str());std::fflush(stdout); }
    assert(m.tesla->state.get("pairing_pending")->asBool() && !r->authorized.load());
    assert(LittleFS.files.count("/config/tesla_p00_112233445500_private_key"));
    assert(!LittleFS.files.count("/config/tesla_p00_112233445500_authorized"));
+   m.publish_bluetooth_state();
+   assert(m.tesla->state.get("pair_tx_complete")->asBool());
+   assert(m.tesla->state.get("pair_tx_acked_bytes")->asUint()==m.tesla->state.get("pair_tx_total_bytes")->asUint());
+   assert(m.tesla->state.get("pair_tx_acked_bytes")->asUint()>20);
+   assert(m.tesla->state.get("pair_result")->asInt()==int(tesla_clean::VehicleResultCode::PairRequestSent));
+   assert(!m.tesla->state.get("paired")->asBool());
+   if(scenario=="late-response") {
+    const auto key=LittleFS.files.at("/config/tesla_p00_112233445500_private_key");
+    peer.address=r->routing_address;clock_ms.fetch_add(1000);m.process_pair_verification();r->vehicle->tick();assert(sent.back().hello);
+    inject(peer.hello(sent.back()));r->vehicle->tick();const auto old_status=sent.back();assert(!old_status.hello && !old_status.pair);
+    const Frame late=peer.response(old_status,{awake,sizeof(awake)});
+    clock_ms.fetch_add(60000);m.process_pair_verification();m.process_module_events();assert(!r->authorized.load() && !r->connected.load());
+    inject(late);m.process_module_events();assert(!r->authorized.load());
+    explicit_scan(m,0);error.clear();assert(m.select_profile(0,false,error));m.apply_profile();m.publish_profile();m.process_module_events();
+    error.clear();api.commands.at("tesla_vehicle/pair")(0,error);assert(error.empty());m.process_commands();r->vehicle->tick();m.process_module_events();
+    peer.address=r->routing_address;clock_ms.fetch_add(1000);m.process_pair_verification();r->vehicle->tick();
+    if(sent.back().hello){inject(peer.hello(sent.back()));r->vehicle->tick();}
+    const auto fresh=sent.back();assert(!fresh.hello && !fresh.pair && fresh.uuid!=old_status.uuid);
+    inject(late);m.process_module_events();assert(!r->authorized.load() && !m.tesla->state.get("paired")->asBool());
+    inject(peer.response(fresh,{awake,sizeof(awake)}));m.process_module_events();assert(r->authorized.load() && m.tesla->state.get("paired")->asBool());
+    assert(LittleFS.files.at("/config/tesla_p00_112233445500_private_key")==key && ev.applied==0);r->stop_requested=true;return;
+   }
+   if(scenario=="no-card"||scenario=="decline"||scenario=="link-drop"||scenario=="profile-switch") {
+    const auto material=LittleFS.files;const auto generation=r->physical_generation.load();
+    error.clear();api.commands.at("tesla_vehicle/pair")(0,error);assert(!error.empty()); // duplicate consent
+    if(scenario=="decline") {Frame denial;const uint8_t raw[]={0x22,0x06,0x08,0x02,0x1a,0x02,0x08,0x01};denial.length=sizeof(raw);memcpy(denial.data.data(),raw,sizeof(raw));inject(denial);assert(!r->authorized.load());}
+    if(scenario=="link-drop") {nimble_force_disconnect();m.process_disconnect();}
+    else if(scenario=="profile-switch") {++ev.generation;ev.index=1;ev.mac=B;m.refresh_live_session();m.update_active_vehicle();}
+    else {clock_ms.fetch_add(60000);m.process_pair_verification();}
+    m.process_module_events();m.publish_bluetooth_state();
+    assert(!r->connected.load() && !r->authorized.load() && !m.tesla->state.get("paired")->asBool());
+    assert(!m.tesla->state.get("pairing_pending")->asBool() && !r->stop_requested.load() && !r->operation.retired());
+    assert(m.bluetooth.active() && !m.tesla->state.get("restart_required")->asBool());
+    assert(LittleFS.files==material && r->vehicle->queued()==0);
+    const auto opens=peer_open_calls;
+    clock_ms.fetch_add(1000);m.process_commands();m.process_pair_verification();r->vehicle->tick();assert(peer_open_calls==opens);
+    if(scenario!="profile-switch") {
+     // Fresh explicit consent only: reuse retained key and reconnect exactly once.
+     explicit_scan(m,0); // refresh same bound discovery; no automatic radio.
+     error.clear();assert(m.select_profile(0,false,error));m.apply_profile();m.publish_profile();m.process_module_events();
+     error.clear();api.commands.at("tesla_vehicle/pair")(0,error);assert(error.empty());
+     m.process_commands();r->vehicle->tick();m.process_module_events();assert(r->connected.load() && peer_open_calls==opens+1);
+     TeslaVehicle::gatt_callback({TeslaNimbleEvent::Disconnected,generation,4,0,0,nullptr,0});
+     const uint8_t stale[]={0xff,0xff};TeslaVehicle::gatt_callback({TeslaNimbleEvent::Rx,generation,4,20,0,stale,sizeof(stale)});
+     assert(r->connected.load() && !r->authorized.load());
+     assert(LittleFS.files==material); // no key recreation/authorization on reconnect
+    }
+    r->stop_requested=true;return;
+   }
    if(!generating) {
     // A predecessor-generation fragment must not poison current framing,
     // including the indication path. If consumed, this oversized frame fails.
@@ -102,6 +180,38 @@ struct TeslaBleModuleTest {
   std::printf("PROFILE_PAIRING %s PASS explicit first pairing, durable key, no approval from unauthenticated response, profile auth persistence\n",generating?"generate":"authenticated");
  }
  static void run(const std::string &mode) {
+  if(mode=="quiesce-retains") {
+   BluetoothLifecycle bt;HostNimbleDriver driver(bt,TeslaVehicle::gatt_callback);
+   auto*c=bt.central();const uint8_t address[]={1,2,3,4,5,6};assert(c->open(address,0,1));
+   test_api_rc=7;assert(!c->quiesce() && !c->idle() && !c->shutdown() && !c->deinitialize());
+   test_api_rc=0;assert(c->quiesce() && !c->idle() && !c->shutdown() && !c->deinitialize());
+   ble_gap_event e{};e.type=BLE_GAP_EVENT_CONNECT;e.connect.status=13;test_gap(&e,test_gap_arg);assert(c->idle());return;
+  }
+  if(mode=="quiesce-disconnect-race") {
+   BluetoothLifecycle bt;HostNimbleDriver driver(bt,TeslaVehicle::gatt_callback);
+   auto*c=bt.central();const uint8_t address[]={1,2,3,4,5,6};
+   assert(c->open(address,0,1));nimble_complete_setup();
+   test_submit=[](int stage){if(stage==6){nimble_force_disconnect();test_api_rc=7;}};
+   assert(c->quiesce() && "terminal disconnect races terminate ENOTCONN: ownership drained, not failure");
+   test_api_rc=0;return;
+  }
+  if(mode=="pending-connect-stop"||mode=="late-connect-stop") {
+   BluetoothLifecycle bt;
+   HostNimbleDriver driver(bt,TeslaVehicle::gatt_callback);
+   auto *c=bt.central();const uint8_t address[]={1,2,3,4,5,6};
+   assert(c && c->open(address,0,1) && !c->idle());
+   // SDK stop may finish before a controller's cancelled CONNECT callback:
+   // no established links are counted by ble_hs_stop. Do not stop host first.
+   test_on_stop=[c] { assert(c->idle() && "pending CONNECT must drain before host stop"); };
+   const bool late=mode=="late-connect-stop";
+   test_submit=[late](int stage) {
+    if(stage==7) { ble_gap_event e{};e.type=BLE_GAP_EVENT_CONNECT;e.connect.status=late?0:13;e.connect.conn_handle=4;test_gap(&e,test_gap_arg); }
+    if(stage==6)nimble_force_disconnect();
+   };
+   bt.request_stop();
+   // Driver joins real production lifecycle and asserts stopped, no quarantine.
+   std::puts("PENDING_CONNECT_STOP awaiting lifecycle drain");return;
+  }
   if(mode=="init-fail"||mode=="host-create-fail"||mode=="stop-fail"||mode=="foreign-stack"){
    BluetoothLifecycle bt;controller_status=test_status=(mode=="foreign-stack"?2:0);async_bluetooth=true;std::thread host;
    host_task_created=[&](TaskHandle_t t){if(t->name=="nimble_host")host=std::thread([t]{run_task(t);});};
@@ -177,8 +287,8 @@ struct TeslaBleModuleTest {
 #endif
    std::puts("IDLE_ENABLED PASS active Bluetooth with two stored Tesla profiles: no Tesla runtime/worker/queues/protocol, no scan/connection/storage changes");return;
   }
-  if(mode=="pairing"||mode=="generate"||mode=="notify-only"||mode=="indicate-and-notify"){
-    host_rx_properties=mode=="notify-only"?16:mode=="indicate-and-notify"?48:32;pairing(m,mode=="generate");return;
+  if(mode=="pairing"||mode=="generate"||mode=="notify-only"||mode=="indicate-and-notify"||mode=="delayed-pair"||mode=="connect-timeout"||mode=="no-card"||mode=="decline"||mode=="link-drop"||mode=="profile-switch"||mode=="partial-pair"||mode=="late-response"){
+    host_rx_properties=mode=="notify-only"?16:mode=="indicate-and-notify"?48:32;pairing(m,mode=="generate",mode=="delayed-pair",mode);return;
   }
   if(mode=="delete-first") {
    seed(0);seed(1);const auto before=LittleFS.files;

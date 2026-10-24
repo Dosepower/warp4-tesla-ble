@@ -27,9 +27,10 @@ public:
  using Handler=void(*)(const TeslaNimbleEvent &);
  bool initialize(Handler);
  void run(); // caller owns host task and final ACK
- bool shutdown(); // separate lifecycle task; caller MUST join run before deinit
+ bool quiesce(); // close admission and cancel/terminate, host must keep running
+ bool shutdown(); // only after quiesce/idle; caller MUST join run before deinit
  bool deinitialize();
- bool ready()const{return synchronized.load()&&!failed.load();}
+ bool ready()const{return synchronized.load()&&!failed.load()&&!retiring.load();}
  bool faulted()const{return failed.load();}
  bool idle()const{return !busy.load();}
  bool open(const uint8_t *address,uint8_t type,uint64_t epoch);
@@ -52,7 +53,7 @@ private:
  void finish_discovery(int);
  struct Cookie {TeslaNimbleCentral *owner=nullptr;uint64_t epoch=0;};
  Cookie cookie; // immutable from successful open submission through disconnect barrier
- std::atomic<bool> synchronized{false},failed{false},busy{false},running{false};
+ std::atomic<bool> synchronized{false},failed{false},busy{false},running{false},retiring{false};
  std::atomic<uint16_t> connection{0xffff};
  Handler handler=nullptr;bool initialized=false;uint8_t own_type=0;
  uint16_t service_start=0,service_end=0,write_handle=0,notify_handle=0,descriptor_end=0,cccd=0;

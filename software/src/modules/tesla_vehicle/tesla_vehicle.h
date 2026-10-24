@@ -275,6 +275,10 @@ private:
         uint32_t pair_started_ms = 0, pair_next_ms = 0;
         TeslaBleRequestIdentity pair_request;
         uint64_t pair_command = 0; // Worker-owned, not a UI/publication latch.
+        // Sampled nonsecret lower-bound evidence, not authentication authority.
+        std::atomic<uint32_t> pair_tx_total{0}, pair_tx_attempted{0}, pair_tx_acked{0};
+        std::atomic<int> pair_result{-1};
+        void reset_pair_diagnostics() { pair_tx_total=0;pair_tx_attempted=0;pair_tx_acked=0;pair_result=-1; }
     };
 
     struct Tesla {

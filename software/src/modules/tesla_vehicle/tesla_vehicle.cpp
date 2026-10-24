@@ -192,6 +192,12 @@ bool TeslaVehicle::prepare_tesla()
         {"pairing_pending", Config::Bool(false)},
         // HTTP acceptance is not evidence of transmission or authentication.
         {"pair_request_sent", Config::Bool(false)},
+        // Diagnostic evidence only; never authority for enrollment or charging.
+        {"pair_tx_total_bytes", Config::Uint(0, 0, 1026)},
+        {"pair_tx_attempted_bytes", Config::Uint(0, 0, 1026)},
+        {"pair_tx_acked_bytes", Config::Uint(0, 0, 1026)},
+        {"pair_tx_complete", Config::Bool(false)},
+        {"pair_result", Config::Int(-1, -1, 8)},
         {"restart_required", Config::Bool(false)},
         {"last_soc", Config::Float(NAN)},
         {"action_busy", Config::Bool(false)},
@@ -1123,6 +1129,7 @@ void TeslaVehicle::process_commands()
         const auto accepted = r->command_outcome.claim_pair();
         if (!accepted) { return; }
         r->pair_command = accepted->command;
+        r->reset_pair_diagnostics();
 #if TESLA_BLE_MANUAL_VEHICLE_UI
         if (!active_identity_matches(*captured) || *captured != accepted->vehicle || captured->index != r->configured_ev_index ||
             captured->mac != r->profile_mac || !captured->mac) {
@@ -1177,6 +1184,7 @@ void TeslaVehicle::process_commands()
             tesla_clean::VehicleCompletion completion;
             const bool ready = request.request != 0 && completion.assign([this, r, request, command](const tesla_clean::VehicleResult &result) {
                 if (!r->command_outcome.pair_current(command)) { return; }
+                r->pair_result.store(static_cast<int>(result.code));
                 if (r->stop_requested.load() || result.context != request.request ||
                     result.generation != r->connection_generation.load() || !r->session.matches(request)) {
                     cancel_pairing("Pairing link/session lost; transmission may have occurred; approval not authenticated", command); return;
@@ -1193,7 +1201,10 @@ void TeslaVehicle::process_commands()
 #if TESLA_BLE_MANUAL_VEHICLE_UI
                 runtime_binding_matches() &&
 #endif
-                r->vehicle->pair(true, request.request, std::move(completion));
+                // ATT Write-With-Response fragments share one bounded send
+                // budget. The core's 500ms default is below a valid multi-write
+                // exchange; use the module's supervised 10s operation budget.
+                r->vehicle->pair(true, request.request, std::move(completion), {15000, 1000, 10000});
             if (!r->pair_sending) {
                 r->session.disarm(request);
                 cancel_pairing("Tesla pairing command refused; no pairing is pending", command);
@@ -1631,6 +1642,19 @@ void TeslaVehicle::publish_bluetooth_state()
     bluetooth_state.get("persistence_error")->updateBool(!bluetooth_commit_ok);
     bluetooth_state.get("legacy_tesla_enabled")->updateBool(tesla && tesla->config.get("enable")->asBool() && !bluetooth_boot_enabled);
     if (tesla) {
+        // Event delivery is lossy and locally retiring a framed stream need not
+        // produce a GAP-disconnected UI event. Reconcile the display with the
+        // current logical link; never let historical Connected imply readiness.
+        tesla->state.get("connected")->updateBool(r && !tesla->runtime_owner.is_stopping() &&
+            !r->stop_requested.load() && r->connected.load());
+        if(r) {
+            const auto total=r->pair_tx_total.load(),acked=r->pair_tx_acked.load();
+            tesla->state.get("pair_tx_total_bytes")->updateUint(total);
+            tesla->state.get("pair_tx_attempted_bytes")->updateUint(r->pair_tx_attempted.load());
+            tesla->state.get("pair_tx_acked_bytes")->updateUint(acked);
+            tesla->state.get("pair_tx_complete")->updateBool(total>0 && acked==total);
+            tesla->state.get("pair_result")->updateInt(r->pair_result.load());
+        }
         tesla->state.get("running")->updateBool(r && r->service_enabled && r->ble_ready.load() && !tesla->runtime_owner.is_stopping()
 #if TESLA_BLE_MANUAL_VEHICLE_UI
             && r->profile_ready.load() && !r->profile_pending.load() && r->profile_actionable.load()

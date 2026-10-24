@@ -9,5 +9,5 @@ with tempfile.TemporaryDirectory(prefix='multi-tesla-',dir=os.environ['TMPDIR'])
  src=[T/'test_nimble_module.cpp']+[R/'software/src/modules/tesla_vehicle'/n for n in ('tesla_ble_storage.cpp','tesla_ble_transport.cpp','tesla_ble_gatt.cpp','bluetooth_lifecycle.cpp','tesla_nimble_central.cpp')]+list((R/'software/lib/TeslaBLEClean/src').glob('*.cpp'))
  libs=[cache/'mbedtls'/n for n in ('library/libmbedcrypto.a','3rdparty/everest/libeverest.a','3rdparty/p256-m/libp256m.a')]
  subprocess.run(['g++',*flags,*map(str,src),*map(str,libs),'-o',str(d/'test')],check=True)
- for mode in ('init-fail','host-create-fail','stop-fail','foreign-stack','pairing','generate','notify-only','indicate-and-notify','multi','delete-first','idle-enabled','legacy-key','legacy-session','legacy-bench','corrupt-profiles','empty-legacy','unbound-inert-legacy'):
+ for mode in os.environ.get('TESLA_NIMBLE_MODULE_MODES','init-fail host-create-fail stop-fail foreign-stack pairing generate notify-only indicate-and-notify delayed-pair connect-timeout pending-connect-stop late-connect-stop quiesce-disconnect-race quiesce-retains no-card decline link-drop profile-switch partial-pair late-response multi delete-first idle-enabled legacy-key legacy-session legacy-bench corrupt-profiles empty-legacy unbound-inert-legacy').split():
   subprocess.run([str(d/'test'),mode],check=True)

@@ -141,9 +141,18 @@ bool TeslaVehicle::transport_write_bytes(const uint8_t *data, size_t size)
                *identity != r->observed_identity ||
                (r->in_flight_started_ms != 0 && !r->session.matches(r->in_flight));
     }, [this, r, &data](size_t offset, size_t length) {
-        return gatt_operation(Write, r->write_handle, [this, &data, offset, length]() {
+        const bool pairing=r->pair_sending;
+        if(pairing && r->pair_tx_attempted.load()==0 && length>=2) {
+            r->pair_tx_total.store(uint32_t(data[offset])*256+data[offset+1]+2);
+        }
+        const bool ok=gatt_operation(Write, r->write_handle, [this, r, pairing, &data, offset, length]() {
+            if(pairing)r->pair_tx_attempted.store(r->pair_tx_attempted.load()+length);
             auto *c=bluetooth.central(); return c && c->write(data+offset,length);
         });
+        // Conservative lower bound: only count a successful matching ATT
+        // completion plus ownership checks. Refusal is NOT proof of no TX.
+        if(pairing && ok)r->pair_tx_acked.store(r->pair_tx_acked.load()+length);
+        return ok;
     });
 }
 

@@ -8,7 +8,11 @@ const source=p=>readFileSync(new URL('../../'+p,import.meta.url),'utf8');
 const firmware=source('src/modules/tesla_vehicle/tesla_vehicle.cpp');
 const schema=source('web/src/modules/tesla_vehicle/api.ts');
 const fields=[...firmware.split('\n    tesla->state = Config::Object({')[1].split('});')[0].matchAll(/\{"(\w+)", Config::(\w+)/g)];
-const tsFields=[...schema.split('export interface state {')[1].split('}')[0].matchAll(/(\w+): ([^;]+);/g)];
+// Only interface member declarations, not prose such as "-1: no result;".
+const stateMembers=schema.split('export interface state {')[1].split('}')[0];
+const memberPattern=/^\s*(\w+): ([^;\n]+);/gm;
+assert.deepEqual([...('// -1: no result;\n    real: number;').matchAll(memberPattern)].map(m=>m[1]),['real']);
+const tsFields=[...stateMembers.matchAll(memberPattern)];
 assert.deepEqual(fields.map(m=>m[1]).sort(),tsFields.map(m=>m[1]).sort());
 for(const[,field,type]of fields){const ts=tsFields.find(m=>m[1]===field)[2];if(type==='Bool')assert.equal(ts,'boolean');if(['Float','Uptime'].includes(type))assert.equal(ts,'number');}
 for(const command of ['start','pair','poll','forget_key']){

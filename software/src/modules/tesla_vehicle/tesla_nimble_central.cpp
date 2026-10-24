@@ -24,10 +24,21 @@ bool TeslaNimbleCentral::initialize(Handler h){
 void TeslaNimbleCentral::sync(){auto *c=owner.load();if(!c)return;if(ble_hs_util_ensure_addr(0)||ble_hs_id_infer_auto(0,&c->own_type)){c->failed=true;return;}bluetooth_memory::sample(bluetooth_memory::Stage::HostEnabled,true);c->synchronized=true;}
 void TeslaNimbleCentral::reset(int){auto *c=owner.load();if(c){c->failed=true;c->synchronized=false;c->emit(TeslaNimbleEvent::Security,BLE_HS_EUNKNOWN);}}
 void TeslaNimbleCentral::run(){running=true;nimble_port_run();running=false;}
+bool TeslaNimbleCentral::quiesce(){
+ retiring=true;synchronized=false;
+ if(!initialized)return false;
+ if(!busy.load())return true;
+ // ble_hs_stop counts established links, not an outstanding HCI connect
+ // cancel. Keep the host servicing events until that terminal callback.
+ const int rc=connection.load()==0xffff?ble_gap_conn_cancel():ble_gap_terminate(connection.load(),BLE_ERR_REM_USER_CONN_TERM);
+ // A terminal callback can win the race with the cancel/terminate call
+ // (e.g. SDK reports ENOTCONN). Only the actual idle barrier, never that
+ // error alone, establishes released connection ownership.
+ return rc==0 || rc==BLE_HS_EALREADY || !busy.load();
+}
 bool TeslaNimbleCentral::shutdown(){
- synchronized=false;if(!initialized)return false;
+ synchronized=false;if(!initialized||busy.load())return false;
  if(ble_gap_disc_active() && ble_gap_disc_cancel()!=0)return false;
- // stop drains GATT and GAP, but its rc alone doesn't prove disconnect success.
  return nimble_port_stop()==0 && !busy.load();
 }
 bool TeslaNimbleCentral::deinitialize(){
@@ -43,7 +54,10 @@ bool TeslaNimbleCentral::open(const uint8_t *a,uint8_t type,uint64_t epoch){
  bool expected=false;if(!busy.compare_exchange_strong(expected,true))return false;
  cookie.epoch=epoch;connection=0xffff;write_handle=notify_handle=cccd=0;pending=TeslaNimbleEvent::Open;
  ble_addr_t peer{};peer.type=type;for(unsigned i=0;i<6;++i)peer.val[i]=a[5-i];
- const int rc=ble_gap_connect(own_type,&peer,10000,nullptr,gap,&cookie);
+ // Leave a bounded callback-delivery margin before the worker's 10s GATT
+ // watchdog. Equal SDK/worker deadlines race a normal absent-peer timeout
+ // into permanent ownership quarantine.
+ const int rc=ble_gap_connect(own_type,&peer,7000,nullptr,gap,&cookie);
  if(rc){pending=0;busy=false;}return rc==0;
 }
 bool TeslaNimbleCentral::discover(){
@@ -103,6 +117,7 @@ int TeslaNimbleCentral::gap(ble_gap_event *e,void *arg){
   if(!e->connect.status)c.connection=e->connect.conn_handle;
   c.pending=0;
   if(e->connect.status){const TeslaNimbleEvent ended{TeslaNimbleEvent::Open,c.cookie.epoch,0xffff,0,e->connect.status,nullptr,0};c.busy=false;if(c.handler)c.handler(ended);return 0;}
+  if(c.retiring.load()){if(!c.close())c.failed=true;return 0;}
   c.emit(TeslaNimbleEvent::Open,0);break;
  case BLE_GAP_EVENT_DISCONNECT:
   if(e->disconnect.conn.conn_handle!=c.connection)return 0;

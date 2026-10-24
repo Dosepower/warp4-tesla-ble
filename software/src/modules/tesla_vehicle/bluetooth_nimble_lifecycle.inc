@@ -44,7 +44,9 @@ void BluetoothLifecycle::host_entry(void *p){auto &c=*static_cast<Context *>(p);
 bool BluetoothLifecycle::teardown(Context &c){
  if(!c.acquired)return false; // failed initialization is quarantined, never steal foreign stack
  if(!c.host_task)return c.central.deinitialize();
- if(!c.central.shutdown())return false;
+ if(!c.central.quiesce())return false;
+ const auto drain=millis();while(!c.central.idle()&&millis()-drain<5000)vTaskDelay(pdMS_TO_TICKS(5));
+ if(!c.central.idle()||!c.central.shutdown())return false;
  const auto start=millis();while(!c.host_done.load(std::memory_order_acquire)&&millis()-start<5000)vTaskDelay(pdMS_TO_TICKS(5));
  if(!c.host_done.load(std::memory_order_acquire)||!c.central.deinitialize())return false;
  vTaskDelete(c.host_task);c.host_task=nullptr;c.acquired=false;return true;
