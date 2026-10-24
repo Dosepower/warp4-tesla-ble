@@ -1,0 +1,14 @@
+# WIP: pairing UI/state acceptance
+
+SOURCE REVIEW ONLY — DO NOT INSTALL
+
+This source checkpoint adds the user-requested error/action corrections on top of the prior bounded Pair transmit/link/teardown fixes. No firmware binaries are published. No installation or real-vehicle pairing success is claimed.
+
+- Reconcile concrete local, discovery and backend errors into one canonical region; collapse identical whitespace-normalized messages without suppressing distinct errors. Scope backend/discovery errors to their profile; prevent late errors crossing profile selection (including A-B-A), and clear stale mirrored errors when the backend clears them. Preserve a scalar prior error because the production API cache is mutable.
+- Keep the existing confirmed-paired main Unpair gate. Unconfirmed local keys have a distinctly secondary Delete local key action inside Details, with a profile-specific local-only confirmation. Keeping the key and explicitly retrying remains possible; no automatic key replacement/deletion.
+- Use separate guided unpair/cleanup intents with full schema, saved-profile equality, monotonic config revision and live identity generation. Backend probes key/authorization before config mutation, rejects unknown/absent state and wrong intent, and retains serialized worker ownership for link retirement and exact local namespace cleanup. Orphan cleanup does not require an active vehicle. Other profile keys and the Tesla-side key are not removed.
+- Stored-key polling remains a separately confirmed authentication/verification operation; key presence and HTTP command acceptance are not authenticated pairing or a valid SoC reading.
+
+Regression evidence at this checkpoint: actual authored/generated production-component browser RED reproduces duplicate errors and misleading unpaired/unknown cleanup; initial GREEN and native local-delete intent/isolation cases pass. Expanded browser matrix, production typecheck/full firmware build, normal/sanitizer broad suites and final packaging are still in qualification at this WIP checkpoint. Refer to a later source checkpoint for final offline results; real vehicle/card/radio acceptance remains separate.
+
+No cryptography, role/form-factor, SDK, partition, timeout or charging-authority policy is relaxed by this UI continuation. Historical vehicle failure attribution remains unproven; reproducible offline defects are not proof of a particular RF/card/RAM cause.

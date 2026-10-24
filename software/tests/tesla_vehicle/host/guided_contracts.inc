@@ -1,5 +1,36 @@
 // Included inside friend test struct. Synthetic profiles, actual production entrypoint.
  static void guided(TeslaVehicle &m,const std::string &mode) {
+  if(mode.rfind("guided-delete-",0)==0) {
+   HostBluetoothDriver driver(m.bluetooth,TeslaVehicle::gatt_callback);ev.index=0;ev.mac=A;
+   seed(0);seed(1);TeslaBleStorageAdapter store;assert(store.select_profile(0,A));
+   const bool unpair=mode=="guided-delete-unpair" || mode=="guided-delete-unpaired-reject";
+   if(mode!="guided-delete-unpair" && mode!="guided-delete-paired-reject")assert(store.remove_key("authorized"));
+   if(mode=="guided-delete-absent"){assert(store.forget_material());}
+   if(mode=="guided-delete-cleanup")assert(store.remove_key("private_key"));
+   if(mode=="guided-delete-invalid-key"){LittleFS.files["/config/tesla_p00_112233445500_private_key"]={1,2,3};}
+   auto &c=m.tesla->guided_command;entry(c.get("profile"),0);
+   c.get("phase")->updateString(unpair?"unpair":"cleanup");c.get("request")->updateString("00000000000000000000000000000001");
+   c.get("generation")->updateString(std::to_string(ev.generation));c.get("revision")->updateUint(m.tesla->config_revision);
+   if(mode=="guided-delete-stale")c.get("revision")->updateUint(m.tesla->config_revision+1);
+   if(mode=="guided-delete-generation")++ev.generation;
+   if(mode=="guided-delete-profile")c.get("profile")->get("vin")->updateString("5YJ3E1EA7KF000009");
+   if(mode=="guided-delete-orphan")ev.mac=0; // Local recovery does not require connected vehicle.
+   if(mode=="guided-delete-unknown")fs_fault=[](const std::string &op){return op.rfind("open:",0)==0;};
+   const auto files=LittleFS.files;String error;api.commands.at("tesla_vehicle/guided")(0,error);fs_fault={};
+   const bool accepted=mode=="guided-delete-local" || mode=="guided-delete-unpair" || mode=="guided-delete-orphan" || mode=="guided-delete-cleanup";
+   assert(error.empty()==accepted);
+   if(!accepted){assert(LittleFS.files==files && api.written_configs.empty() && !m.tesla->runtime_owner.get());return;}
+   auto *r=m.tesla->runtime_owner.get();assert(r && r->profile_pending.load());
+   assert(!m.find_profile(0)->get("enable")->asBool() && m.find_profile(0)->get("ble_address")->asString().empty());
+   error.clear();api.commands.at("tesla_vehicle/guided")(0,error);assert(!error.empty()); // Single-use revision.
+   m.apply_profile();m.publish_profile();m.process_module_events();
+   assert(store.private_key_presence()==TeslaBleStorageAdapter::KeyPresence::Absent);
+   for(const auto &f:files)if(f.first.find("tesla_p01_")!=std::string::npos)assert(LittleFS.files.at(f.first)==f.second);
+   assert(m.find_profile(1)->get("enable")->asBool());
+   assert(!peer_open_calls && !scan_start_calls && !ev.applied);assert_charging_untouched();
+   r->stop_requested.store(true);run_task(r->task_handle);m.loop();if(r->teardown_handle)run_task(r->teardown_handle);m.loop();
+   std::printf("GUIDED_LOCAL_DELETE_PASS %s no Tesla call or other-profile mutation\n",mode.c_str());return;
+  }
   if(mode=="guided-refresh-other-expired") {
    HostBluetoothDriver driver(m.bluetooth,TeslaVehicle::gatt_callback);ev.index=0;ev.mac=A;
    m.find_profile(1)->get("discovery_revision")->updateUint(1);

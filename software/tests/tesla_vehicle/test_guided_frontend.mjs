@@ -36,7 +36,7 @@ const walk=n=>!n||typeof n!=='object'?[]:[n,...[n.props?.children].flat(Infinity
 const nodes=()=>walk(page.render({},page.state));
 const findButton=k=>nodes().find(n=>n.type==='Button'&&(n.props.children===`tesla_vehicle.content.${k}` || k==='search'&&n.props.children==='tesla_vehicle.content.searching'));
 // Use the actual visible details/manage controls to reach a deliberate refresh.
-const button=k=>{if(k==='forget_key'&&!findButton(k)&&findButton('show_details')){f.values['tesla_vehicle/state']={profile_ev_index:0,key_presence:'present',key_present:true,paired:false};event('tesla_vehicle/state');findButton('show_details').props.onClick();}if(k==='search'&&!findButton(k)&&findButton('show_details'))findButton('show_details').props.onClick();if(k==='search'&&!findButton(k))page.state.edit_binding=true;return findButton(k);};
+const button=k=>{if(k==='forget_key'&&!findButton(k)){f.values['tesla_vehicle/state']={profile_ev_index:0,key_presence:'present',key_present:true,paired:true};event('tesla_vehicle/state');}if(k==='search'&&!findButton(k)&&findButton('show_details'))findButton('show_details').props.onClick();if(k==='search'&&!findButton(k))page.state.edit_binding=true;return findButton(k);};
 // Existing Details control alone gets the approved destructive appearance.
 page.state.entries[0].ble_address='01:02:03:04:05:06';page.state.entries[0].discovery_revision=2;
 page.state.details_open=true;assert.equal(findButton('edit_binding').props.variant,'danger','Existing VIN/reset control must be solid red');
@@ -200,7 +200,7 @@ assert(nodes().some(n=>n.type==='FormRow'&&walk(n).some(c=>c.type==='Button'&&c.
 findButton('show_details').props.onClick();assert.equal(nodes().filter(n=>n.type==='Button'&&n.props.children==='tesla_vehicle.content.forget_key').length,1,'No duplicate unpair below Details');
 normal();assert(!findButton('forget_key'),'No unpair primary without authenticated pairing');
 f.values['tesla_vehicle/state']={profile_ev_index:0,key_presence:'present',key_present:true,paired:false};event('tesla_vehicle/state');
-assert(findButton('pair'));assert(!findButton('forget_key'));findButton('show_details').props.onClick();assert(findButton('forget_key'),'Orphan credential has explicit recovery in Details');
+assert(findButton('pair'));assert(!findButton('forget_key'));findButton('show_details').props.onClick();assert(findButton('cleanup_key'),'Orphan credential has distinctly local explicit recovery in Details');assert(!findButton('forget_key'));
 normal();
 const configBeforeOff=f.values['tesla_vehicle/profiles'];delete f.values['tesla_vehicle/profiles'];assert(!nodes().some(n=>n.type==='Alert'&&n.props.variant==='info'),'Remove only permanent disabled blue alert');f.values['tesla_vehicle/profiles']=configBeforeOff;
 // Delete consent expires when selected credential evidence changes, even A->B->A.
@@ -226,12 +226,12 @@ for(const action of ['search','forget_key']){
  let yes;f.show=()=>new Promise(r=>{yes=r;});const pending=button(action).props.onClick();await button(action).props.onClick();
  page.selectProfile('1');page.selectProfile('0');yes(true);await pending;assert.equal(f.calls.length,count);normal();
 }
-await button('forget_key').props.onClick();assert.equal(f.calls.at(-1).topic,'tesla_vehicle/forget_key');assert.equal(f.calls.at(-1).payload.ev_index,0);
+await button('forget_key').props.onClick();assert.equal(f.calls.at(-1).topic,'tesla_vehicle/guided');assert.equal(f.calls.at(-1).payload.phase,'unpair');assert.equal(f.calls.at(-1).payload.profile.ev_index,0);
 assert(walk(f.modals.at(-1).body()).some(n=>n.type==='p'));normal();
 page.dirty=true;assert(button('forget_key').props.disabled);page.dirty=false;
 f.call=async()=>{throw Error('injected search refusal');};await button('search').props.onClick();assert(page.state.search_error);assert(!page.state.command_busy);normal();
-f.values['tesla_vehicle/discovery']={status:'error',busy:false,targets:[],error:'timeout'};event('tesla_vehicle/discovery');
-assert(nodes().some(n=>n.props.children==='tesla_vehicle.content.search_failed'));normal();
+f.values['tesla_vehicle/discovery']={status:'error',busy:false,targets:[],ev_index:0,ev_mac:page.profile().ev_mac,searched_vin:page.profile().vin,error:'timeout'};event('tesla_vehicle/discovery');
+assert(nodes().some(n=>n.props.children==='timeout'));page.selectProfile('1');assert(!nodes().some(n=>n.props.children==='timeout'));normal();
 await button('search').props.onClick();assert(page.searchBusy());count=f.calls.length;await button('search').props.onClick();assert.equal(f.calls.length,count);
 await assert.rejects(page.sendSave('tesla_vehicle/profiles',{entries:page.state.entries}));
 f.values['tesla_vehicle/discovery']={status:'complete',busy:false,ev_index:0,result_age_ms:0,result_ttl_ms:120000,searched_vin:'5YJ3E1EA7KF000001',ev_mac:'11:22:33:44:55:00',generation:'7',revision:30,targets:[target],truncated:true};event('tesla_vehicle/discovery');assert(!button('select_target'));
@@ -331,6 +331,28 @@ for(const mutate of [()=>page.selectProfile('1'),()=>{page.selectProfile('1');pa
  assert.deepEqual(f.calls.slice(count).map(c=>c.topic),['tesla_vehicle/scan'],'No duplicate request, save, prepare or commit after invalidation');
 }
 console.log('GUIDED_REFRESH_NEGATIVE_RACES_PASS');
+// Canonical errors: whitespace-equivalent duplicates collapse, distinct failures
+// survive, backend errors belong only to their profile, late A failures cannot leak.
+normal();
+f.values['tesla_vehicle/state']={profile_ev_index:0,key_presence:'present',key_present:true,paired:false,last_error:'same   failure'};event('tesla_vehicle/state');
+page.state.command_error=' same failure ';
+const errorTexts=()=>nodes().filter(n=>n.type==='Alert'&&n.props.variant==='danger').flatMap(n=>walk(n).filter(c=>c.type==='div').map(c=>c.props.children));
+assert.deepEqual(errorTexts(),['same failure']);
+page.state.command_error='different failure';assert.deepEqual(errorTexts(),['different failure','same failure']);
+page.selectProfile('1');assert.deepEqual(errorTexts(),[],'A backend failure is not a B error');page.selectProfile('0');assert.deepEqual(errorTexts(),['same failure']);
+page.state.command_error='same failure';f.values['tesla_vehicle/state']={...f.values['tesla_vehicle/state'],last_error:''};event('tesla_vehicle/state');assert.deepEqual(errorTexts(),[],'Backend clearance retires mirrored local error');
+normal();let refuse;f.call=async(t,p)=>{if(p.phase==='prepare_pair')await new Promise((_,reject)=>refuse=reject);};
+const lateFailure=button('pair').props.onClick();await new Promise(setImmediate);page.selectProfile('1');refuse(Error('late A failure'));await lateFailure;assert.equal(page.state.command_error,false);normal();
+for(const key_presence of ['present','cleanup','absent','unknown'])for(const connected of [false,true]){
+ f.values['tesla_vehicle/state']={profile_ev_index:0,key_presence,key_present:key_presence==='present',paired:false,connected};event('tesla_vehicle/state');page.state.details_open=true;
+ assert(!findButton('forget_key'));assert.equal(!!findButton('cleanup_key'),key_presence==='present'||key_presence==='cleanup');
+ if(findButton('cleanup_key')){
+  f.show=async()=>false;const before=f.calls.length;await findButton('cleanup_key').props.onClick();assert.equal(f.calls.length,before);assert.equal(f.modals.at(-1).title(),'tesla_vehicle.content.cleanup_title');
+  f.show=async()=>true;await findButton('cleanup_key').props.onClick();assert.equal(f.calls.at(-1).payload.phase,'cleanup');assert.equal(f.calls.at(-1).payload.profile.ev_index,0);
+ }else{const before=f.calls.length;await page.command('cleanup');assert.equal(f.calls.length,before,'Unknown/absent stale handler fails closed');}
+}
+normal();page.state.command_error='stale failure';f.call=async(t,p)=>{if(p.phase==='prepare_pair'){f.values['tesla_vehicle/guidance'].ready=true;f.values['tesla_vehicle/guidance'].request=p.request;event('tesla_vehicle/guidance');}};await button('pair').props.onClick();assert.equal(page.state.command_error,false);assert(!page.profileStatus().paired,'HTTP acceptance is not pairing');
+console.log('GUIDED_CANONICAL_ERRORS_LOCAL_CLEANUP_PASS');
 normal();
 let prepareResponse;f.call=async(t,p)=>{if(p.phase==='prepare_pair')await new Promise(r=>{prepareResponse=r;});};const pendingUnmount=button('pair').props.onClick();await new Promise(setImmediate);
 count=f.calls.length;page.componentWillUnmount();prepareResponse();await pendingUnmount;assert.equal(f.calls.length,count+1);assert.equal(f.calls.at(-1).payload.phase,'cancel');

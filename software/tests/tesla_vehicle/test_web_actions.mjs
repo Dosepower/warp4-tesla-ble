@@ -32,7 +32,7 @@ assert.equal(stopping.pollDisabled, true);
 assert.equal(stopping.deleteDisabled, true);
 assert.equal(teslaActions(false, active, false).pairDisabled, true);
 assert.equal(teslaActions(true, {...active, restart_required: true}, false).pollDisabled, true);
-assert.equal(teslaActions(false, {running: false, key_present: false, key_presence: 'unknown'}, false).deleteDisabled, false);
+assert.equal(teslaActions(false, {running: false, key_present: false, key_presence: 'unknown'}, false).deleteDisabled, true);
 assert.equal(teslaActions(false, {key_presence: 'absent'}, false).deleteDisabled, true);
 assert.equal(teslaActions(false, {key_presence: 'unknown', stopping: true}, false).deleteDisabled, true);
 assert.equal(teslaActions(false, {key_presence: 'unknown', restart_required: true}, false).deleteDisabled, true);

@@ -233,6 +233,14 @@ bool TeslaVehicle::select_profile(int index, bool deleting, String &errmsg)
     }
     if (!mac) { errmsg = checked_error_string("Invalid saved EV MAC; no deletion attempted"); return false; }
     if (deleting) {
+        // Probe before revoking config or allocating a worker. Unknown/absent
+        // storage is not permission for a destructive namespace operation.
+        TeslaBleStorageAdapter store;
+        if (!store.select_profile(index, mac)) { errmsg = checked_error_string("Unknown key state; retained untouched"); return false; }
+        const auto presence = store.private_key_presence();
+        if (presence != TeslaBleStorageAdapter::KeyPresence::Present && presence != TeslaBleStorageAdapter::KeyPresence::CleanupRequired) {
+            errmsg = checked_error_string("No proven local key material; retained untouched"); return false;
+        }
         if (tesla->config_revision == UINT32_MAX) { errmsg = checked_error_string("Profile sequence exhausted; reboot required"); return false; }
         // Local removal revokes ONLY this saved profile's permission and
         // transport binding before allocating/handing off cleanup. Even if
@@ -410,6 +418,44 @@ void TeslaVehicle::guided_command(String &errmsg)
         if (p->get("enable")->asBool() != saved->get("enable")->asBool() || p->get("wake_once")->asBool() != saved->get("wake_once")->asBool()) {
             errmsg = checked_error_string("Saved permission changed; confirm again"); return;
         }
+    }
+    if (phase == "unpair" || phase == "cleanup") {
+        // Explicit local destruction has distinct intents. Both use the saved
+        // namespace (including orphan EV mappings), never a caller-selected MAC.
+        auto p = command.get("profile");
+        const int index = p->get("ev_index")->asInt();
+        auto *saved = find_profile(index);
+        if (!saved || !discovery_allowed() || service_start_requested) {
+            errmsg = checked_error_string("Saved profile unavailable or action busy; confirm again"); return;
+        }
+        for (const char *key : {"ev_mac", "vin", "ble_address"}) {
+            if (p->get(key)->asString() != saved->get(key)->asString()) { errmsg = checked_error_string("Saved profile changed; confirm again"); return; }
+        }
+        for (const char *key : {"ble_address_type", "discovery_revision", "poll_interval"}) {
+            if (p->get(key)->asUint() != saved->get(key)->asUint()) { errmsg = checked_error_string("Saved profile changed; confirm again"); return; }
+        }
+        if (p->get("enable")->asBool() != saved->get("enable")->asBool() || p->get("wake_once")->asBool() != saved->get("wake_once")->asBool()) {
+            errmsg = checked_error_string("Saved permission changed; confirm again"); return;
+        }
+        const auto mac = profile_mac_value(saved->get("ev_mac")->asString().c_str());
+        TeslaBleStorageAdapter store;
+        if (!store.select_profile(index, mac)) { errmsg = checked_error_string("Unknown key state; retained untouched"); return; }
+        const auto presence = store.private_key_presence();
+        uint8_t auth[1]{}; size_t size = 0;
+        const auto authorization = store.load_into("authorized", auth, sizeof(auth), size);
+        if ((presence != TeslaBleStorageAdapter::KeyPresence::Present && presence != TeslaBleStorageAdapter::KeyPresence::CleanupRequired) ||
+            (authorization != tesla_clean::LoadResult::Absent && !(authorization == tesla_clean::LoadResult::Loaded && size == 1 && auth[0] == 1))) {
+            errmsg = checked_error_string("Key or authorization state uncertain; retained untouched"); return;
+        }
+        const bool paired = profile_material_authorized(store, saved->get("vin")->asString().c_str(), mac);
+        if (authorization == tesla_clean::LoadResult::Loaded && !paired) {
+            errmsg = checked_error_string("Stored authorization binding uncertain; retained untouched"); return;
+        }
+        if ((phase == "unpair") != paired) {
+            errmsg = checked_error_string("Pairing state changed; confirm the appropriate local action again"); return;
+        }
+        select_profile(index, true, errmsg); // Serialized worker retires old ownership before local deletion.
+        return; // Never sends vehicle-side key removal, pairing, poll or charging.
     }
     if (phase == "reset") {
         // Local-only confirmed reset. Exact profile + monotonic config revision
