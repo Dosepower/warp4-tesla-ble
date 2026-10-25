@@ -1328,6 +1328,17 @@ void TeslaVehicle::process_pair_verification()
     }
 #endif
     const bool session_lost = r->stop_requested.load() || !r->session.matches(r->pair_request);
+    tesla_clean::VcsecStatus response;
+    if (!session_lost && r->command_outcome.pair_current(r->pair_command) &&
+        r->vehicle->take_pairing_status(r->pair_request.request, r->connection_generation.load(), response) &&
+        response.operation == tesla_clean::VcsecOperation::Error && response.information != 13) {
+        char message[96];
+        snprintf(message, sizeof(message), "VCSEC whitelist information=%lu; unauthenticated current-link response", static_cast<unsigned long>(response.information));
+        r->command_outcome.retire_pair();
+        disconnect_internal(false);
+        cancel_pairing(message, r->pair_command);
+        return;
+    }
     if (session_lost || millis() - r->pair_started_ms >= 60000) {
         // Classify before disconnect_internal retires the session itself. A real
         // session/link failure must never be presented as ordinary card expiry.
@@ -1392,6 +1403,7 @@ void TeslaVehicle::cancel_pairing(const char *message, uint64_t command)
         strlcpy(r->terminal_error, message, sizeof(r->terminal_error));
     });
     if (order) { r->terminal_error_order = order; }
+    if (order && r->vehicle) { r->vehicle->end_pairing_status(r->pair_request.request); }
 }
 
 void TeslaVehicle::publish_pairing_state()

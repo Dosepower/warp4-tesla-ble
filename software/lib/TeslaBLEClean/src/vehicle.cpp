@@ -32,6 +32,7 @@ void Vehicle::close(uint64_t generation)
     if(!connected_ || generation!=generation_) { return; }
     // Detach everything before callbacks. A nested successor may own fresh RX/TX/commands.
     connected_=false; advance(); transmission_=0; deferred_count_=0; deferred_overflow_=false;
+    pair_context_=0; pair_reply_pending_=pair_reply_terminal_=false;
     receiver_.reset(generation); vcsec_.reset(); info_.reset();
     std::array<Command,4> retired=std::move(commands_); const size_t count=count_; count_=0; commands_={};
     for(size_t i=0;i<count;++i) {
@@ -60,6 +61,15 @@ bool Vehicle::wake(bool authorized,uint64_t context,VehicleCompletion &&cb,Vehic
 { return authorized && enqueue(Kind::Wake,WakePolicy::WakeIfNeeded,context,std::move(cb),timing); }
 bool Vehicle::pair(bool authorized,uint64_t context,VehicleCompletion &&cb,VehicleTiming timing)
 { return authorized && enqueue(Kind::Pair,WakePolicy::NoWakeSkip,context,std::move(cb),timing); }
+bool Vehicle::take_pairing_status(uint64_t context,uint64_t generation,VcsecStatus &status)
+{
+    if(!context || context!=pair_context_ || !connected_ || generation!=generation_ || !pair_reply_pending_) { return false; }
+    status=pair_reply_; pair_reply_pending_=false; return true;
+}
+void Vehicle::end_pairing_status(uint64_t context)
+{
+    if(context==pair_context_) { pair_context_=0; pair_reply_pending_=pair_reply_terminal_=false; }
+}
 void Vehicle::finish(VehicleResultCode code,uint8_t battery,SleepState sleep,bool authenticated)
 {
     if(!count_) { return; }
@@ -204,7 +214,12 @@ void Vehicle::tick()
             ++c.attempts; Transmission tx{this,ports_,serial_,generation_,now,c.started,c.timing};
             const bool accepted=transmit({pair.bytes.data(),pair.length},tx);
             if(serial_!=tx.serial) { return; }
-            if(accepted) { finish(VehicleResultCode::PairRequestSent); }
+            if(accepted) {
+                pair_context_=c.context; pair_started_=ports_.now(ports_.context);
+                pair_reply_pending_=pair_reply_terminal_=false;
+                drain(tx); // Includes notifications synchronously deferred during accepted TX.
+                if(serial_==tx.serial) { finish(VehicleResultCode::PairRequestSent); }
+            }
             else { retry(Stage::Pair,now); drain(tx); } return;
         }
         default: return;
@@ -227,7 +242,19 @@ bool Vehicle::receive(Bytes bytes,uint64_t generation)
 }
 void Vehicle::frame(const Frame &incoming,uint32_t now)
 {
-    if(exhausted() || !connected_ || !count_) { return; }
+    if(exhausted() || !connected_) { return; }
+    VcsecStatus observed;
+    if(pair_context_ && now-pair_started_<60000 && ports_.owns(ports_.context,generation_) &&
+       decode_vcsec_status({incoming.data.data(),incoming.length},observed) && observed.kind==VcsecKind::Pairing) {
+        // First terminal wins, including when multiple frames arrive in one RX
+        // batch. A late WAIT must not hide a specific refusal.
+        if(!pair_reply_terminal_) {
+            pair_reply_=observed; pair_reply_pending_=true;
+            pair_reply_terminal_=observed.operation!=VcsecOperation::Waiting;
+        }
+        return;
+    }
+    if(!count_) { return; }
     auto &c=commands_[0]; if(now-c.started>=c.timing.total_ms) { return; }
     SessionWireReply hello;
     if(decode_session_reply({incoming.data.data(),incoming.length},{address_.data(),16},hello)) {

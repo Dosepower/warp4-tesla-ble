@@ -77,6 +77,13 @@ class Vehicle {
     std::array<Deferred,4> deferred_{};
     size_t deferred_count_=0;
     bool deferred_overflow_=false;
+    // PRESENT_KEY has no request UUID. Only one explicitly sent request on
+    // this physical generation may observe its unauthenticated status. Never
+    // use this observation as session/key authorization.
+    uint64_t pair_context_=0;
+    uint32_t pair_started_=0;
+    bool pair_reply_pending_=false,pair_reply_terminal_=false;
+    VcsecStatus pair_reply_;
     Channel &channel(Domain d) { return d==Domain::Vcsec?vcsec_:info_; }
     bool advance();
     bool enqueue(Kind kind,WakePolicy policy,uint64_t context,VehicleCompletion &&completion,VehicleTiming timing);
@@ -109,6 +116,8 @@ public:
     bool wake(bool explicitly_authorized,uint64_t context,VehicleCompletion &&completion,VehicleTiming timing={});
     // PRESENT_KEY transmission only; approval must be verified by a subsequent authenticated exchange.
     bool pair(bool explicitly_authorized,uint64_t context,VehicleCompletion &&completion,VehicleTiming timing={});
+    bool take_pairing_status(uint64_t context,uint64_t generation,VcsecStatus &status);
+    void end_pairing_status(uint64_t context);
     void tick();
     bool receive(Bytes fragment,uint64_t generation);
 };
