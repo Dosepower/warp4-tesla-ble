@@ -52,7 +52,7 @@ void TeslaNimbleCentral::emit(TeslaNimbleEvent::Kind kind,int status,uint16_t ha
 bool TeslaNimbleCentral::open(const uint8_t *a,uint8_t type,uint64_t epoch){
  if(!ready()||!a||type>1||!epoch||discovery.busy()||ble_gap_disc_active())return false;
  bool expected=false;if(!busy.compare_exchange_strong(expected,true))return false;
- cookie.epoch=epoch;connection=0xffff;write_handle=notify_handle=cccd=0;pending=TeslaNimbleEvent::Open;
+ cookie.epoch=epoch;connection=0xffff;cancelling_open=false;write_handle=notify_handle=cccd=0;pending=TeslaNimbleEvent::Open;
  ble_addr_t peer{};peer.type=type;for(unsigned i=0;i<6;++i)peer.val[i]=a[5-i];
  // Leave a bounded callback-delivery margin before the worker's 10s GATT
  // watchdog. Equal SDK/worker deadlines race a normal absent-peer timeout
@@ -109,6 +109,14 @@ int TeslaNimbleCentral::written(uint16_t conn,const ble_gatt_error *e,ble_gatt_a
  c.pending=0;c.emit(static_cast<TeslaNimbleEvent::Kind>(kind),e?e->status:BLE_HS_EUNKNOWN,expected);return 0;
 }
 bool TeslaNimbleCentral::close(){if(connection==0xffff)return false;return ble_gap_terminate(connection,BLE_ERR_REM_USER_CONN_TERM)==0;}
+int TeslaNimbleCentral::cancel_open(){
+ // Set BEFORE submission: success can race cancellation. Never expose a late
+ // link as usable, and never interpret an API return as terminal ownership.
+ cancelling_open=true;
+ if(!busy.load())return 0;
+ const auto conn=connection.load();
+ return conn==0xffff?ble_gap_conn_cancel():ble_gap_terminate(conn,BLE_ERR_REM_USER_CONN_TERM);
+}
 int TeslaNimbleCentral::gap(ble_gap_event *e,void *arg){
  if(!e||!arg)return 0;auto &c=*static_cast<Cookie *>(arg)->owner;
  switch(e->type){
@@ -117,7 +125,7 @@ int TeslaNimbleCentral::gap(ble_gap_event *e,void *arg){
   if(!e->connect.status)c.connection=e->connect.conn_handle;
   c.pending=0;
   if(e->connect.status){const TeslaNimbleEvent ended{TeslaNimbleEvent::Open,c.cookie.epoch,0xffff,0,e->connect.status,nullptr,0};if(c.handler)c.handler(ended);c.busy.store(false,std::memory_order_release);return 0;}
-  if(c.retiring.load()){if(!c.close())c.failed=true;return 0;}
+  if(c.retiring.load()||c.cancelling_open.load()){c.close();return 0;}
   c.emit(TeslaNimbleEvent::Open,0);break;
  case BLE_GAP_EVENT_DISCONNECT:
   if(e->disconnect.conn.conn_handle!=c.connection)return 0;

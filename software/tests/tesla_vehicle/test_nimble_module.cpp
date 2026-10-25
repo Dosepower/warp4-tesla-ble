@@ -286,6 +286,7 @@ struct TeslaBleModuleTest {
  }
  #include "host/repeated_pair_contracts.inc"
  #include "host/pair_authority_contracts.inc"
+ #include "host/connect_repeat_contracts.inc"
  #include "host/browser_bridge_contracts.inc"
  static void run(const std::string &mode) {
   if(mode=="quiesce-retains") {
@@ -395,6 +396,7 @@ struct TeslaBleModuleTest {
 #endif
    std::puts("IDLE_ENABLED PASS active Bluetooth with two stored Tesla profiles: no Tesla runtime/worker/queues/protocol, no scan/connection/storage changes");return;
   }
+  if(mode.rfind("connect-repeat",0)==0){connect_flow(m,mode);return;}
   if(mode=="browser-bridge"){browser_bridge(m);return;}
   if(mode.rfind("authority-",0)==0){authority_flow(m,mode);return;}
   if(mode=="flow-repeat"||mode=="flow-repeat-cleanup"){repeated_flow(m,mode=="flow-repeat-cleanup");return;}

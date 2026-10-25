@@ -37,7 +37,7 @@ bool TeslaVehicle::gatt_operation(GattOperation kind, uint16_t handle, tesla_war
     const bool ok = slot.run(kind, connection, handle, []() { return millis(); }, gated_submit,
         [this, r, kind, connection, handle, started, &slot, &draining, &drained, &cancelled]() {
             if (kind == Discover && r->discovery_ready.load()) { r->operation.complete(kind, connection, 0, true); }
-            if (kind == Write && (cancelled || millis() - started >= 7000)) {
+            if ((kind == Write || kind == Open) && (cancelled || millis() - started >= 7000)) {
                 const auto event = r->transport_cancel_event.exchange(0);
 #ifndef TESLA_BLE_MODULE_HOST_TEST
                 logger.printfln("BLE drain: epoch=%u attempt=%u opgen=%u stage=%u reason=%u elapsed=%u",
@@ -49,7 +49,7 @@ bool TeslaVehicle::gatt_operation(GattOperation kind, uint16_t handle, tesla_war
                 draining = true;
                 r->closing_link.store(true);
                 auto *c = bluetooth.central();
-                if (c) { c->close(); }
+                if (c) { if (kind == Open) { c->cancel_open(); } else { c->close(); } }
                 // Keep the old operation watch active while host/main run. A
                 // missing terminal callback or blocked close still quarantines
                 // at the original watchdog, retaining all reachable ownership.
@@ -76,7 +76,7 @@ bool TeslaVehicle::gatt_operation(GattOperation kind, uint16_t handle, tesla_war
             // and our terminal handler. Fail the write without poisoning a
             // reusable slot merely because that same event changed session ID.
             auto *c = bluetooth.central();
-            if (kind == Write && c && c->idle()) {
+            if ((kind == Write || kind == Open) && c && c->idle()) {
                 slot.complete(kind, connection, handle, false);
                 return TeslaBleCancellation::Proceed;
             }
@@ -91,7 +91,7 @@ bool TeslaVehicle::gatt_operation(GattOperation kind, uint16_t handle, tesla_war
             // Cancellation is not expiry. Keep the original operation watch
             // running until the REAL SDK/procedure/application terminal barrier
             // drains. No slot reset, new cookie, or successor admission here.
-            if (cancelled) { return kind == Write ? TeslaBleCancellation::Defer : TeslaBleCancellation::Cancel; }
+            if (cancelled) { return kind == Write || kind == Open ? TeslaBleCancellation::Defer : TeslaBleCancellation::Cancel; }
             return !latest ? TeslaBleCancellation::Defer : TeslaBleCancellation::Proceed;
         });
     if (draining) {

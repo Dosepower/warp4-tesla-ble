@@ -38,6 +38,8 @@ public:
  bool subscribe();
  bool write(const uint8_t *,size_t);
  bool close();
+ // Retire this connection attempt, not the host. Only idle() proves drainage.
+ int cancel_open();
  bool scan_tick(uint32_t now);
  TeslaBleDiscovery discovery;
  uint16_t tx()const{return write_handle;}uint16_t rx()const{return notify_handle;}
@@ -53,7 +55,7 @@ private:
  void finish_discovery(int);
  struct Cookie {TeslaNimbleCentral *owner=nullptr;uint64_t epoch=0;};
  Cookie cookie; // immutable from successful open submission through disconnect barrier
- std::atomic<bool> synchronized{false},failed{false},busy{false},running{false},retiring{false};
+ std::atomic<bool> synchronized{false},failed{false},busy{false},running{false},retiring{false},cancelling_open{false};
  std::atomic<uint16_t> connection{0xffff};
  Handler handler=nullptr;bool initialized=false;uint8_t own_type=0;
  uint16_t service_start=0,service_end=0,write_handle=0,notify_handle=0,descriptor_end=0,cccd=0;
