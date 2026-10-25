@@ -412,7 +412,12 @@ export class TeslaVehicle extends ConfigComponent<"tesla_vehicle/profiles", {}, 
             }
             // Radio discovery belongs ONLY to this explicitly confirmed action.
             // A saved address is permission metadata, never fresh transport proof.
-            if (!API.get("tesla_vehicle/guidance")?.profiles.find(p => p.ev_index === index)?.binding_fresh) {
+            // Reserve the bounded 15s backend preparation plus request latency.
+            // Backend independently rechecks freshness at commit; after acceptance
+            // its command-owned authority spans connect/send/full approval.
+            const knownAge = this.discoveryAge();
+            const preparationFresh = !Number.isFinite(knownAge) || knownAge + 20000 < this.discovery_ttl;
+            if (!API.get("tesla_vehicle/guidance")?.profiles.find(p => p.ev_index === index)?.binding_fresh || !preparationFresh) {
                 const p = {...this.profile()}, scan_revision = API.get("tesla_vehicle/discovery")?.revision ?? 0;
                 const deadline = Date.now() + 22000;
                 await this.requestDiscovery(p);

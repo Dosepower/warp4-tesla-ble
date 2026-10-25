@@ -36,10 +36,15 @@ public:
     bool request(uint32_t now, const Scope &scope) {
         Guard guard(*this);
         if (running.load() || sealed || phase!=Phase::Idle || revision>=UINT32_MAX-2) { return false; }
-        view={};view.scope=scope;view.status=Status::Searching;view.revision=++revision;
+        authority_revision=0;view={};view.scope=scope;view.status=Status::Searching;view.revision=++revision;
         began.store(now);since=now;phase=Phase::Queued;running.store(true);return true;
     }
     bool busy() const { return running.load(); }
+    // In-flight command authority only. A new scan/quiesce/failure revokes it;
+    // ordinary TTL expiry still invalidates matches/adoption/new admission.
+    bool authority_current(uint32_t wanted) {
+        Guard guard(*this);return wanted && wanted==authority_revision && !running.load() && !sealed;
+    }
     bool overdue(uint32_t now) const {
         const auto elapsed=now-began.load();
         return running.load() && elapsed<(uint32_t{1}<<31) && elapsed>WATCHDOG_MS;
@@ -75,7 +80,7 @@ public:
     void quiesced() {
         // Called only after the host's deinit barrier; failed deinit retains
         // busy+context forever. Late GAP callbacks can never target freed state.
-        Guard guard(*this);running.store(false);view.count=0;view.truncated=false;
+        Guard guard(*this);authority_revision=0;running.store(false);view.count=0;view.truncated=false;
         for(auto &target:view.targets) { target={}; }
         if(view.status!=Status::Error) { view.status=Status::Idle; }
         phase=Phase::Idle;view.revision=++revision;
@@ -94,7 +99,7 @@ public:
         if(phase==Phase::StartQueued) { phase=Phase::Starting;since=now;scan_may_run=true;return Action::Start; }
         if(phase==Phase::Finished) {
             phase=Phase::Idle;since=now;scan_may_run=false;running.store(false);
-            view.status=Status::Complete;view.completed_at_ms=now;view.revision=++revision;return Action::None;
+            view.status=Status::Complete;view.completed_at_ms=now;view.revision=++revision;authority_revision=view.revision;return Action::None;
         }
         if(phase==Phase::Failed) {
             if(scan_may_run && !stop_sent) { stop_sent=true;since=now;phase=Phase::Stopping;return Action::Stop; }
@@ -167,7 +172,7 @@ private:
     Snapshot view;
     std::atomic<bool> running{false};
     std::atomic<uint32_t> began{0};
-    uint32_t since=0,revision=0;
+    uint32_t since=0,revision=0,authority_revision=0;
     bool sealed=false,scan_may_run=false,stop_sent=false,stop_done=false;
     void fail(const char *reason) {
         if(sealed) { return; }

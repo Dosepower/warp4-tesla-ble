@@ -13,7 +13,8 @@ struct BluetoothLifecycle::Context {
 std::atomic<BluetoothLifecycle::Context *> BluetoothLifecycle::owner{nullptr};
 BluetoothLifecycle::BluetoothLifecycle()=default;
 BluetoothLifecycle::~BluetoothLifecycle(){
- if(!context)return;context->stop=true;
+ if(!context) { return; }
+ context->stop=true;
  if((context->task&&!context->done.load(std::memory_order_acquire))||owner.load()==context.get()){context.release();return;}
  if(context->task)vTaskDelete(context->task);
 }
@@ -71,6 +72,7 @@ void BluetoothLifecycle::run(Context &c){
 bool BluetoothLifecycle::request_discovery(){return active()&&context->central.discovery.request(millis());}
 bool BluetoothLifecycle::request_discovery(const TeslaBleDiscovery::Scope &s){return active()&&context->central.discovery.request(millis(),s);}
 bool BluetoothLifecycle::discovery_matches(const TeslaBleDiscovery::Scope &s,uint32_t rev,const uint8_t *a,uint8_t t){return active()&&context->central.discovery.matches(millis(),s,rev,a,t);}
+bool BluetoothLifecycle::discovery_authority_current(uint32_t rev){return active()&&context->central.discovery.authority_current(rev);}
 bool BluetoothLifecycle::discovery_busy()const{return context&&context->central.discovery.busy();}
 bool BluetoothLifecycle::discovery_snapshot(TeslaBleDiscovery::Snapshot &s){if(!context){s={};return true;}return context->central.discovery.snapshot(s);}
 #endif

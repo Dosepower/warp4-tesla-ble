@@ -64,11 +64,14 @@ public:
         return lock && !deleting && !exhausted && command && command == pair.command &&
             (pair.phase == PairPhase::Working || pair.phase == PairPhase::Sent);
     }
-    // Pin consent to the accepted SLAC generation, including a reconnect of
-    bool pair_binding_current(uint32_t now, TeslaBleIdentity identity, uint32_t config, uint32_t binding)
+    // nullopt means no active action: ordinary live discovery is mandatory.
+    // A present false is revoked authority, never permission to fall back.
+    std::optional<bool> pair_binding_current(uint32_t now, TeslaBleIdentity identity, uint32_t config, uint32_t binding)
     {
         tesla_warp::CheckedMutex::Guard lock(mutex, true);
-        return lock && !deleting && !cleanup_pending && !exhausted && pair.command &&
+        if (!lock || deleting || cleanup_pending || exhausted) { return false; }
+        if (!pair.command || pair.phase == PairPhase::Queued) { return std::nullopt; }
+        return
             (pair.phase == PairPhase::Working || pair.phase == PairPhase::Sent) &&
             pair.vehicle == identity && binding && pair.authority_binding == binding &&
             pair.authority_config == config && now - pair.authority_started < PAIR_AUTHORITY_MS;

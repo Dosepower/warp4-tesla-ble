@@ -52,6 +52,6 @@ static void sdk_track_pending_write(){
 '''
 with tempfile.TemporaryDirectory(prefix='sdk-worker-drain-',dir=os.environ['TMPDIR'])as td:
  h=Path(td)/'real_sdk_drain.hpp';h.write_text(head+'\n'+'\n'.join(function(n)for n in names)+foot)
- env={**os.environ,'TESLA_NIMBLE_REAL_DRAIN_HEADER':str(h),'TESLA_NIMBLE_MODULE_MODES':os.environ.get('TESLA_TIMEOUT_FLOW_MODES','flow-no-approval flow-missing-ack flow-link-drop-during-write flow-delayed-acks flow-missing-terminal flow-blocked-submit flow-late-ack-no-main flow-approval-50s flow-denied-50s')}
+ env={**os.environ,'TESLA_NIMBLE_REAL_DRAIN_HEADER':str(h),'TESLA_NIMBLE_MODULE_MODES':os.environ.get('TESLA_TIMEOUT_FLOW_MODES','flow-no-approval flow-missing-ack flow-link-drop-during-write flow-delayed-acks flow-missing-terminal flow-blocked-submit flow-late-ack-no-main flow-approval-50s flow-denied-50s flow-approval-59s flow-aged-approval-59s authority-aged authority-fresh authority-rollover authority-prepare-delay authority-commit-expired followup-security-delayed followup-security-immediate followup-security-burst followup-rx-overflow followup-normal-ack')}
  subprocess.run([sys.executable,str(T/'test_nimble_module.py')]+(['sanitize']if'sanitize'in sys.argv else[]),env=env,check=True,timeout=180)
  print(json.dumps({'status':'PASS','sdk_source_sha256':hashlib.sha256(p.read_bytes()).hexdigest(),'real_function_bodies':names,'modes':env['TESLA_NIMBLE_MODULE_MODES'].split(),'boundaries':'OS, radio wire, SDK proc-list storage/connection lookup; no hardware'},sort_keys=True))

@@ -139,6 +139,7 @@ bool BluetoothLifecycle::discovery_matches(const TeslaBleDiscovery::Scope &scope
     return active() && context->discovery.matches(millis(),scope,revision,address,type);
 }
 bool BluetoothLifecycle::discovery_busy() const { return context && context->discovery.busy(); }
+bool BluetoothLifecycle::discovery_authority_current(uint32_t revision) { return active() && context->discovery.authority_current(revision); }
 bool BluetoothLifecycle::discovery_snapshot(TeslaBleDiscovery::Snapshot &out) {
     if(!context) { out={};return true; }
     return context->discovery.snapshot(out);

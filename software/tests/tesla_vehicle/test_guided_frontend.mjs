@@ -98,7 +98,7 @@ f.values['tesla_vehicle/guidance'].profiles[0].binding_fresh=false;event('tesla_
 assert.equal(button('pair').props.disabled,false,'Saved mapping opens explicit consent even after TTL/session expiry');
 f.call=async(t,p)=>{
  if(t==='tesla_vehicle/scan'){
-  f.values['tesla_vehicle/discovery']={status:'complete',busy:false,ev_index:0,result_age_ms:0,result_ttl_ms:120000,searched_vin:page.profile().vin,ev_mac:page.profile().ev_mac,generation:'7',revision:10,targets:[{...target,ble_address:'02:03:04:05:06:07',ble_address_type:0}]};event('tesla_vehicle/discovery');
+  f.values['tesla_vehicle/discovery']={status:'complete',busy:false,ev_index:0,result_age_ms:0,result_ttl_ms:120000,searched_vin:page.profile().vin,ev_mac:page.profile().ev_mac,generation:'7',revision:(f.values['tesla_vehicle/discovery'].revision??8)+2,targets:[{...target,ble_address:'02:03:04:05:06:07',ble_address_type:0}]};event('tesla_vehicle/discovery');
  }
  if(t==='tesla_vehicle/profiles_update'){
   f.values['tesla_vehicle/profiles']=structuredClone(p);event('tesla_vehicle/profiles');
@@ -113,6 +113,12 @@ assert.equal(f.calls.at(-1).payload.revision,13);
 assert.equal(f.calls.at(-1).payload.profile.ble_address,'02:03:04:05:06:07');
 assert.equal(f.calls.at(-1).payload.profile.ble_address_type,0);
 console.log('GUIDED_CONSENT_BOUND_REFRESH_PASS');
+// Still-fresh evidence must be refreshed when it cannot span preparation and
+// commit latency. This is inside the SAME explicit confirmation, never retry.
+f.values['tesla_vehicle/discovery'].result_age_ms=119000;event('tesla_vehicle/discovery');
+const agedStart=f.calls.length;
+await button('pair').props.onClick();
+assert.deepEqual(f.calls.slice(agedStart).map(c=>c.payload.phase??c.topic),['tesla_vehicle/scan','tesla_vehicle/profiles_update','prepare_pair','commit']);
 const good=structuredClone(f.values['tesla_vehicle/profiles']);
 const normal=()=>{
  f.values['tesla_vehicle/profiles']=structuredClone(good);page.state.entries=structuredClone(good.entries);page.dirty=false;

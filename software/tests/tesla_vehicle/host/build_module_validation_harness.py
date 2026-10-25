@@ -38,6 +38,7 @@ inline size_t strlcpy(char *to, const char *from, size_t size) {
 }
 enum class ConfigSource {File, API};
 using Language = int;
+inline uint32_t millis() { return 1; } // deterministic native clock boundary
 struct Config {
     StringConfig string;
     bool boolean = false;

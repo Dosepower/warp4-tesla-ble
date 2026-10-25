@@ -47,6 +47,7 @@ public:
     bool request_discovery();
     bool request_discovery(const TeslaBleDiscovery::Scope &);
     bool discovery_matches(const TeslaBleDiscovery::Scope &, uint32_t revision, const uint8_t *address, uint8_t type);
+    bool discovery_authority_current(uint32_t revision);
     bool discovery_busy() const;
     bool discovery_snapshot(TeslaBleDiscovery::Snapshot &);
 #endif

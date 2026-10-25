@@ -90,8 +90,9 @@ bool TeslaVehicle::runtime_binding_matches()
     // send + the full 60s approval window). Identity/config/profile/transport
     // remain immutable while it owns the runtime. Cancellation revokes this
     // authority immediately; no subsequent poll/retry inherits it.
-    if (r->command_outcome.pair_binding_current(millis(), *identity,
-            tesla->config_revision, r->binding_revision)) { return true; }
+    const auto authority = r->command_outcome.pair_binding_current(millis(), *identity,
+            tesla->config_revision, r->binding_revision);
+    if (authority) { return *authority && bluetooth.discovery_authority_current(r->binding_revision); }
     // Stored authorization reuses the key, never an expired radio discovery.
     TeslaBleDiscovery::Scope scope;scope.index=r->configured_ev_index;scope.mac=r->profile_mac;
     scope.generation=identity->generation;

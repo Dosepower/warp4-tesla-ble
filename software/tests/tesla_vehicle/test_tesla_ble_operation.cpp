@@ -55,4 +55,22 @@ int main()
     assert(stalled.retired());
     resume.set_value();
     worker.join();
+    assert(stalled.cause() == TeslaBleOperation::Cause::Deadline);
+    assert(stalled.elapsed_ms(90000) == TeslaBleOperation::TIMEOUT_MS + 1);
+    assert(stalled.kind() == 4 && stalled.generation() == 1);
+    // Deterministic cancellation-first interleaving: a later supervisor cannot
+    // relabel the earlier terminal or report the time it happened to observe it.
+    assert(cancelled.supervise(20000));
+    assert(cancelled.cause() == TeslaBleOperation::Cause::Cancelled);
+    assert(cancelled.elapsed_ms(20000) == 3 && cancelled.kind() == 3);
+    // A delayed supervisor clock sample cannot retire a newly armed successor.
+    TeslaBleOperation successor;
+    clock = 100;
+    assert(successor.run(7, 2, 6, now, [&] {successor.complete(7, 2, 6, true);return true;}, pause, no_cancel));
+    clock = 200;
+    assert(successor.run(8, 2, 7, now, [&] {
+        assert(!successor.supervise(100));
+        successor.complete(8, 2, 7, true);return true;
+    }, pause, no_cancel));
+    assert(!successor.retired() && successor.generation() == 2 && successor.kind() == 8);
 }

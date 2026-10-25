@@ -6,6 +6,10 @@
 #include "tesla_ble_uuid.h"
 #endif
 #include "tesla_ble_iram_diagnostics.h"
+#if TESLA_BLE_USE_NIMBLE && !defined(TESLA_BLE_MODULE_HOST_TEST) && !defined(TESLA_BLE_GATT_HOST_TEST)
+#include "event_log_prefix.h"
+#include "generated/module_dependencies.h"
+#endif
 
 std::atomic<TeslaVehicle *> TeslaVehicle::gatt_owner{nullptr};
 

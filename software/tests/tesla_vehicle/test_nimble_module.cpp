@@ -195,7 +195,7 @@ struct TeslaBleModuleTest {
   TeslaBleStorageAdapter store;assert(store.select_profile(0,A));assert(tesla_clean::KeyStorage::committed(store.save_transaction("private_key",pem,n)));
   assert(tesla_clean::KeyStorage::committed(store.save_transaction("vehicle_vin",reinterpret_cast<const uint8_t *>("5YJ3E1EA7KF000001"),17)));
   const auto retained=LittleFS.files.at("/config/tesla_p00_112233445500_private_key");
-  HostNimbleDriver driver(m.bluetooth,TeslaVehicle::gatt_callback);ev.index=0;ev.mac=A;explicit_scan(m,0);String error;assert(m.select_profile(0,false,error));auto*r=m.tesla->runtime_owner.get();
+  HostNimbleDriver driver(m.bluetooth,TeslaVehicle::gatt_callback);ev.index=0;ev.mac=A;explicit_scan(m,0);if(mode=="flow-aged-approval-59s"){TeslaBleDiscovery::Snapshot snap;assert(m.bluetooth.discovery_snapshot(snap));clock_ms.store(snap.completed_at_ms+119000);}String error;assert(m.select_profile(0,false,error));auto*r=m.tesla->runtime_owner.get();
   bool submitted=false,complete=false,finished=false,missing=false;uint32_t pair_at=0,ack_at=0;unsigned main_ticks=0,frames=0;std::vector<uint8_t> wire;
   WriteFn delayed_ack=nullptr;void*delayed_arg=nullptr;uint16_t delayed_handle=0;bool late_received=false;
   const bool quarantine=mode=="flow-missing-terminal"||mode=="flow-blocked-submit"||mode=="flow-late-ack-no-main";
@@ -204,7 +204,7 @@ struct TeslaBleModuleTest {
    wire.insert(wire.end(),p,p+count);
    if(wire.size()<2||wire.size()!=size_t(wire[0])*256+wire[1]+2)return;
    ++frames;Frame f;f.length=wire.size()-2;memcpy(f.data.data(),wire.data()+2,f.length);wire.clear();
-   if((mode=="flow-approval-50s"||mode=="flow-denied-50s")&&complete&&millis()-pair_at>=50000){
+   if(((mode=="flow-approval-50s"||mode=="flow-approval-59s"||mode=="flow-aged-approval-59s")||mode=="flow-denied-50s")&&complete&&millis()-pair_at>=(mode.find("59s")!=std::string::npos?59000U:50000U)){
     peer.address=r->routing_address;const auto sent=decode(f);
     if(sent.hello)replies.push_back(peer.hello(sent,mode=="flow-denied-50s"));
     else if(!sent.pair){replies.push_back(peer.response(sent,{awake,sizeof(awake)},++status_counter,0,true));replies.push_back(peer.response(sent,{awake,sizeof(awake)},status_counter));}
@@ -263,15 +263,15 @@ struct TeslaBleModuleTest {
     std::printf("APPROVAL_FLOW premature_stop after_pair_ms=%u missing_ack=%d frames=%u main_ticks=%u error=%s\n",millis()-pair_at,missing,frames,main_ticks,m.tesla->state.get("last_error")->asString().c_str());std::fflush(stdout);
     assert(!r->stop_requested.load() && "normal no-approval/nonresponsive peer must drain link, not permanently quarantine Bluetooth");
    }
-   if(mode=="flow-approval-50s"&&r->authorized.load()){
+   if((mode=="flow-approval-50s"||mode=="flow-approval-59s"||mode=="flow-aged-approval-59s")&&r->authorized.load()){
     assert(invalid_seen&&millis()-pair_at>=50000&&millis()-pair_at<60000);
     m.loop();assert(m.tesla->state.get("paired")->asBool()&&ev.applied==0&&!m.tesla->runtime_owner.restart_required());
     assert(LittleFS.files.at("/config/tesla_p00_112233445500_private_key")==retained);
     finished=true;r->stop_requested=true;return;
    }
    if(!r->pair_verifying && !r->pair_sending && !r->pair_status_active && !m.tesla->state.get("pairing_pending")->asBool()){
-    if(mode=="flow-approval-50s")std::fprintf(stderr,"AUTH_FLOW frames=%u status=%u invalid=%d replies=%zu elapsed=%u error=%s\n",frames,status_counter,invalid_seen,replies.size(),millis()-pair_at,m.tesla->state.get("last_error")->asString().c_str());
-    assert(mode!="flow-approval-50s" && "valid late authenticated response must complete pairing");
+    if((mode=="flow-approval-50s"||mode=="flow-approval-59s"||mode=="flow-aged-approval-59s"))std::fprintf(stderr,"AUTH_FLOW frames=%u status=%u invalid=%d replies=%zu elapsed=%u error=%s\n",frames,status_counter,invalid_seen,replies.size(),millis()-pair_at,m.tesla->state.get("last_error")->asString().c_str());
+    assert(!(mode=="flow-approval-50s"||mode=="flow-approval-59s"||mode=="flow-aged-approval-59s") && "valid late authenticated response must complete pairing");
     assert(millis()-pair_at<=61000 && !r->authorized.load() && !m.tesla->state.get("paired")->asBool());assert(!r->operation.retired() && !m.tesla->runtime_owner.restart_required() && m.bluetooth.active());
     assert(LittleFS.files.at("/config/tesla_p00_112233445500_private_key")==retained && !LittleFS.files.count("/config/tesla_p00_112233445500_authorized") && ev.applied==0);
     if(mode=="flow-no-approval")assert(millis()-pair_at>=60000 && frames>3);
@@ -285,6 +285,7 @@ struct TeslaBleModuleTest {
   m.loop();if(r->teardown_handle)run_task(r->teardown_handle);m.loop();test_submit={};std::puts("APPROVAL_FLOW PASS actual worker/main/queues/adapter/crypto full bounded no-approval flow; key retained, no false pairing/SoC");
  }
  #include "host/repeated_pair_contracts.inc"
+ #include "host/pair_authority_contracts.inc"
  #include "host/browser_bridge_contracts.inc"
  static void run(const std::string &mode) {
   if(mode=="quiesce-retains") {
@@ -395,6 +396,7 @@ struct TeslaBleModuleTest {
    std::puts("IDLE_ENABLED PASS active Bluetooth with two stored Tesla profiles: no Tesla runtime/worker/queues/protocol, no scan/connection/storage changes");return;
   }
   if(mode=="browser-bridge"){browser_bridge(m);return;}
+  if(mode.rfind("authority-",0)==0){authority_flow(m,mode);return;}
   if(mode=="flow-repeat"||mode=="flow-repeat-cleanup"){repeated_flow(m,mode=="flow-repeat-cleanup");return;}
 #ifdef TESLA_NIMBLE_REAL_DRAIN_HEADER
   if(mode.rfind("followup-",0)==0){followup_flow(m,mode);return;}

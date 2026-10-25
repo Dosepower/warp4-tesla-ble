@@ -41,7 +41,7 @@ bool TeslaVehicle::gatt_operation(GattOperation kind, uint16_t handle, tesla_war
                 const auto event = r->transport_cancel_event.exchange(0);
 #ifndef TESLA_BLE_MODULE_HOST_TEST
                 logger.printfln("BLE drain: epoch=%u attempt=%u opgen=%u stage=%u reason=%u elapsed=%u",
-                    unsigned(r->epoch), unsigned(r->pair_command), slot.generation(), unsigned(kind),
+                    unsigned(r->epoch), unsigned(r->pair_command), unsigned(slot.generation()), unsigned(kind),
                     unsigned((event >> 32) == slot.generation() ? event & 0xff : cancelled ? 3 : 4), unsigned(millis() - started));
 #else
                 (void)event;
@@ -59,7 +59,7 @@ bool TeslaVehicle::gatt_operation(GattOperation kind, uint16_t handle, tesla_war
                 drained = c && c->idle();
 #ifndef TESLA_BLE_MODULE_HOST_TEST
                 logger.printfln("BLE drain end: epoch=%u attempt=%u opgen=%u drained=%u elapsed=%u",
-                    unsigned(r->epoch), unsigned(r->pair_command), slot.generation(), unsigned(drained), unsigned(millis() - started));
+                    unsigned(r->epoch), unsigned(r->pair_command), unsigned(slot.generation()), unsigned(drained), unsigned(millis() - started));
 #endif
                 if (drained) {
                     r->link_open.store(false);
