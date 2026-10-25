@@ -225,7 +225,8 @@ struct TeslaBleModuleTest {
         auto *r=module.tesla->runtime_owner.get(); uint8_t byte=0;
         esp_ble_gattc_cb_param_t p; p.notify.conn_id=4; p.notify.handle=20;
         std::memcpy(p.notify.remote_bda,r->remote_address,6); p.notify.value=&byte; p.notify.value_len=1;
-        for (unsigned i=0;i<9;++i) { TeslaVehicle::gatt_callback(ESP_GATTC_NOTIFY_EVT,1,&p); }
+        // Fill the bounded RX queue without any worker service, then overflow once.
+        for (unsigned i=0;i<TeslaVehicle::RX_QUEUE_DEPTH+1;++i) { TeslaVehicle::gatt_callback(ESP_GATTC_NOTIFY_EVT,1,&p); }
         module.process_disconnect();
         assert(closes==1 && !r->link_open.load() && !r->vehicle->connected());
     }
@@ -253,11 +254,10 @@ struct TeslaBleModuleTest {
         // Deliver the rest via the real module RX queue, preserving callback RX.
         auto hello=peer.hello(last()); std::vector<uint8_t> rest{uint8_t(hello.length)};
         rest.insert(rest.end(),hello.data.begin(),hello.data.begin()+hello.length);
-        TeslaVehicle::RxFragment chunk; chunk.connection_generation=r->connection_generation.load();
-        chunk.length=rest.size(); std::memcpy(chunk.data,rest.data(),rest.size());
-        assert(xQueueSend(r->queues.rx(),&chunk,0)==pdTRUE); module.process_rx(); tick();
+        // Production producer path: one notification is split into queue chunks.
+        assert(TeslaVehicle::enqueue_rx(r->queues.rx(),r->connection_generation.load(),rest.data(),rest.size())); module.process_rx(); tick();
         inject(peer.response(last(),{awake,sizeof(awake)})); assert(fresh==1);
-        chunk.connection_generation=old_generation; assert(xQueueSend(r->queues.rx(),&chunk,0)==pdTRUE);
+        assert(TeslaVehicle::enqueue_rx(r->queues.rx(),old_generation,rest.data(),rest.size()));
         module.process_rx(); assert(fresh==1);
     }
     void teardown() {
@@ -355,9 +355,7 @@ struct TeslaBleModuleTest {
         TeslaVehicle::RxFragment fragment; fragment.connection_generation=r->connection_generation.load()-(uint64_t{1}<<32);
         fragment.length=1; fragment.data[0]=255;
         assert(xQueueSend(r->queues.rx(),&fragment,0)==pdTRUE); module.process_rx(); module.process_disconnect();
-        fragment.connection_generation=r->connection_generation.load(); fragment.length=fresh_wire.size()-1;
-        std::memcpy(fragment.data,fresh_wire.data()+1,fragment.length);
-        assert(xQueueSend(r->queues.rx(),&fragment,0)==pdTRUE); module.process_rx(); tick();
+        assert(TeslaVehicle::enqueue_rx(r->queues.rx(),r->connection_generation.load(),fresh_wire.data()+1,fresh_wire.size()-1)); module.process_rx(); tick();
         inject(previous); assert(!success);
         inject(peer.response(last(),{awake,sizeof(awake)},100)); tick();
         if(domain==Domain::Infotainment) { inject(peer.hello(last())); tick(); inject(peer.response(last(),{soc_bytes(),sizeof(controller_fixture::soc)},100)); }

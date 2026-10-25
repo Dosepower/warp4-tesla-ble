@@ -173,6 +173,7 @@ inline int xQueueReceive(QueueHandle_t q, void *value, int wait) {
     if (q->data.empty()) { return 0; } std::memcpy(value, q->data.front().data(), q->size); q->data.pop_front(); return pdTRUE;
 }
 inline void xQueueReset(QueueHandle_t q) { std::lock_guard<std::mutex> lock(q->mutex); q->data.clear(); }
+inline size_t uxQueueSpacesAvailable(QueueHandle_t q) { std::lock_guard<std::mutex> lock(q->mutex); return q->capacity - q->data.size(); }
 struct HostTask { void (*entry)(void *); void *context; std::atomic<bool> parked{false}, deleted{false}; std::string name; int stack_bytes; };
 using TaskHandle_t = HostTask *;
 inline std::vector<std::unique_ptr<HostTask>> tasks;

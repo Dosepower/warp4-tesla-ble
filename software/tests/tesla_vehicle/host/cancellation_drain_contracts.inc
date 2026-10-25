@@ -27,8 +27,9 @@ static void followup_flow(TeslaVehicle &m,const std::string &mode) {
    injected=true;event_elapsed=millis()-write_at;
    assert(event_elapsed==180 && !r->operation.retired());
    if(mode=="followup-rx-overflow"){
-    // Real adapter callback fills the bounded production RX queue, then rejects the ninth notification.
-    for(unsigned i=0;i<9;++i){os_mbuf mb;mb.bytes={0,1};ble_gap_event e{};e.type=BLE_GAP_EVENT_NOTIFY_RX;e.notify_rx.conn_handle=4;e.notify_rx.attr_handle=20;e.notify_rx.om=&mb;test_gap(&e,test_gap_arg);}
+    // Real adapter callback fills the bounded production RX queue within one
+    // yield (no worker service possible), then rejects the next notification.
+    for(unsigned i=0;i<TeslaVehicle::RX_QUEUE_DEPTH+1;++i){os_mbuf mb;mb.bytes={0,1};ble_gap_event e{};e.type=BLE_GAP_EVENT_NOTIFY_RX;e.notify_rx.conn_handle=4;e.notify_rx.attr_handle=20;e.notify_rx.om=&mb;test_gap(&e,test_gap_arg);}
    } else if(mode=="followup-normal-ack"){
     // Drain tracked proc via its actual callback, with success status, then free it.
     auto*p=pending_sdk_write;assert(p);pending_sdk_write=nullptr;ble_gattc_write_cb(p,0,0);ble_gattc_proc_free(p);nimble_before_disconnect={};

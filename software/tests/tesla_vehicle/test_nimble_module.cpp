@@ -291,6 +291,7 @@ struct TeslaBleModuleTest {
  #include "host/connect_repeat_contracts.inc"
  #include "host/browser_bridge_contracts.inc"
  #include "host/pair_response_contracts.inc"
+#include "host/rx_burst_contracts.inc"
  static void run(const std::string &mode) {
   if(mode=="quiesce-error-delayed") {
    BluetoothLifecycle bt;controller_status=test_status=0;async_bluetooth=true;std::thread host;
@@ -414,6 +415,7 @@ struct TeslaBleModuleTest {
   }
   if(mode.rfind("connect-repeat",0)==0){connect_flow(m,mode);return;}
   if(mode=="pair-response"){pair_response_flow(m);return;}
+  if(mode.rfind("rx-",0)==0){rx_burst_flow(m,mode);return;}
   if(mode=="browser-bridge"){browser_bridge(m);return;}
   if(mode.rfind("authority-",0)==0){authority_flow(m,mode);return;}
   if(mode=="flow-repeat"||mode=="flow-repeat-cleanup"){repeated_flow(m,mode=="flow-repeat-cleanup");return;}

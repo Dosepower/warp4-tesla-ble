@@ -77,11 +77,12 @@ class Vehicle {
     std::array<Deferred,4> deferred_{};
     size_t deferred_count_=0;
     bool deferred_overflow_=false;
+    uint32_t deferred_overflows_=0; // Nonsecret diagnostic count only.
     // PRESENT_KEY has no request UUID. Only one explicitly sent request on
     // this physical generation may observe its unauthenticated status. Never
     // use this observation as session/key authorization.
     uint64_t pair_context_=0;
-    uint32_t pair_started_=0;
+    uint32_t pair_started_=0,pair_tx_started_=0;
     bool pair_reply_pending_=false,pair_reply_terminal_=false;
     VcsecStatus pair_reply_;
     Channel &channel(Domain d) { return d==Domain::Vcsec?vcsec_:info_; }
@@ -108,6 +109,12 @@ public:
     bool connected() const { return connected_; }
     uint64_t generation() const { return generation_; }
     size_t queued() const { return count_; }
+    // True only while one accepted frame transmission owns the link. Received
+    // complete frames are then deferred (never dispatched) until drain(tx), so a
+    // worker may feed receive() from inside its own WRITE wait without
+    // re-entering protocol processing or starting nested GATT work.
+    bool transmitting() const { return connected_ && transmission_!=0; }
+    uint32_t deferred_overflows() const { return deferred_overflows_; }
     uint32_t high_water(Domain d) const { return d==Domain::Vcsec?vcsec_.high_water:info_.high_water; }
     // An intentionally empty completion is optional. Callers preparing a callback
     // must check assign's result separately; absence is not an allocation-error marker.

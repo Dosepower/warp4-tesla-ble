@@ -215,7 +215,7 @@ void Vehicle::tick()
             const bool accepted=transmit({pair.bytes.data(),pair.length},tx);
             if(serial_!=tx.serial) { return; }
             if(accepted) {
-                pair_context_=c.context; pair_started_=ports_.now(ports_.context);
+                pair_context_=c.context; pair_started_=ports_.now(ports_.context); pair_tx_started_=tx.started;
                 pair_reply_pending_=pair_reply_terminal_=false;
                 drain(tx); // Includes notifications synchronously deferred during accepted TX.
                 if(serial_==tx.serial) { finish(VehicleResultCode::PairRequestSent); }
@@ -230,7 +230,10 @@ void Vehicle::emitted(void *p,const Frame &incoming)
 {
     auto &v=*static_cast<Vehicle *>(p); const uint32_t now=v.ports_.now(v.ports_.context);
     if(v.transmission_) {
-        if(v.deferred_count_==v.deferred_.size()) { v.deferred_overflow_=true; return; }
+        if(v.deferred_count_==v.deferred_.size()) {
+            if(!v.deferred_overflow_ && v.deferred_overflows_!=UINT32_MAX) { ++v.deferred_overflows_; }
+            v.deferred_overflow_=true; return;
+        }
         v.deferred_[v.deferred_count_++]={incoming,now}; return;
     }
     v.frame(incoming,now);
@@ -244,7 +247,10 @@ void Vehicle::frame(const Frame &incoming,uint32_t now)
 {
     if(exhausted() || !connected_) { return; }
     VcsecStatus observed;
-    if(pair_context_ && now-pair_started_<60000 && ports_.owns(ports_.context,generation_) &&
+    // Window [PRESENT_KEY TX start, acceptance + 60s): a reply deferred while the
+    // final request fragment awaited its ATT response carries a receive time
+    // before acceptance and must not underflow out of the window.
+    if(pair_context_ && now-pair_tx_started_<(pair_started_-pair_tx_started_)+60000u && ports_.owns(ports_.context,generation_) &&
        decode_pairing_reply({incoming.data.data(),incoming.length},{address_.data(),16},observed)) {
         // First terminal wins, including when multiple frames arrive in one RX
         // batch. A late WAIT must not hide a specific refusal.

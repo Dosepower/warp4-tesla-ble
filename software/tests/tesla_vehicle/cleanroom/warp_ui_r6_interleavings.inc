@@ -8,7 +8,7 @@ void ui_r6_command(const char *name) {
 void ui_r6_notify(const Frame &frame) {
  auto *r=module.tesla->runtime_owner.get();std::vector<uint8_t> bytes{uint8_t(frame.length>>8),uint8_t(frame.length)};
  bytes.insert(bytes.end(),frame.data.begin(),frame.data.begin()+frame.length);
- assert(bytes.size()<=sizeof(TeslaVehicle::RxFragment::data));
+ assert(bytes.size()<=TeslaVehicle::RX_NOTIFICATION_MAX);
  esp_ble_gattc_cb_param_t p;p.notify.conn_id=4;p.notify.handle=20;
  std::memcpy(p.notify.remote_bda,r->remote_address,6);p.notify.value=bytes.data();p.notify.value_len=bytes.size();
  TeslaVehicle::gatt_callback(ESP_GATTC_NOTIFY_EVT,1,&p);

@@ -13,9 +13,12 @@ for path in sorted(module.glob('*')):
     text=path.read_text()
     observed.update(re.findall(r'\bvehicle\s*->\s*([A-Za-z_]\w*)\s*\(',text))
     assert not re.search(r'\b(?:charge_start|start_charging|ChargingStartStopAction|chargingStartStopAction)\b',text), path
-# Exhaustion is a read-only local diagnostic, not a new vehicle operation.
-assert 'bool exhausted() const' in (ROOT/'software/lib/TeslaBLEClean/include/tesla_clean/vehicle.hpp').read_text()
-assert observed-{'exhausted'}==allowed and 'exhausted' in observed, (observed,allowed)
+# Exhaustion, the active-TX state used to gate worker RX service, and the
+# deferred-overflow count are read-only local diagnostics, not vehicle operations.
+header=(ROOT/'software/lib/TeslaBLEClean/include/tesla_clean/vehicle.hpp').read_text()
+readonly={'exhausted','transmitting','deferred_overflows'}
+for accessor in ('bool exhausted() const','bool transmitting() const','uint32_t deferred_overflows() const'):assert accessor in header, accessor
+assert observed-readonly==allowed and {'exhausted','transmitting'}<=observed, (observed,allowed)
 code=(module/'tesla_vehicle.cpp').read_text()
 assert re.search(r'charge_state_poll\(decision.allow_wake\s*\?\s*tesla_clean::WakePolicy::WakeIfNeeded\s*:\s*tesla_clean::WakePolicy::NoWakeSkip',code)
 # Phase 2 binding must never resolve a retained legacy header or namespace.

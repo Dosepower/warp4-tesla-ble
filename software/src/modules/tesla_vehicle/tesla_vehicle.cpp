@@ -745,8 +745,9 @@ bool TeslaVehicle::start_runtime(bool storage_only)
         bool rx = true;
         if (!r->queues.create([&rx]() {
                 const size_t size = rx ? sizeof(RxFragment) : sizeof(ModuleEvent);
+                const size_t depth = rx ? RX_QUEUE_DEPTH : 8;
                 rx = false;
-                return xQueueCreate(8, size);
+                return xQueueCreate(depth, size);
             })) {
             publish_error("Failed to allocate BLE queues");
             return nullptr;
@@ -1478,16 +1479,70 @@ void TeslaVehicle::publish_pairing_state()
 }
 
 
-void TeslaVehicle::process_rx()
+bool TeslaVehicle::enqueue_rx(QueueHandle_t queue, uint64_t generation, const uint8_t *data, size_t size, uint32_t *peak)
 {
+    // Single producer (BLE host callback). Free space can only grow until these
+    // sends finish, so the up-front check makes one notification all-or-nothing.
+    // A refusal still invalidates the session at the caller: dropping any byte
+    // corrupts the framed stream. Never blocks the host task.
+    const size_t chunks = (size + RX_CHUNK_BYTES - 1) / RX_CHUNK_BYTES;
+    if (!queue || !data || !size || size > RX_NOTIFICATION_MAX || uxQueueSpacesAvailable(queue) < chunks) { return false; }
+    for (size_t offset = 0; offset < size; offset += RX_CHUNK_BYTES) {
+        RxFragment fragment;
+        fragment.connection_generation = generation;
+        fragment.length = static_cast<uint16_t>(std::min(RX_CHUNK_BYTES, size - offset));
+        memcpy(fragment.data, data + offset, fragment.length);
+        if (xQueueSend(queue, &fragment, 0) != pdTRUE) { return false; }
+    }
+    if (peak) {
+        const uint32_t used = static_cast<uint32_t>(RX_QUEUE_DEPTH - uxQueueSpacesAvailable(queue));
+        if (used > *peak) { *peak = used; }
+    }
+    return true;
+}
+
+size_t TeslaVehicle::drain_rx()
+{
+    // Worker-only. Same filters for the ordinary loop and WRITE-wait service.
     Runtime *r = tesla->runtime_owner.get();
+    if (r->rx_dispatching) { return 0; } // never nest inside a dispatching drain
+    r->rx_dispatching = true;
     RxFragment fragment;
-    for (size_t batch = 0; batch < 8 && xQueueReceive(r->queues.rx(), &fragment, 0) == pdTRUE; ++batch) {
+    size_t consumed = 0;
+    for (size_t batch = 0; batch < RX_QUEUE_DEPTH && xQueueReceive(r->queues.rx(), &fragment, 0) == pdTRUE; ++batch) {
+        ++consumed;
         if (r->stop_requested.load() || fragment.connection_generation != r->connection_generation.load()) {
             continue;
         }
         r->vehicle->receive({fragment.data, fragment.length}, fragment.connection_generation);
     }
+    r->rx_dispatching = false;
+    return consumed;
+}
+
+void TeslaVehicle::service_rx_during_write(uint64_t generation, const TeslaBleIdentity &identity)
+{
+    // Worker task only, inside gatt_operation's WRITE wait. Admitted ONLY while
+    // the protocol Vehicle owns an accepted frame transmission: every complete
+    // received frame is then deferred (Vehicle::emitted) and dispatched after
+    // the TX by drain(tx). No protocol decision, completion, GATT submission or
+    // operation-slot mutation can run here, and no nested drain (rx_dispatching).
+    // Same stop/generation/identity policy as submission and process_rx.
+    Runtime *r = tesla->runtime_owner.get();
+    if (!r->vehicle || !r->vehicle->transmitting() || r->rx_dispatching || r->stop_requested.load() ||
+        !r->connected.load() || r->connection_generation.load() != generation) { return; }
+    const auto latest = r->session.identity();
+    if (!latest || *latest != identity) { return; }
+#if TESLA_BLE_MANUAL_VEHICLE_UI
+    if (!active_identity_matches(identity) || !runtime_binding_matches()) { return; }
+#endif
+    const size_t consumed = drain_rx();
+    r->rx_write_serviced = consumed > UINT32_MAX - r->rx_write_serviced ? UINT32_MAX : r->rx_write_serviced + uint32_t(consumed);
+}
+
+void TeslaVehicle::process_rx()
+{
+    drain_rx();
     check_worker_exhaustion();
 }
 

@@ -47,9 +47,11 @@ bool TeslaVehicle::gatt_operation(GattOperation kind, uint16_t handle, tesla_war
         return submit();
     };
     const bool ok = slot.run(kind, connection, handle, []() { return millis(); }, gated_submit,
-        [r, kind, connection]() {
+        [this, r, kind, connection, generation, identity]() {
             if (kind == Discover && r->discovery_ready.load()) { r->operation.complete(kind, connection, 0, true); }
             vTaskDelay(pdMS_TO_TICKS(10));
+            // Same worker-owned RX service as the NimBLE adapter (see tesla_vehicle.cpp).
+            if (kind == Write) { service_rx_during_write(generation, *identity); }
         }, [this, r, identity, generation, kind]() {
 #if TESLA_BLE_MANUAL_VEHICLE_UI
             if (kind != Close && !active_identity_matches(*identity)) { return TeslaBleCancellation::Cancel; }
@@ -332,13 +334,14 @@ void TeslaVehicle::gatt_callback(esp_gattc_cb_event_t event, esp_gatt_if_t inter
     case ESP_GATTC_NOTIFY_EVT:
         if (!r->connected.load() || param->notify.conn_id != connection ||
             param->notify.handle != r->notify_handle.load() || memcmp(param->notify.remote_bda, r->remote_address, 6) != 0 ||
-            !param->notify.value || !param->notify.value_len || param->notify.value_len > sizeof(RxFragment::data)) { return; }
+            !param->notify.value || !param->notify.value_len || param->notify.value_len > RX_NOTIFICATION_MAX) { return; }
         {
-            RxFragment fragment;
-            fragment.connection_generation = r->physical_generation.load();
-            fragment.length = param->notify.value_len;
-            memcpy(fragment.data, param->notify.value, fragment.length);
-            if (xQueueSend(r->queues.rx(), &fragment, 0) != pdTRUE) {
+            uint32_t peak = r->rx_peak.load();
+            const bool queued = enqueue_rx(r->queues.rx(), r->physical_generation.load(), param->notify.value, param->notify.value_len, &peak);
+            if (peak > r->rx_peak.load()) { r->rx_peak.store(peak); }
+            if (!queued) {
+                const auto overflows = r->rx_overflows.load();
+                if (overflows != UINT32_MAX) { r->rx_overflows.store(overflows + 1); }
                 r->command_outcome.begin_cleanup();
                 // Dropping any fragment corrupts framing; retire on the worker.
                 r->connected.store(false);

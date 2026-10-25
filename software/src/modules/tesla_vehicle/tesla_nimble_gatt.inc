@@ -12,6 +12,9 @@ void TeslaVehicle::process_disconnect()
 
 bool TeslaVehicle::gatt_operation(GattOperation kind, uint16_t handle, tesla_warp::FunctionRef<bool()> submit)
 {
+#ifdef CONFIG_BT_NIMBLE_ATT_PREFERRED_MTU
+    static_assert(CONFIG_BT_NIMBLE_ATT_PREFERRED_MTU - 3 <= RX_NOTIFICATION_MAX, "largest negotiated notification is admitted");
+#endif
     Runtime *r = tesla->runtime_owner.get();
     const auto identity = r->session.identity();
     if (!identity) { return false; } // No submission against unavailable identity.
@@ -35,14 +38,16 @@ bool TeslaVehicle::gatt_operation(GattOperation kind, uint16_t handle, tesla_war
     const auto started = millis();
     bool draining = false, drained = false, cancelled = false;
     const bool ok = slot.run(kind, connection, handle, []() { return millis(); }, gated_submit,
-        [this, r, kind, connection, handle, started, &slot, &draining, &drained, &cancelled]() {
+        [this, r, kind, connection, handle, started, generation, identity, &slot, &draining, &drained, &cancelled]() {
             if (kind == Discover && r->discovery_ready.load()) { r->operation.complete(kind, connection, 0, true); }
             if ((kind == Write || kind == Open) && (cancelled || millis() - started >= 7000)) {
                 const auto event = r->transport_cancel_event.exchange(0);
 #ifndef TESLA_BLE_MODULE_HOST_TEST
-                logger.printfln("BLE drain: epoch=%u attempt=%u opgen=%u stage=%u reason=%u elapsed=%u",
+                logger.printfln("BLE drain: epoch=%u attempt=%u opgen=%u stage=%u reason=%u elapsed=%u rxpeak=%u rxof=%u rxsvc=%u defof=%u",
                     unsigned(r->epoch), unsigned(r->pair_command), unsigned(slot.generation()), unsigned(kind),
-                    unsigned((event >> 32) == slot.generation() ? event & 0xff : cancelled ? 3 : 4), unsigned(millis() - started));
+                    unsigned((event >> 32) == slot.generation() ? event & 0xff : cancelled ? 3 : 4), unsigned(millis() - started),
+                    unsigned(r->rx_peak.load()), unsigned(r->rx_overflows.load()), unsigned(r->rx_write_serviced),
+                    unsigned(r->vehicle ? r->vehicle->deferred_overflows() : 0));
 #else
                 (void)event;
 #endif
@@ -71,6 +76,9 @@ bool TeslaVehicle::gatt_operation(GattOperation kind, uint16_t handle, tesla_war
                 }
             }
             vTaskDelay(pdMS_TO_TICKS(10));
+            // The worker owns RX while its own framed TX waits for the ATT
+            // response; without this the queue is unserved for the whole WRITE.
+            if (kind == Write && !draining && !cancelled) { service_rx_during_write(generation, *identity); }
         }, [this, r, identity, generation, kind, connection, handle, &slot, &cancelled]() {
             // A completed SDK DISCONNECT has already drained the old procedure
             // and our terminal handler. Fail the write without poisoning a
@@ -241,8 +249,10 @@ void TeslaVehicle::gatt_callback(const TeslaNimbleEvent &e)
   r->command_outcome.begin_cleanup();const auto generation=r->session.disconnect();r->connected=false;r->link_open=false;r->notify_handle=0;r->advance_connection();r->pending_disconnect.store(generation);owner->post_event(EventType::Disconnected);return;
  }
  if(e.kind==TeslaNimbleEvent::Rx){
-  if(!r->connected.load()||!r->link_open.load()||e.handle!=r->notify_handle.load()||!e.data||!e.size||e.size>sizeof(RxFragment::data))return;
-  RxFragment fragment;fragment.connection_generation=e.epoch;fragment.length=e.size;memcpy(fragment.data,e.data,e.size);
-  if(xQueueSend(r->queues.rx(),&fragment,0)!=pdTRUE){r->transport_cancel_event.store((uint64_t{r->operation.generation()} << 32) | 2);r->command_outcome.begin_cleanup();r->connected=false;r->pending_disconnect.store(r->session.disconnect());r->advance_connection();}
+  if(!r->connected.load()||!r->link_open.load()||e.handle!=r->notify_handle.load()||!e.data||!e.size||e.size>RX_NOTIFICATION_MAX)return;
+  uint32_t peak=r->rx_peak.load();
+  const bool queued=enqueue_rx(r->queues.rx(),e.epoch,e.data,e.size,&peak);
+  if(peak>r->rx_peak.load())r->rx_peak.store(peak); // host task is the only writer while connected
+  if(!queued){const auto overflows=r->rx_overflows.load();if(overflows!=UINT32_MAX)r->rx_overflows.store(overflows+1);r->transport_cancel_event.store((uint64_t{r->operation.generation()} << 32) | 2);r->command_outcome.begin_cleanup();r->connected=false;r->pending_disconnect.store(r->session.disconnect());r->advance_connection();}
  }
 }

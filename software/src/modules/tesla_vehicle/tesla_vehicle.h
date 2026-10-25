@@ -78,11 +78,26 @@ private:
         char message[96] = {};
     };
 
+    // RX transport queue element: one fixed chunk of a notification byte stream.
+    // Framing is stream based (FrameReceiver), so splitting a notification into
+    // ordered chunks of the same connection generation is semantically neutral.
+    // Bounded intake: 64 chunks hold one maximum framed message (1024+2 bytes)
+    // delivered as default-MTU notifications (52 x 20 bytes) plus headroom, in
+    // 64 x 32 = 2048 bytes (previously 8 x 528 = 4224 bytes for 8 notifications).
+    static constexpr size_t RX_CHUNK_BYTES = 22;
+    static constexpr size_t RX_QUEUE_DEPTH = 64;
+    static constexpr size_t RX_NOTIFICATION_MAX = 512; // ATT attribute maximum; unchanged admission bound.
     struct RxFragment {
         uint64_t connection_generation = 0;
         uint16_t length = 0;
-        uint8_t data[512] = {};
+        uint8_t data[RX_CHUNK_BYTES] = {};
     };
+    static_assert(sizeof(RxFragment) == 32, "RX queue element budget");
+    static_assert(RX_QUEUE_DEPTH * 20 >= 1024 + 2, "one maximum framed message at default ATT MTU");
+    // Producer side (BLE host callback only): all chunks of one notification or none.
+    static bool enqueue_rx(QueueHandle_t queue, uint64_t generation, const uint8_t *data, size_t size, uint32_t *peak = nullptr);
+    size_t drain_rx();
+    void service_rx_during_write(uint64_t generation, const TeslaBleIdentity &identity);
 
     static void task_entry(void *context);
     void task_loop();
@@ -283,7 +298,11 @@ private:
         // Sampled nonsecret lower-bound evidence, not authentication authority.
         std::atomic<uint32_t> pair_tx_total{0}, pair_tx_attempted{0}, pair_tx_acked{0};
         std::atomic<int> pair_result{-1};
-        void reset_pair_diagnostics() { pair_tx_total=0;pair_tx_attempted=0;pair_tx_acked=0;pair_result=-1; }
+        // Nonsecret RX transport diagnostics (counts only, no payload/identifier).
+        std::atomic<uint32_t> rx_peak{0}, rx_overflows{0}; // producer-written
+        uint32_t rx_write_serviced = 0; // worker-only: chunks consumed inside WRITE waits
+        bool rx_dispatching = false;    // worker-only: drain_rx() active (no nested drain)
+        void reset_pair_diagnostics() { pair_tx_total=0;pair_tx_attempted=0;pair_tx_acked=0;pair_result=-1;rx_peak=0;rx_overflows=0;rx_write_serviced=0; }
     };
 
     struct Tesla {
