@@ -1,3 +1,7 @@
 SOURCE REVIEW ONLY — DO NOT INSTALL
 
-Checkpoint: wip-final-routed-response-matrix. Pairing response ingestion and structured error handling under development. Existing authenticated approval, explicit consent, key retention and SDK drainage guards remain mandatory. Offline only; no hardware acceptance or binary publication. Implementation: gpt-6.1-sol / openai-codex.
+Offline-qualified pairing-response integration. Pinned official Tesla protocol: fc5a1910ad45c42921d541089e3e366d0b897f52. Specific whitelist responses now flow through production RX, worker, structured API and German/English UI. Local expiry, physical link failures and internal transport failures remain distinct. Raw whitelist success does not grant authenticated pairing. No key deletion/regeneration, automatic pairing or assignment reset.
+
+Qualification: complete current regression wrapper set, native host ASan/UBSan, independent official-protoc response fixtures, real worker/API mounted authored/generated UI, and unmodified HTML/bundle extracted from the final ELF. Full cold firmware/web build with the existing qualified read-only SDK, independent package/security/partition verification and exact ELF/standalone/app/OTA embedded-web equality. Original consent, replay, profile isolation, cancellation/drain and missing-terminal quarantine guards retained.
+
+Hardware untested. No device access, installation, OTA, binary publication or hardware-acceptance claim. Implementation and recorded primary billing route: gpt-6.1-sol / openai-codex.
