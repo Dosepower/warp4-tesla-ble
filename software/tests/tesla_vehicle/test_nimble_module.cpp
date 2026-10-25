@@ -279,6 +279,7 @@ struct TeslaBleModuleTest {
   // the synthetic terminal callback so the test-owned lifecycle can join.
   m.loop();if(r->teardown_handle)run_task(r->teardown_handle);m.loop();test_submit={};std::puts("APPROVAL_FLOW PASS actual worker/main/queues/adapter/crypto full bounded no-approval flow; key retained, no false pairing/SoC");
  }
+ #include "host/repeated_pair_contracts.inc"
  static void run(const std::string &mode) {
   if(mode=="quiesce-retains") {
    BluetoothLifecycle bt;HostNimbleDriver driver(bt,TeslaVehicle::gatt_callback);
@@ -387,6 +388,7 @@ struct TeslaBleModuleTest {
 #endif
    std::puts("IDLE_ENABLED PASS active Bluetooth with two stored Tesla profiles: no Tesla runtime/worker/queues/protocol, no scan/connection/storage changes");return;
   }
+  if(mode=="flow-repeat"||mode=="flow-repeat-cleanup"){repeated_flow(m,mode=="flow-repeat-cleanup");return;}
   if(mode.rfind("flow-",0)==0){approval_flow(m,mode);return;}
   if(mode=="pairing"||mode=="generate"||mode=="notify-only"||mode=="indicate-and-notify"||mode=="delayed-pair"||mode=="connect-timeout"||mode=="no-card"||mode=="decline"||mode=="link-drop"||mode=="profile-switch"||mode=="partial-pair"||mode=="late-response"){
     host_rx_properties=mode=="notify-only"?16:mode=="indicate-and-notify"?48:32;pairing(m,mode=="generate",mode=="delayed-pair",mode);return;

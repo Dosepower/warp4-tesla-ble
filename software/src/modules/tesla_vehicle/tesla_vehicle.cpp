@@ -1316,12 +1316,14 @@ void TeslaVehicle::process_pair_verification()
         cancel_pairing("SLAC identity changed before pairing verification", r->pair_command); return;
     }
 #endif
-    if (r->stop_requested.load() || !r->session.matches(r->pair_request) ||
-        millis() - r->pair_started_ms >= 60000) {
-        // Retire queued/in-flight status before terminal ACK reopens admission.
+    const bool session_lost = r->stop_requested.load() || !r->session.matches(r->pair_request);
+    if (session_lost || millis() - r->pair_started_ms >= 60000) {
+        // Classify before disconnect_internal retires the session itself. A real
+        // session/link failure must never be presented as ordinary card expiry.
         r->command_outcome.retire_pair();
         disconnect_internal(false);
-        cancel_pairing("Approval deadline/session lost; request may have been sent; approval not authenticated", r->pair_command);
+        cancel_pairing(session_lost ? "Pairing verification link/session lost; approval not authenticated" :
+            "Approval deadline expired; approval not authenticated", r->pair_command);
         return;
     }
     if (r->pair_status_active || r->command_outcome.forgetting()) { return; }

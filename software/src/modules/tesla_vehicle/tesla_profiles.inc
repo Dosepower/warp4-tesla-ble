@@ -242,17 +242,12 @@ bool TeslaVehicle::select_profile(int index, bool deleting, String &errmsg)
             errmsg = checked_error_string("No proven local key material; retained untouched"); return false;
         }
         if (tesla->config_revision == UINT32_MAX) { errmsg = checked_error_string("Profile sequence exhausted; reboot required"); return false; }
-        // Local removal revokes ONLY this saved profile's permission and
-        // transport binding before allocating/handing off cleanup. Even if
-        // worker preparation fails, no retained consent can reuse its key.
-        p->get("enable")->updateBool(false);
-        p->get("ble_address")->updateString("");
-        p->get("ble_address_type")->updateUint(0);
-        p->get("discovery_revision")->updateUint(0);
+        // Consume/revoke consent, not the user's saved vehicle assignment.
+        // Worker retires the old protocol and erases only this namespace's
+        // key/auth/session material before it can become actionable again.
         ++tesla->config_revision;
         clear_guided();
         tesla->guidance_refresh = true;
-        api.writeConfig("tesla_vehicle/profiles", &tesla->profiles);
     }
     if (!deleting) {
         if (!fresh_binding(index,mac,p->get("vin")->asString().c_str(),p->get("ble_address")->asString().c_str(),
@@ -316,6 +311,7 @@ void TeslaVehicle::apply_profile()
     const auto a = r->storage->load_into("authorized", authorization, sizeof(authorization), n);
     ok = ok && (a == tesla_clean::LoadResult::Absent || (a == tesla_clean::LoadResult::Loaded && n == 1 && authorization[0] == 1));
     const auto presence = r->storage->private_key_presence();
+    r->profile_key_presence.store(presence);
     r->profile_key_present.store(presence == TeslaBleStorageAdapter::KeyPresence::Present);
     ok = ok && (presence != TeslaBleStorageAdapter::KeyPresence::Present || v == tesla_clean::LoadResult::Loaded);
     r->authorized.store(ok && a == tesla_clean::LoadResult::Loaded && mac == request.mac &&
@@ -360,7 +356,9 @@ void TeslaVehicle::publish_profile()
     tesla->state.get("profile_ev_index")->updateInt(index);
     tesla->state.get("paired")->updateBool(r->authorized.load());
     tesla->state.get("key_present")->updateBool(r->profile_key_present.load());
-    tesla->state.get("key_presence")->updateString(r->profile_key_present.load() ? "present" : "unknown");
+    const auto presence = r->profile_key_presence.load();
+    tesla_ble_publish_presence(tesla->state.get("key_presence"), presence == TeslaBleStorageAdapter::KeyPresence::Present,
+        presence != TeslaBleStorageAdapter::KeyPresence::Unknown, presence == TeslaBleStorageAdapter::KeyPresence::CleanupRequired);
     tesla->state.get("pairing_pending")->updateBool(false);
     tesla->state.get("pair_request_sent")->updateBool(false);
     tesla->state.get("connected")->updateBool(false);
@@ -628,9 +626,19 @@ void TeslaVehicle::publish_guidance()
         row->get("ev_index")->updateInt(index); row->get("paired")->updateBool(paired);
         row->get("binding_fresh")->updateBool(p && fresh_binding(index, mac, p->get("vin")->asString().c_str(),
             p->get("ble_address")->asString().c_str(), p->get("ble_address_type")->asUint(), p->get("discovery_revision")->asUint()));
-        if (!row->get("key_presence")->updateStringChecked(presence == TeslaBleStorageAdapter::KeyPresence::Present ? "present" :
+        const char *key_presence = presence == TeslaBleStorageAdapter::KeyPresence::Present ? "present" :
             presence == TeslaBleStorageAdapter::KeyPresence::Absent ? "absent" :
-            presence == TeslaBleStorageAdapter::KeyPresence::CleanupRequired ? "cleanup" : "unknown")) { return; }
+            presence == TeslaBleStorageAdapter::KeyPresence::CleanupRequired ? "cleanup" : "unknown";
+        if (!row->get("key_presence")->updateStringChecked(key_presence)) { return; }
+        // State is the selected profile's UI authority, even after its runtime
+        // was retired or a legitimate mapping save invalidated profile_ready.
+        // Reconcile only inside this serialized idle storage probe, never from
+        // a guessed missing row or concurrently with worker key/auth writes.
+        if (p && tesla->state.get("profile_ev_index")->asInt() == index) {
+            tesla->state.get("key_presence")->updateString(key_presence);
+            tesla->state.get("key_present")->updateBool(presence == TeslaBleStorageAdapter::KeyPresence::Present);
+            tesla->state.get("paired")->updateBool(paired);
+        }
     }
     tesla->guidance_refresh = false;
 }

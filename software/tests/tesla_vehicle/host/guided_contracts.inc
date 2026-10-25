@@ -1,5 +1,19 @@
 // Included inside friend test struct. Synthetic profiles, actual production entrypoint.
  static void guided(TeslaVehicle &m,const std::string &mode) {
+  if(mode.rfind("guided-evidence-",0)==0) {
+   HostBluetoothDriver driver(m.bluetooth,TeslaVehicle::gatt_callback);ev.index=0;ev.mac=A;
+   explicit_scan(m,0);m.tesla->state.get("profile_ev_index")->updateInt(0);
+   if(mode=="guided-evidence-io"){seed(0);fs_fault=[](const std::string &op){return op.rfind("open:",0)==0;};}
+   if(mode=="guided-evidence-adopt") {
+    assert(m.validate_profiles(m.tesla->profiles,ConfigSource::API).empty());api.writeConfig("tesla_vehicle/profiles",&m.tesla->profiles);
+   }
+   const auto files=LittleFS.files;const auto scans=scan_start_calls;m.loop();m.loop();
+   const bool unknown=mode=="guided-evidence-io";
+   assert(m.tesla->guidance.get("profiles")->get(size_t{0})->get("key_presence")->asString()==(unknown?"unknown":"absent"));
+   assert(m.tesla->state.get("key_presence")->asString()==(unknown?"unknown":"absent") && "Fresh storage evidence must replace stale selected-profile unknown");
+   assert(LittleFS.files==files && scan_start_calls==scans && !peer_open_calls && !m.tesla->runtime_owner.get());fs_fault={};
+   std::printf("GUIDED_EVIDENCE_PASS %s no automatic radio/mutation\n",mode.c_str());return;
+  }
   if(mode.rfind("guided-delete-",0)==0) {
    HostBluetoothDriver driver(m.bluetooth,TeslaVehicle::gatt_callback);ev.index=0;ev.mac=A;
    seed(0);seed(1);TeslaBleStorageAdapter store;assert(store.select_profile(0,A));
@@ -22,14 +36,20 @@
    if(mode=="guided-delete-unknown")fs_fault=[](const std::string &op){return op.rfind("open:",0)==0;};
    if(mode=="guided-delete-auth-unknown")fs_fault=[](const std::string &op){return op.rfind("open:",0)==0 && op.find("authorized")!=std::string::npos;};
    if(mode=="guided-delete-binding-unknown")fs_fault=[](const std::string &op){return op.rfind("open:",0)==0 && op.find("vehicle_vin")!=std::string::npos;};
-   const auto files=LittleFS.files;String error;api.commands.at("tesla_vehicle/guided")(0,error);fs_fault={};
+   std::vector<String> assigned;for(const char *k:{"vin","ev_mac","ble_address"})assigned.push_back(m.find_profile(0)->get(k)->asString());
+   std::vector<uint32_t> numbers;for(const char *k:{"ble_address_type","discovery_revision","poll_interval"})numbers.push_back(m.find_profile(0)->get(k)->asUint());
+   const auto enabled=m.find_profile(0)->get("enable")->asBool();const auto files=LittleFS.files;String error;api.commands.at("tesla_vehicle/guided")(0,error);fs_fault={};
    const bool accepted=mode=="guided-delete-local" || mode=="guided-delete-unpair" || mode=="guided-delete-orphan" || mode=="guided-delete-cleanup";
    assert(error.empty()==accepted);
    if(!accepted){assert(LittleFS.files==files && api.written_configs.empty() && !m.tesla->runtime_owner.get());return;}
    auto *r=m.tesla->runtime_owner.get();assert(r && r->profile_pending.load());
-   assert(!m.find_profile(0)->get("enable")->asBool() && m.find_profile(0)->get("ble_address")->asString().empty());
+   size_t at=0;for(const char *k:{"vin","ev_mac","ble_address"})assert(m.find_profile(0)->get(k)->asString()==assigned.at(at++) && "Local key deletion must retain saved assignment");
+   at=0;for(const char *k:{"ble_address_type","discovery_revision","poll_interval"})assert(m.find_profile(0)->get(k)->asUint()==numbers.at(at++));
+   assert(m.find_profile(0)->get("enable")->asBool()==enabled && api.written_configs.empty());
    error.clear();api.commands.at("tesla_vehicle/guided")(0,error);assert(!error.empty()); // Single-use revision.
-   m.apply_profile();m.publish_profile();m.process_module_events();
+   m.apply_profile();m.process_module_events();m.publish_profile();
+   assert(m.tesla->state.get("key_presence")->asString()=="absent" && "Profile publication must not overwrite worker's authoritative absent evidence");
+   m.publish_guidance();
    assert(store.private_key_presence()==TeslaBleStorageAdapter::KeyPresence::Absent);
    for(const auto &f:files)if(f.first.find("tesla_p00_112233445500_")==std::string::npos)assert(LittleFS.files.at(f.first)==f.second);
    assert(m.find_profile(1)->get("enable")->asBool());

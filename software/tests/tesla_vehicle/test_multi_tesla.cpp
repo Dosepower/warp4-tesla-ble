@@ -192,22 +192,20 @@ struct TeslaBleModuleTest {
    m.tesla->guided.request[0]='a'; // A pending consent must be cancelled by local removal.
    m.tesla->profile_command.get("ev_index")->updateInt(0);api.commands.at("tesla_vehicle/forget_key")(0,error);
    assert(error.empty());
-   assert(!p->get("enable")->asBool() && "Local unpair must revoke the saved permission, not only erase keys");
-   assert(p->get("ble_address")->asString().empty() && p->get("discovery_revision")->asUint()==0);
+   assert(p->get("enable")->asBool() && "Local unpair retains saved assignment permission, never active consent");
+   assert(p->get("ble_address")->asString()=="01:02:03:04:05:06" && p->get("discovery_revision")->asUint()>0);
    assert(p->get("vin")->asString()=="5YJ3E1EA7KF000001" && p->get("ev_mac")->asString()=="11:22:33:44:55:00");
    assert(m.find_profile(1)->get("enable")->asBool() && m.find_profile(1)->get("ble_address")->asString()=="02:02:03:04:05:06");
    assert(m.tesla->config_revision==revision+1 && !m.tesla->guided.request[0]);
-   assert(api.written_configs.count("tesla_vehicle/profiles"));
-   auto saved=api.written_configs.at("tesla_vehicle/profiles").get("entries");
-   assert(!saved->get(size_t{0})->get("enable")->asBool() && saved->get(size_t{1})->get("enable")->asBool());
+   assert(api.written_configs.empty());
    auto *r=m.tesla->runtime_owner.get();assert(r);m.apply_profile();m.publish_profile();
    assert(!r->authorized.load() && !r->profile_actionable.load() && !r->vehicle);
-   error.clear();assert(!m.select_profile(0,false,error)); // Old scan cannot silently restore permission.
+   assert(!r->pair_requested.load() && !r->poll_requested.load()); // Explicit new consent remains mandatory.
    for(const auto &item:before)if(item.first.find("tesla_p01_")!=std::string::npos)assert(LittleFS.files.at(item.first)==item.second);
    for(const auto &item:LittleFS.files)assert(item.first.find("tesla_p00_")==std::string::npos);
    assert(!peer_open_calls && scan_start_calls==1 && ev.applied==0);
    r->stop_requested.store(true);run_task(r->task_handle);m.loop();if(r->teardown_handle)run_task(r->teardown_handle);m.loop();
-   std::puts("UNPAIR_REVOKES_PASS selected permission/binding persisted, lease cancelled, B credentials untouched, no radio/charge");return;
+   std::puts("UNPAIR_REVOKES_PASS assignment retained, lease/auth/session revoked, B credentials untouched, no radio/charge");return;
   }
   if(mode=="delete-first") {
    seed(0);seed(1);const auto before=LittleFS.files;

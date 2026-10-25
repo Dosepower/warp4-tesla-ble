@@ -230,6 +230,7 @@ private:
         std::atomic<bool> profile_pending{false}, profile_ready{false};
         std::atomic<bool> authorized{false};
         std::atomic<bool> profile_key_present{false};
+        std::atomic<TeslaBleStorageAdapter::KeyPresence> profile_key_presence{TeslaBleStorageAdapter::KeyPresence::Unknown};
         std::atomic<bool> profile_actionable{false};
         uint64_t profile_mac = 0; // Immutable between acknowledged switches.
         uint32_t binding_revision = 0; // Exact scan chosen, never replaced by a newer result.
