@@ -8,6 +8,8 @@
 static void sdk_track_pending_write() {}
 #endif
 #include <cstdio>
+#include <iostream>
+#include <sstream>
 struct TeslaBleModuleTest {
  static constexpr uint64_t A=0x112233445500ULL,B=0x112233445501ULL;
  static void entry(Config *p,int index) {
@@ -280,6 +282,7 @@ struct TeslaBleModuleTest {
   m.loop();if(r->teardown_handle)run_task(r->teardown_handle);m.loop();test_submit={};std::puts("APPROVAL_FLOW PASS actual worker/main/queues/adapter/crypto full bounded no-approval flow; key retained, no false pairing/SoC");
  }
  #include "host/repeated_pair_contracts.inc"
+ #include "host/browser_bridge_contracts.inc"
  static void run(const std::string &mode) {
   if(mode=="quiesce-retains") {
    BluetoothLifecycle bt;HostNimbleDriver driver(bt,TeslaVehicle::gatt_callback);
@@ -388,6 +391,7 @@ struct TeslaBleModuleTest {
 #endif
    std::puts("IDLE_ENABLED PASS active Bluetooth with two stored Tesla profiles: no Tesla runtime/worker/queues/protocol, no scan/connection/storage changes");return;
   }
+  if(mode=="browser-bridge"){browser_bridge(m);return;}
   if(mode=="flow-repeat"||mode=="flow-repeat-cleanup"){repeated_flow(m,mode=="flow-repeat-cleanup");return;}
   if(mode.rfind("flow-",0)==0){approval_flow(m,mode);return;}
   if(mode=="pairing"||mode=="generate"||mode=="notify-only"||mode=="indicate-and-notify"||mode=="delayed-pair"||mode=="connect-timeout"||mode=="no-card"||mode=="decline"||mode=="link-drop"||mode=="profile-switch"||mode=="partial-pair"||mode=="late-response"){

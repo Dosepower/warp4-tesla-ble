@@ -558,8 +558,12 @@ export class TeslaVehicle extends ConfigComponent<"tesla_vehicle/profiles", {}, 
         const pairReason = this.actionReason(false), pollReason = this.actionReason(true);
         const keyStatus = teslaKeyStatus(status);
         const technicalErrors = this.errors();
-        const userErrors = status.pairing_pending ? [] : Array.from(new Set(technicalErrors.map(text => this.userReason(text))));
-        const keyText = keyStatus === 'key_only' && userErrors.includes(__("tesla_vehicle.status.approval_expired")) ? __("tesla_vehicle.status.approval_expired") : {
+        const userErrors = Array.from(new Set(technicalErrors
+            // A cached ordinary expiry is not a new fault during the next
+            // active attempt. All other faults remain visible, including busy.
+            .filter(text => !(status.pairing_pending && this.errorText(text) === 'Approval deadline expired; approval not authenticated'))
+            .map(text => this.userReason(text))));
+        const keyText = keyStatus === 'key_only' && userErrors.indexOf(__("tesla_vehicle.status.approval_expired")) >= 0 ? __("tesla_vehicle.status.approval_expired") : {
             paired: __("tesla_vehicle.status.paired"), pending: __("tesla_vehicle.status.pending"), sending: __("tesla_vehicle.status.sending"),
             key_unknown: __("tesla_vehicle.status.key_unknown"), key_only: __("tesla_vehicle.status.key_only"),
             cleanup_required: __("tesla_vehicle.status.cleanup_required"), not_paired: __("tesla_vehicle.status.not_paired"),
@@ -570,7 +574,7 @@ export class TeslaVehicle extends ConfigComponent<"tesla_vehicle/profiles", {}, 
             (!assigned || state.edit_binding) && !teslaBluetoothReady(API.get("bluetooth/state")) ? __("tesla_vehicle.content.bluetooth_blocked") : '',
             assigned && !status.paired ? pairReason : '',
             status.key_present || status.paired ? pollReason : '',
-        ].map(reason => this.errorText(reason)).filter(reason => !!reason && reason !== keyText && !visibleErrors.includes(reason) &&
+        ].map(reason => this.errorText(reason)).filter(reason => !!reason && reason !== keyText && visibleErrors.indexOf(reason) < 0 &&
             !(status.pairing_pending && reason === __("tesla_vehicle.content.action_busy")))));
         const resetReason = this.resetReason();
         const shownReasons = [keyText, ...visibleErrors, ...prerequisiteReasons];
@@ -580,7 +584,7 @@ export class TeslaVehicle extends ConfigComponent<"tesla_vehicle/profiles", {}, 
             <FormRow label={__("tesla_vehicle.content.vin")} help={__("tesla_vehicle.content.vin_help")}>
                 <InputText value={p.vin} maxLength={17} disabled={state.command_busy || this.searchBusy() || !this.vinEditable()} onValue={vin => this.setProfile({vin})} />
             </FormRow>
-            {setupReason && !shownReasons.includes(setupReason) ? <p role="status" class="text-muted">{setupReason}</p> : undefined}
+            {setupReason && shownReasons.indexOf(setupReason) < 0 ? <p role="status" class="text-muted">{setupReason}</p> : undefined}
             <FormRow help={__("tesla_vehicle.content.search_help")}>
                 <Button type="button" className="w-100" variant="outline-primary" disabled={state.command_busy || !this.searchAllowed()} onClick={this.search}>
                     {this.searchBusy() ? __("tesla_vehicle.content.searching") : __("tesla_vehicle.content.search")}
@@ -643,7 +647,7 @@ export class TeslaVehicle extends ConfigComponent<"tesla_vehicle/profiles", {}, 
                 <p class="text-muted">{__("tesla_vehicle.content.key_connection_help")}</p>
                 <p class="text-muted">{__("tesla_vehicle.content.shared_soc")}</p>
                 {assigned ? <FormRow><Button type="button" variant="danger" className="w-100" disabled={state.command_busy || !this.idle() || this.configurationDirty() || !!this.resetReason()} onClick={this.resetBinding}>{__("tesla_vehicle.content.edit_binding")}</Button></FormRow> : undefined}
-                {assigned && resetReason && !shownReasons.includes(resetReason) && resetReason !== setupReason ? <p role="status" class="text-muted">{resetReason}</p> : undefined}
+                {assigned && resetReason && shownReasons.indexOf(resetReason) < 0 && (!state.edit_binding || resetReason !== setupReason) ? <p role="status" class="text-muted">{resetReason}</p> : undefined}
                 {!status.paired && (status.key_presence === 'present' || status.key_presence === 'cleanup') ? <FormRow><Button type="button" variant="outline-danger" className="w-100" disabled={state.command_busy || !this.deleteAllowed('cleanup')} onClick={() => this.command('cleanup')}>{__("tesla_vehicle.content.cleanup_key")}</Button></FormRow> : undefined}
                 {technicalErrors.map(message => <div key={message} class="text-break">{message}</div>)}
             </div> : undefined}

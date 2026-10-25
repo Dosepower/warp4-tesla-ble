@@ -231,7 +231,7 @@ assert(walk(f.modals.at(-1).body()).some(n=>n.type==='p'));normal();
 page.dirty=true;assert(button('forget_key').props.disabled);page.dirty=false;
 f.call=async()=>{throw Error('injected search refusal');};await button('search').props.onClick();assert(page.state.search_error);assert(!page.state.command_busy);normal();
 f.values['tesla_vehicle/discovery']={status:'error',busy:false,targets:[],ev_index:0,ev_mac:page.profile().ev_mac,searched_vin:page.profile().vin,error:'timeout'};event('tesla_vehicle/discovery');
-assert(nodes().some(n=>n.props.children==='timeout'));page.selectProfile('1');assert(!nodes().some(n=>n.props.children==='timeout'));normal();
+assert(nodes().some(n=>n.props.children==='tesla_vehicle.status.action_failed'));page.state.details_open=true;assert(nodes().some(n=>n.props.children==='timeout'));page.selectProfile('1');assert(!nodes().some(n=>n.props.children==='timeout'));normal();
 await button('search').props.onClick();assert(page.searchBusy());count=f.calls.length;await button('search').props.onClick();assert.equal(f.calls.length,count);
 await assert.rejects(page.sendSave('tesla_vehicle/profiles',{entries:page.state.entries}));
 f.values['tesla_vehicle/discovery']={status:'complete',busy:false,ev_index:0,result_age_ms:0,result_ttl_ms:120000,searched_vin:'5YJ3E1EA7KF000001',ev_mac:'11:22:33:44:55:00',generation:'7',revision:30,targets:[target],truncated:true};event('tesla_vehicle/discovery');assert(!button('select_target'));
@@ -277,7 +277,7 @@ assert.equal(JSON.stringify(page.state.entries[1]),JSON.stringify(B));assert(fin
 for(const presence of ['present','unknown','cleanup']){
  normal();page.state.details_open=true;f.values['tesla_vehicle/state']={profile_ev_index:0,key_presence:presence,key_present:presence==='present',paired:presence==='present'};event('tesla_vehicle/state');
  assert(findButton('edit_binding').props.disabled);count=f.calls.length;await findButton('edit_binding').props.onClick();assert.equal(f.calls.length,count);
- assert(nodes().some(n=>n.props.children===`tesla_vehicle.content.${presence==='present'?'unpair_first':'reset_key_unknown'}`));
+ assert(nodes().some(n=>n.props.children===(presence==='present'?'tesla_vehicle.content.unpair_first':presence==='cleanup'?'tesla_vehicle.status.cleanup_required':'tesla_vehicle.status.key_unknown')));
  const before=page.profile().vin;page.setProfile({vin:'5YJ3E1EA7KF000009'});assert.equal(page.profile().vin,before);
 }
 for(const mutate of [()=>{page.selectProfile('1');page.selectProfile('0');},()=>{f.values['tesla_vehicle/guidance'].revision++;event('tesla_vehicle/guidance');},()=>{f.values['tesla_vehicle/state'].paired=true;event('tesla_vehicle/state');}]){
@@ -336,8 +336,12 @@ console.log('GUIDED_REFRESH_NEGATIVE_RACES_PASS');
 normal();
 f.values['tesla_vehicle/state']={profile_ev_index:0,key_presence:'present',key_present:true,paired:false,last_error:'same   failure'};event('tesla_vehicle/state');
 page.state.command_error=' same failure ';
-const errorTexts=()=>nodes().filter(n=>n.type==='Alert'&&n.props.variant==='danger').flatMap(n=>walk(n).filter(c=>c.type==='div').map(c=>c.props.children));
+const errorTexts=()=>Array.from(page.errors()); // Technical errors retained distinctly; canonical visible reason is localized once.
+assert.equal(nodes().filter(n=>n.type==='div'&&n.props.children==='tesla_vehicle.status.action_failed').length,1);
 assert.deepEqual(errorTexts(),['same failure']);
+f.values['tesla_vehicle/state'].pairing_pending=true;event('tesla_vehicle/state');
+assert.equal(nodes().filter(n=>n.type==='div'&&n.props.children==='tesla_vehicle.status.action_failed').length,1,'Active attempts must not hide unexpected faults');
+f.values['tesla_vehicle/state'].pairing_pending=false;event('tesla_vehicle/state');
 page.state.command_error='different failure';assert.deepEqual(errorTexts(),['different failure','same failure']);
 page.selectProfile('1');assert.deepEqual(errorTexts(),[],'A backend failure is not a B error');page.selectProfile('0');assert.deepEqual(errorTexts(),['same failure']);
 page.state.command_error='same failure';f.values['tesla_vehicle/state']={...f.values['tesla_vehicle/state'],last_error:''};event('tesla_vehicle/state');assert.deepEqual(errorTexts(),[],'Backend clearance retires mirrored local error');
