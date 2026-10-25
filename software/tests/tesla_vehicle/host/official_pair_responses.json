@@ -195,6 +195,12 @@
       "terminal": true
     },
     {
+      "name": "legacy_wait_with_specific",
+      "hex": "220608011a020818",
+      "code": 24,
+      "terminal": true
+    },
+    {
       "name": "empty_whitelist_success",
       "hex": "220408021a00",
       "code": 0,
@@ -246,13 +252,22 @@
       "name": "wrong_address",
       "hex": "32121210414141414141414141414141414141413a020802520622041a020818",
       "code": -1,
-      "terminal": false
+      "terminal": false,
+      "current_address_template": false
     },
     {
       "name": "wrong_domain",
       "hex": "32121210414141414141414141414141414141413a020803520622041a020818",
       "code": -1,
-      "terminal": false
+      "terminal": false,
+      "current_address_template": false
+    },
+    {
+      "name": "legacy_routed_current_address",
+      "hex": "32121210414141414141414141414141414141413a020802520622041a020818",
+      "code": 24,
+      "terminal": true,
+      "current_address_template": true
     }
   ]
 }

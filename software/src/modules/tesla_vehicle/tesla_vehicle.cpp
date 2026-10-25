@@ -1532,7 +1532,9 @@ void TeslaVehicle::post_event(EventType type, const char *message, float soc,
         return;
     }
     if (type == EventType::Error) {
-        if (r->pair_terminal_fault) { return; } // First pair error survives later cleanup faults.
+        // Preserve the initiating failure through CLOSE/teardown, not forever:
+        // a later independent action must still be able to report its own fault.
+        if (r->pair_terminal_fault && (r->closing_link.load() || r->stop_requested.load())) { return; }
         if (message) { strlcpy(r->terminal_error, message, sizeof(r->terminal_error)); }
         const auto presence = r->storage->private_key_presence();
         r->terminal_error_order = r->command_outcome.publish(OutcomeKind::Error, presence == TeslaBleStorageAdapter::KeyPresence::Present, message,
@@ -1910,6 +1912,10 @@ void TeslaVehicle::process_module_events()
         }
         if (tesla_ble_publication_newer(outcome->order, r->error_order)) {
             r->error_order = outcome->order;
+            if (outcome->kind == Kind::Error || outcome->kind == Kind::KeyRemoved) {
+                tesla->state.get("pair_outcome")->updateString("none");
+                tesla->state.get("pair_response_seen")->updateBool(false);
+            }
             publish_error(outcome->error);
         }
     }

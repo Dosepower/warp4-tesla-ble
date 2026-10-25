@@ -9,7 +9,7 @@ with tempfile.TemporaryDirectory(prefix='pair-status-',dir=os.environ['TMPDIR'])
  terminal=[c for c in cases if c['terminal']]
  groups=[terminal]+[[c]for c in cases if not c['terminal']]
  for i,group in enumerate(groups):
-  f=d/('cases-'+str(i));f.write_text(''.join(f"{c['code']} {int(c['terminal'])} {c['hex']}\n"for c in group))
+  f=d/('cases-'+str(i));f.write_text(''.join(f"{c['code']} {int(c['terminal'])} {'@' if c.get('current_address_template') else ''}{c['hex']}\n"for c in group))
   print('OFFICIAL_PAIR_GROUP',i,[c['name']for c in group],flush=True)
   subprocess.run([str(binary),'pair-response'],env={**env,'TESLA_PAIR_RESPONSE_CASES':str(f)},check=True,timeout=60)
  print('OFFICIAL_PAIR_MATRIX_PASS',len(cases),'cases, all terminal denials sequentially in same runtime with same key')

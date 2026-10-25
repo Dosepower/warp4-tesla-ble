@@ -4,7 +4,9 @@ from pathlib import Path
 import re
 ROOT=Path(__file__).resolve().parents[4]
 module=ROOT/'software/src/modules/tesla_vehicle'
-allowed={'charge_state_poll','pair','tick','receive','open','close','generation','status'}
+# take/end_pairing_status only consume/disarm the current-attempt RX mailbox;
+# neither sends a packet nor grants authentication/charging authority.
+allowed={'charge_state_poll','pair','tick','receive','open','close','generation','status','take_pairing_status','end_pairing_status'}
 observed=set()
 for path in sorted(module.glob('*')):
     if path.suffix not in ('.cpp','.h'): continue

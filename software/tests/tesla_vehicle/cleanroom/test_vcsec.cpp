@@ -36,6 +36,8 @@ int main()
     assert(decode_vcsec_status({unknown_code,sizeof(unknown_code)},parsed) && parsed.operation==VcsecOperation::Error && parsed.information==128);
     assert(decode_vcsec_status({waiting,sizeof(waiting)},parsed) && parsed.operation==VcsecOperation::Waiting);
     assert(decode_vcsec_status({failure,sizeof(failure)},parsed) && parsed.operation==VcsecOperation::Error && parsed.information==24);
+    const uint8_t wait_specific[]={0x22,6,8,1,0x1a,2,8,24};
+    assert(decode_vcsec_status({wait_specific,sizeof(wait_specific)},parsed) && parsed.operation==VcsecOperation::Error && parsed.information==24);
     const uint8_t bad_sleep[]={0x0a,2,0x18,3},duplicate[]={0x0a,4,0x18,1,0x18,2},conflicting[]={0x0a,0,0x22,2,0x1a,0};
     assert(!decode_vcsec_status({bad_sleep,sizeof(bad_sleep)},parsed));
     assert(!decode_vcsec_status({duplicate,sizeof(duplicate)},parsed));
