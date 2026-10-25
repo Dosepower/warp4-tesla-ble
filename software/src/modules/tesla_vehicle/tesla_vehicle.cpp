@@ -468,7 +468,13 @@ void TeslaVehicle::request_pair(int index, String &errmsg)
     if (!identity || identity->index != r->configured_ev_index || identity->mac == 0) {
         errmsg = checked_error_string("Configured Tesla is not currently connected"); return;
     }
-    if (!r->command_outcome.accept_pair(*identity)) { errmsg = checked_error_string("Tesla pairing is pending or deletion is active"); return; }
+    if (!r->command_outcome.accept_pair(*identity, millis(),
+#if TESLA_BLE_MANUAL_VEHICLE_UI
+        tesla->config_revision, r->binding_revision
+#else
+        0, 0
+#endif
+        )) { errmsg = checked_error_string("Tesla pairing is pending or deletion is active"); return; }
     r->pair_requested.store(true);
     tesla->state.get("pair_request_sent")->updateBool(false);
     tesla->state.get("pairing_pending")->updateBool(true);
@@ -1593,14 +1599,17 @@ void TeslaVehicle::loop()
             publish_error("Tesla identity/publication sequence exhausted; reboot required");
         }
     }
-    if (r != nullptr && (r->operation.supervise(millis()) || r->retirement_operation.supervise(millis()) ||
-                         r->worker_watch.expired(millis(), 30000))) {
+    const auto supervision_now = millis();
+    const bool operation_fault = r && r->operation.supervise(supervision_now);
+    const bool retirement_fault = r && r->retirement_operation.supervise(supervision_now);
+    if (r != nullptr && (operation_fault || retirement_fault || r->worker_watch.expired(supervision_now, 30000))) {
         // Snapshot only the first cause; later worker/teardown unwinding must
         // not overwrite the initiating deadline with a secondary symptom.
         if (!r->supervision_failed) {
-            const bool operation = r->operation.retired(), retirement = r->retirement_operation.retired();
+            const bool operation = operation_fault, retirement = retirement_fault;
             const auto &slot = operation ? r->operation : r->retirement_operation;
-            tesla->state.get("timeout_cause")->updateString(operation ? "gatt_operation" : retirement ? "link_retirement" : "worker_iteration");
+            const bool cancelled = (operation || retirement) && slot.cause() == TeslaBleOperation::Cause::Cancelled;
+            tesla->state.get("timeout_cause")->updateString(cancelled ? "undrained_cancel" : operation ? "gatt_operation" : retirement ? "link_retirement" : "worker_iteration");
             tesla->state.get("timeout_operation")->updateUint(operation || retirement ? slot.kind() : 0);
             tesla->state.get("timeout_elapsed_ms")->updateUint(operation || retirement ? slot.elapsed_ms(millis()) : r->worker_watch.elapsed_ms(millis()));
         }
@@ -1609,7 +1618,10 @@ void TeslaVehicle::loop()
         r->supervision_failed = true;
         r->stop_requested.store(true);
         tesla->state.get("restart_required")->updateBool(true);
-        publish_error("Tesla BLE worker/submission timed out; ownership retained; reboot required");
+        publish_error((operation_fault && r->operation.cause() == TeslaBleOperation::Cause::Cancelled) ||
+                      (retirement_fault && r->retirement_operation.cause() == TeslaBleOperation::Cause::Cancelled) ?
+            "Tesla BLE cancellation undrained; ownership retained; reboot required" :
+            "Tesla BLE worker/submission timed out; ownership retained; reboot required");
     }
     if (r != nullptr && (changed || (!tesla->config.get("enable")->asBool() && r->service_enabled) ||
                          r->stop_requested.load() || tesla->runtime_owner.is_stopping())) {

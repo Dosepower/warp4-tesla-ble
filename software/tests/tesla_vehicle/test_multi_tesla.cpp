@@ -188,7 +188,7 @@ struct TeslaBleModuleTest {
   if(mode=="unpair-revokes") {
    seed(0);seed(1);const auto before=LittleFS.files;
    HostBluetoothDriver driver(m.bluetooth,TeslaVehicle::gatt_callback);ev.index=0;ev.mac=A;String error;
-   explicit_scan(m,0);auto *p=m.find_profile(0);const auto revision=m.tesla->config_revision;
+   explicit_scan(m,0);auto *p=m.find_profile(0);const auto revision=m.tesla->config_revision.load();
    m.tesla->guided.request[0]='a'; // A pending consent must be cancelled by local removal.
    m.tesla->profile_command.get("ev_index")->updateInt(0);api.commands.at("tesla_vehicle/forget_key")(0,error);
    assert(error.empty());

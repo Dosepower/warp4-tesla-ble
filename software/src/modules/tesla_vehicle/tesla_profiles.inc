@@ -85,6 +85,13 @@ bool TeslaVehicle::runtime_binding_matches()
     if (!identity || !active_identity_matches(*identity) || identity->index!=r->configured_ev_index ||
         identity->mac!=r->profile_mac || ev.get_profile_mac(identity->index)!=r->profile_mac ||
         !r->command_outcome.binding_identity_current(*identity)) { return false; }
+    // Fresh discovery is required at admission. Only the accepted in-flight
+    // command may outlive its TTL: at most 120s (30s worker setup + bounded
+    // send + the full 60s approval window). Identity/config/profile/transport
+    // remain immutable while it owns the runtime. Cancellation revokes this
+    // authority immediately; no subsequent poll/retry inherits it.
+    if (r->command_outcome.pair_binding_current(millis(), *identity,
+            tesla->config_revision, r->binding_revision)) { return true; }
     // Stored authorization reuses the key, never an expired radio discovery.
     TeslaBleDiscovery::Scope scope;scope.index=r->configured_ev_index;scope.mac=r->profile_mac;
     scope.generation=identity->generation;

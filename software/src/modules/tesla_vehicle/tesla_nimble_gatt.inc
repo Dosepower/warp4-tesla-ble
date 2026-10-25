@@ -33,11 +33,19 @@ bool TeslaVehicle::gatt_operation(GattOperation kind, uint16_t handle, tesla_war
     // at 7s, leaving 3s for the real DISCONNECT/procedure-drain barrier. Never
     // reset/reuse a timed-out slot or free a cookie on a guessed elapsed delay.
     const auto started = millis();
-    bool draining = false, drained = false;
+    bool draining = false, drained = false, cancelled = false;
     const bool ok = slot.run(kind, connection, handle, []() { return millis(); }, gated_submit,
-        [this, r, kind, connection, handle, started, &slot, &draining, &drained]() {
+        [this, r, kind, connection, handle, started, &slot, &draining, &drained, &cancelled]() {
             if (kind == Discover && r->discovery_ready.load()) { r->operation.complete(kind, connection, 0, true); }
-            if (kind == Write && millis() - started >= 7000) {
+            if (kind == Write && (cancelled || millis() - started >= 7000)) {
+                const auto event = r->transport_cancel_event.exchange(0);
+#ifndef TESLA_BLE_MODULE_HOST_TEST
+                logger.printfln("BLE drain: epoch=%u attempt=%u opgen=%u stage=%u reason=%u elapsed=%u",
+                    unsigned(r->epoch), unsigned(r->pair_command), slot.generation(), unsigned(kind),
+                    unsigned((event >> 32) == slot.generation() ? event & 0xff : cancelled ? 3 : 4), unsigned(millis() - started));
+#else
+                (void)event;
+#endif
                 draining = true;
                 r->closing_link.store(true);
                 auto *c = bluetooth.central();
@@ -45,10 +53,14 @@ bool TeslaVehicle::gatt_operation(GattOperation kind, uint16_t handle, tesla_war
                 // Keep the old operation watch active while host/main run. A
                 // missing terminal callback or blocked close still quarantines
                 // at the original watchdog, retaining all reachable ownership.
-                while (c && !c->idle() && !r->stop_requested.load() && millis() - started <= TeslaBleOperation::TIMEOUT_MS) {
+                while (c && !c->idle() && millis() - started <= TeslaBleOperation::TIMEOUT_MS) {
                     vTaskDelay(pdMS_TO_TICKS(10));
                 }
                 drained = c && c->idle();
+#ifndef TESLA_BLE_MODULE_HOST_TEST
+                logger.printfln("BLE drain end: epoch=%u attempt=%u opgen=%u drained=%u elapsed=%u",
+                    unsigned(r->epoch), unsigned(r->pair_command), slot.generation(), unsigned(drained), unsigned(millis() - started));
+#endif
                 if (drained) {
                     r->link_open.store(false);
                     slot.complete(kind, connection, handle, false);
@@ -59,24 +71,28 @@ bool TeslaVehicle::gatt_operation(GattOperation kind, uint16_t handle, tesla_war
                 }
             }
             vTaskDelay(pdMS_TO_TICKS(10));
-        }, [this, r, identity, generation, kind, connection, handle, &slot]() {
+        }, [this, r, identity, generation, kind, connection, handle, &slot, &cancelled]() {
             // A completed SDK DISCONNECT has already drained the old procedure
             // and our terminal handler. Fail the write without poisoning a
             // reusable slot merely because that same event changed session ID.
             auto *c = bluetooth.central();
-            if (kind == Write && c && c->idle() && !r->stop_requested.load()) {
+            if (kind == Write && c && c->idle()) {
                 slot.complete(kind, connection, handle, false);
                 return TeslaBleCancellation::Proceed;
             }
 #if TESLA_BLE_MANUAL_VEHICLE_UI
-            if (kind != Close && !active_identity_matches(*identity)) { return TeslaBleCancellation::Cancel; }
+            if (kind != Close && !active_identity_matches(*identity)) { cancelled = true; }
 #endif
             if (r->stop_requested.load() || (kind != Close && r->connection_generation.load() != generation)) {
-                return TeslaBleCancellation::Cancel;
+                cancelled = true;
             }
             const auto latest = r->session.identity();
-            if (!latest) { return TeslaBleCancellation::Defer; }
-            return latest != identity ? TeslaBleCancellation::Cancel : TeslaBleCancellation::Proceed;
+            if (latest && latest != identity) { cancelled = true; }
+            // Cancellation is not expiry. Keep the original operation watch
+            // running until the REAL SDK/procedure/application terminal barrier
+            // drains. No slot reset, new cookie, or successor admission here.
+            if (cancelled) { return kind == Write ? TeslaBleCancellation::Defer : TeslaBleCancellation::Cancel; }
+            return !latest ? TeslaBleCancellation::Defer : TeslaBleCancellation::Proceed;
         });
     if (draining) {
         r->closing_link.store(false);
@@ -213,6 +229,7 @@ void TeslaVehicle::gatt_callback(const TeslaNimbleEvent &e)
  if(e.kind==TeslaNimbleEvent::Descriptor){r->operation.complete(Descriptor,conn,0,e.status==0);return;}
  if(e.kind==TeslaNimbleEvent::Write){r->operation.complete(Write,conn,e.handle,e.status==0);return;}
  if(e.kind==TeslaNimbleEvent::Security){
+  r->transport_cancel_event.store((uint64_t{r->operation.generation()} << 32) | 1);
   r->command_outcome.begin_cleanup();r->connected=false;r->pending_disconnect.store(r->session.disconnect());r->advance_connection();return;
  }
  if(e.kind==TeslaNimbleEvent::Disconnected){
@@ -223,6 +240,6 @@ void TeslaVehicle::gatt_callback(const TeslaNimbleEvent &e)
  if(e.kind==TeslaNimbleEvent::Rx){
   if(!r->connected.load()||!r->link_open.load()||e.handle!=r->notify_handle.load()||!e.data||!e.size||e.size>sizeof(RxFragment::data))return;
   RxFragment fragment;fragment.connection_generation=e.epoch;fragment.length=e.size;memcpy(fragment.data,e.data,e.size);
-  if(xQueueSend(r->queues.rx(),&fragment,0)!=pdTRUE){r->command_outcome.begin_cleanup();r->connected=false;r->pending_disconnect.store(r->session.disconnect());r->advance_connection();}
+  if(xQueueSend(r->queues.rx(),&fragment,0)!=pdTRUE){r->transport_cancel_event.store((uint64_t{r->operation.generation()} << 32) | 2);r->command_outcome.begin_cleanup();r->connected=false;r->pending_disconnect.store(r->session.disconnect());r->advance_connection();}
  }
 }

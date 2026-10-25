@@ -20,6 +20,8 @@ int main()
     clock = 1;
     assert(!cancelled.run(3, 2, 5, now, []() { return true; }, pause, [&]() { return clock > 3; }));
     assert(cancelled.retired() && clock == 4);
+    // Terminal evidence is causal, not the time of a later main publication.
+    assert(cancelled.elapsed_ms(200) == 3);
     // Correlation: wrong operation, handle and connection cannot complete a wait.
     TeslaBleOperation good;
     clock = 1;

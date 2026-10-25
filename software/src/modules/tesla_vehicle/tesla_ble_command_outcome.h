@@ -22,6 +22,7 @@ public:
     enum class PairPhase { Idle, Queued, Working, Sent, Approval, Cancelling, Failed };
     struct Pair {
         uint64_t command = 0;
+        uint32_t authority_started = 0, authority_config = 0, authority_binding = 0;
         PairPhase phase = PairPhase::Idle;
         TeslaBleIdentity vehicle;
         TeslaBleRequestIdentity approval;
@@ -32,7 +33,11 @@ public:
         uint64_t order = 0;
         char error[96] = {};
     };
-    uint64_t accept_pair(TeslaBleIdentity identity)
+    // Explicit admission pins fresh radio evidence to THIS command only. It is
+    // not stored authorization and cannot be inherited by a later attempt.
+    static constexpr uint32_t PAIR_AUTHORITY_MS = 120000;
+    uint64_t accept_pair(TeslaBleIdentity identity, uint32_t now = 0,
+                         uint32_t config = 0, uint32_t binding = 0)
     {
         tesla_warp::CheckedMutex::Guard lock(mutex, true);
         if (lock && pair_sequence == UINT64_MAX) { exhausted = true; }
@@ -41,6 +46,9 @@ public:
         pair.command = ++pair_sequence;
         pair.phase = PairPhase::Queued;
         pair.vehicle = identity;
+        pair.authority_started = now;
+        pair.authority_config = config;
+        pair.authority_binding = binding;
         return pair.command;
     }
     std::optional<Pair> claim_pair()
@@ -55,6 +63,15 @@ public:
         tesla_warp::CheckedMutex::Guard lock(mutex);
         return lock && !deleting && !exhausted && command && command == pair.command &&
             (pair.phase == PairPhase::Working || pair.phase == PairPhase::Sent);
+    }
+    // Pin consent to the accepted SLAC generation, including a reconnect of
+    bool pair_binding_current(uint32_t now, TeslaBleIdentity identity, uint32_t config, uint32_t binding)
+    {
+        tesla_warp::CheckedMutex::Guard lock(mutex, true);
+        return lock && !deleting && !cleanup_pending && !exhausted && pair.command &&
+            (pair.phase == PairPhase::Working || pair.phase == PairPhase::Sent) &&
+            pair.vehicle == identity && binding && pair.authority_binding == binding &&
+            pair.authority_config == config && now - pair.authority_started < PAIR_AUTHORITY_MS;
     }
     // Pin consent to the accepted SLAC generation, including a reconnect of
     // the same profile/MAC. Never let a fresh session inherit an older action.

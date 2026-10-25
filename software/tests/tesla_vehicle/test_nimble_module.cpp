@@ -186,6 +186,9 @@ struct TeslaBleModuleTest {
   on_gatt_bytes={};test_submit={};
   std::printf("PROFILE_PAIRING %s PASS explicit first pairing, durable key, no approval from unauthenticated response, profile auth persistence\n",generating?"generate":"authenticated");
  }
+ #ifdef TESLA_NIMBLE_REAL_DRAIN_HEADER
+ #include "host/cancellation_drain_contracts.inc"
+ #endif
  static void approval_flow(TeslaVehicle &m,const std::string &mode) {
   using namespace controller_fixture;
   Harness peer;IdentityLease key;assert(peer.keys.acquire(key));uint8_t pem[512]{};size_t n=0;assert(key.key()->export_pem(pem,sizeof(pem),n));
@@ -393,6 +396,9 @@ struct TeslaBleModuleTest {
   }
   if(mode=="browser-bridge"){browser_bridge(m);return;}
   if(mode=="flow-repeat"||mode=="flow-repeat-cleanup"){repeated_flow(m,mode=="flow-repeat-cleanup");return;}
+#ifdef TESLA_NIMBLE_REAL_DRAIN_HEADER
+  if(mode.rfind("followup-",0)==0){followup_flow(m,mode);return;}
+#endif
   if(mode.rfind("flow-",0)==0){approval_flow(m,mode);return;}
   if(mode=="pairing"||mode=="generate"||mode=="notify-only"||mode=="indicate-and-notify"||mode=="delayed-pair"||mode=="connect-timeout"||mode=="no-card"||mode=="decline"||mode=="link-drop"||mode=="profile-switch"||mode=="partial-pair"||mode=="late-response"){
     host_rx_properties=mode=="notify-only"?16:mode=="indicate-and-notify"?48:32;pairing(m,mode=="generate",mode=="delayed-pair",mode);return;

@@ -211,6 +211,9 @@ private:
         std::atomic<uint16_t> gatt_connection{UINT16_MAX};
         std::atomic<bool> link_open{false};
         std::atomic<bool> closing_link{false};
+        // Nonsecret event code paired with operation generation; callback writes,
+        // worker consumes. 1=security, 2=RX overflow. No identities or payloads.
+        std::atomic<uint64_t> transport_cancel_event{0};
         std::atomic<unsigned> close_events{0}; // CLOSE=1, DISCONNECT=2.
         std::atomic<bool> discovery_ready{false};
         uint16_t write_handle = 0;
@@ -303,7 +306,7 @@ private:
             uint32_t config_revision = 0, started_ms = 0;
             bool pair = false;
         } guided;
-        uint32_t config_revision = 0;
+        std::atomic<uint32_t> config_revision{0}; // main writer; worker action-authority validation
         uint32_t reset_discovery_revision[TeslaBleStorageAdapter::MAX_PROFILES]{};
         bool guidance_refresh = true;
         uint64_t guidance_macs[TeslaBleStorageAdapter::MAX_PROFILES]{};
