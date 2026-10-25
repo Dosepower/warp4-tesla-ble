@@ -23,6 +23,13 @@ public:
         return !(before & 1) && before == version.load() && running &&
                elapsed < (uint32_t{1} << 31) && elapsed > timeout;
     }
+    uint32_t elapsed_ms(uint32_t now) const
+    {
+        const auto before = version.load();
+        const auto since = started.load();
+        const uint32_t elapsed = now - since;
+        return !(before & 1) && before == version.load() && elapsed < (uint32_t{1} << 31) ? elapsed : 0;
+    }
 private:
     // See identity snapshot: final ELF verifies aligned word/byte loads/stores
     // without libatomic locks. Version has one worker writer, so no RMW needed.
@@ -50,6 +57,7 @@ public:
              Clock now, Submit submit, Pause pause, Cancel cancel)
     {
         if (retired() || tesla_ble_cancellation(cancel()) != TeslaBleCancellation::Proceed) { return false; }
+        last_kind.store(kind);
         watch.begin(now());
         struct Finish { TeslaBleWorkWatch &watch; ~Finish() { watch.finish(); } } finish{watch};
         started.store(now());
@@ -85,6 +93,8 @@ public:
         if (watch.expired(now, TIMEOUT_MS)) { abandoned.store(true); }
         return retired();
     }
+    uint32_t kind() const { return last_kind.load(); }
+    uint32_t elapsed_ms(uint32_t now) const { return watch.elapsed_ms(now); }
 private:
     static uint64_t encode(uint8_t kind, uint16_t connection, uint16_t handle)
     {
@@ -93,7 +103,7 @@ private:
     static constexpr uint64_t PENDING = uint64_t{1} << 62;
     static constexpr uint64_t SUCCESS = uint64_t{1} << 61;
     std::atomic<uint64_t> state{0};
-    std::atomic<uint32_t> started{0};
+    std::atomic<uint32_t> started{0}, last_kind{0};
     std::atomic<bool> abandoned{false};
     TeslaBleWorkWatch watch;
 };

@@ -29,6 +29,9 @@ export interface state {
     pair_tx_acked_bytes: number;
     pair_tx_complete: boolean;
     pair_result: number; // -1: no completion; otherwise VehicleResultCode
+    timeout_cause: string; // first ownership-supervision failure; no identity data
+    timeout_operation: number;
+    timeout_elapsed_ms: number;
     restart_required: boolean;
     last_soc: number;
     last_update: number;

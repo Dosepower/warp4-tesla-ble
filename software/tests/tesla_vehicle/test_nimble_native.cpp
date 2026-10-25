@@ -36,9 +36,12 @@ int main(){
   ble_gap_event sec{};sec.type=BLE_GAP_EVENT_ENC_CHANGE;sec.enc_change.conn_handle=4;sec.enc_change.status=23;emit_gap(sec);assert(events.back().kind==TeslaNimbleEvent::Security&&test_terminates>0);disconnect();assert(c.idle());
  }
  assert(c.open(address,0,7));ble_gap_event connected{};connected.type=BLE_GAP_EVENT_CONNECT;connected.connect.conn_handle=4;emit_gap(connected);
- event_hook=[&](const TeslaNimbleEvent&e){if(e.kind==TeslaNimbleEvent::Disconnected){assert(e.epoch==7);assert(c.open(address,1,8));}};
- disconnect();event_hook={};assert(events.back().epoch==7); // reentrant new epoch must not alter the emitted old value
- emit_gap(connected);assert(events.back().epoch==8);disconnect();
+ event_hook=[&](const TeslaNimbleEvent&e){if(e.kind==TeslaNimbleEvent::Disconnected){assert(e.epoch==7);assert(!c.idle() && "terminal callback must return before idle/reuse/free");assert(!c.open(address,1,8));}};
+ disconnect();event_hook={};assert(events.back().epoch==7 && c.idle());
+ assert(c.open(address,1,8));emit_gap(connected);assert(events.back().epoch==8);disconnect();
+ assert(c.open(address,0,9));
+ event_hook=[&](const TeslaNimbleEvent&e){if(e.kind==TeslaNimbleEvent::Open&&e.status){assert(!c.idle() && "failed CONNECT terminal dispatch must finish before reuse/deinit");assert(!c.open(address,1,10));}};
+ connected.connect.status=13;emit_gap(connected);event_hook={};assert(c.idle());
  test_stop_rc=42;assert(!c.shutdown());test_stop_rc=0;assert(c.shutdown());test_deinit_rc=42;assert(!c.deinitialize());test_deinit_rc=0;assert(c.deinitialize());assert(test_status==0);
  puts("NATIVE NimBLE PASS scan response binding/public-random/1link/A-B-A epochs/INDICATE+NOTIFY/descriptor bounds/SDK-mbuf copy/write20/security/disconnect/deinit");
 }

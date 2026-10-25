@@ -554,6 +554,11 @@ export class TeslaVehicle extends ConfigComponent<"tesla_vehicle/profiles", {}, 
             cleanup_required: __("tesla_vehicle.status.cleanup_required"), not_paired: __("tesla_vehicle.status.not_paired"),
         }[teslaKeyStatus(status)];
         const assigned = !!p.ble_address && !!p.discovery_revision;
+        const prerequisiteReasons = Array.from(new Set([
+            (!assigned || state.edit_binding) && !teslaBluetoothReady(API.get("bluetooth/state")) ? __("tesla_vehicle.content.bluetooth_blocked") : '',
+            assigned && !status.paired ? pairReason : '',
+            status.key_present || status.paired ? pollReason : '',
+        ].map(reason => this.errorText(reason)).filter(Boolean)));
         const target = this.matchingTargets()[0];
         const setup = !assigned || state.edit_binding ? <Fragment>
             <FormRow label={__("tesla_vehicle.content.vin")} help={__("tesla_vehicle.content.vin_help")}>
@@ -565,7 +570,7 @@ export class TeslaVehicle extends ConfigComponent<"tesla_vehicle/profiles", {}, 
                     {this.searchBusy() ? __("tesla_vehicle.content.searching") : __("tesla_vehicle.content.search")}
                 </Button>
             </FormRow>
-            {!teslaBluetoothReady(API.get("bluetooth/state")) ? <p class="text-warning">{__("tesla_vehicle.content.bluetooth_blocked")}</p> : undefined}
+
             {!/^[A-HJ-NPR-Z0-9]{17}$/.test(p.vin) ? <p class="text-muted">{__("tesla_vehicle.content.vin_help")}</p> : undefined}
 
             {(state.discovery?.status === 'complete' || this.discovery_result_seen) && !this.searchBusy() && !state.adopted && this.search_context === this.searchContext() ? target ?
@@ -597,7 +602,7 @@ export class TeslaVehicle extends ConfigComponent<"tesla_vehicle/profiles", {}, 
             {assigned && !status.paired ? <Fragment>
                 <FormRow><Button type="button" className="w-100" disabled={!!pairReason} onClick={() => this.command('pair')}>{__("tesla_vehicle.content.pair")}</Button></FormRow>
                 <p class="text-muted">{__("tesla_vehicle.content.pair_help")}</p>
-                {pairReason ? <p role="status" class="text-muted">{pairReason}</p> : undefined}
+
             </Fragment> : undefined}
             {status.paired ? <FormRow><Button type="button" variant="danger" className="w-100" disabled={state.command_busy || !this.deleteAllowed('unpair')} onClick={() => this.command('unpair')}>{__("tesla_vehicle.content.forget_key")}</Button></FormRow> : undefined}
             {status.key_present || status.paired ? <Fragment>
@@ -605,10 +610,11 @@ export class TeslaVehicle extends ConfigComponent<"tesla_vehicle/profiles", {}, 
             <FormRow help={__("tesla_vehicle.content.manual_wake_help")}>
                 <Button type="button" className="w-100" variant="primary" disabled={!!pollReason} onClick={() => this.command('poll')}>{__("tesla_vehicle.content.read_soc")}</Button>
             </FormRow>
-            {pollReason ? <p role="status" class="text-muted">{pollReason}</p> : undefined}
+
             {currentSoc ? <FormRow label={__("tesla_vehicle.status.soc")}><InputText readonly value={util.toLocaleFixed(commonSoc, 1) + ' %'} /></FormRow> : <p role="status" class="text-muted">{__("tesla_vehicle.content.soc_unavailable")}</p>}
             {currentSoc ? <FormRow label={__("tesla_vehicle.status.soc_time")}><InputText readonly value={util.format_timespan_ms(state.tesla_state.last_update)} /></FormRow> : undefined}
             </Fragment> : undefined}
+            {prerequisiteReasons.map(reason => <p key={reason} role="status" class="text-muted">{reason}</p>)}
             {this.errors().length ? <Alert variant="danger">{this.errors().map(message => <div key={message}>{message}</div>)}</Alert> : undefined}
             <h3 class="mt-3">{__("tesla_vehicle.content.details")}</h3>
             <FormRow labelColClasses="d-none" contentColClasses="col-12"><Button type="button" variant="primary" className="w-100" aria-expanded={state.details_open} aria-controls="tesla_vehicle_details" onClick={() => this.setState({details_open: !state.details_open})}>{state.details_open ? __("tesla_vehicle.content.hide_details") : __("tesla_vehicle.content.show_details")}</Button></FormRow>

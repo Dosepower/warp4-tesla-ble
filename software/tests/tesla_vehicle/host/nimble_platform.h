@@ -34,7 +34,7 @@ struct ble_gap_disc_desc{uint8_t event_type=0;ble_addr_t addr;int8_t rssi=-50;ui
 struct ble_gap_event{int type=0;struct{int status=0;uint16_t conn_handle=0;}connect;struct{struct{uint16_t conn_handle=0;}conn;}disconnect;struct{uint16_t conn_handle=0,attr_handle=0;os_mbuf *om=nullptr;bool indication=false;}notify_rx;struct{int status=0;uint16_t conn_handle=0;}enc_change;struct{int reason=0;}disc_complete;ble_gap_disc_desc disc;struct{uint16_t conn_handle=0;}passkey,repeat_pairing;};
 struct ble_gatt_error{int status=0;};struct ble_gatt_svc{uint16_t start_handle=0,end_handle=0;};
 struct ble_gatt_chr{uint16_t def_handle=0,val_handle=0;uint8_t properties=0;ble_uuid_any_t uuid;};
-struct ble_gatt_dsc{uint16_t handle=0;ble_uuid_any_t uuid;};struct ble_gatt_attr{uint16_t handle=0;};
+struct ble_gatt_dsc{uint16_t handle=0;ble_uuid_any_t uuid;};struct ble_gatt_attr{uint16_t handle;};
 struct BleConfig{void(*sync_cb)()=nullptr;void(*reset_cb)(int)=nullptr;int sm_io_cap=0,sm_bonding=0,sm_mitm=0,sm_sc=0;};inline BleConfig ble_hs_cfg;
 using GapFn=int(*)(ble_gap_event *,void *);using SvcFn=int(*)(uint16_t,const ble_gatt_error *,const ble_gatt_svc *,void *);using ChrFn=int(*)(uint16_t,const ble_gatt_error *,const ble_gatt_chr *,void *);using DscFn=int(*)(uint16_t,const ble_gatt_error *,uint16_t,const ble_gatt_dsc *,void *);using WriteFn=int(*)(uint16_t,const ble_gatt_error *,ble_gatt_attr *,void *);
 inline GapFn test_gap=nullptr,test_scan=nullptr;

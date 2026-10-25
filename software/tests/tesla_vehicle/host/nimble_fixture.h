@@ -15,7 +15,8 @@ inline uint32_t nimble_vin_scan(BluetoothLifecycle &bt,const char*vin,int index,
  uint8_t data[20]={19,9};memcpy(data+2,scope.name,18);ble_gap_event e{};e.type=BLE_GAP_EVENT_DISC;e.disc.addr.val[5]=first;for(int i=0;i<5;++i)e.disc.addr.val[i]=6-i;e.disc.addr.type=type;e.disc.data=data;e.disc.length_data=20;e.disc.event_type=0;test_scan(&e,test_scan_arg);e.type=BLE_GAP_EVENT_DISC_COMPLETE;test_scanning=false;test_scan(&e,test_scan_arg);
  while(std::chrono::steady_clock::now()<end){if(bt.discovery_snapshot(s)&&s.status==TeslaBleDiscovery::Status::Complete)break;std::this_thread::yield();}assert(s.count==1&&s.status==TeslaBleDiscovery::Status::Complete);return s.revision;
 }
-inline void nimble_force_disconnect(){ble_gap_event e{};e.type=BLE_GAP_EVENT_DISCONNECT;e.disconnect.conn.conn_handle=4;test_gap(&e,test_gap_arg);}
+inline std::function<void()> nimble_before_disconnect;
+inline void nimble_force_disconnect(){if(nimble_before_disconnect)nimble_before_disconnect();ble_gap_event e{};e.type=BLE_GAP_EVENT_DISCONNECT;e.disconnect.conn.conn_handle=4;test_gap(&e,test_gap_arg);}
 inline ble_uuid_any_t fixture_uuid(uint8_t suffix){ble_uuid_any_t u{};u.u.type=128;const uint8_t b[16]={0x1e,0xb9,0xf8,0xeb,0x0c,0x96,0x88,0x9b,0xf0,0x43,0xd1,0xb2,suffix,2,0,0};memcpy(u.value,b,16);return u;}
 inline void nimble_complete_setup(){
  ble_gap_event e{};e.type=BLE_GAP_EVENT_CONNECT;e.connect.conn_handle=4;test_gap(&e,test_gap_arg);

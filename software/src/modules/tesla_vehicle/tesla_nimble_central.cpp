@@ -116,7 +116,7 @@ int TeslaNimbleCentral::gap(ble_gap_event *e,void *arg){
   if(c.pending!=TeslaNimbleEvent::Open)return 0;
   if(!e->connect.status)c.connection=e->connect.conn_handle;
   c.pending=0;
-  if(e->connect.status){const TeslaNimbleEvent ended{TeslaNimbleEvent::Open,c.cookie.epoch,0xffff,0,e->connect.status,nullptr,0};c.busy=false;if(c.handler)c.handler(ended);return 0;}
+  if(e->connect.status){const TeslaNimbleEvent ended{TeslaNimbleEvent::Open,c.cookie.epoch,0xffff,0,e->connect.status,nullptr,0};if(c.handler)c.handler(ended);c.busy.store(false,std::memory_order_release);return 0;}
   if(c.retiring.load()){if(!c.close())c.failed=true;return 0;}
   c.emit(TeslaNimbleEvent::Open,0);break;
  case BLE_GAP_EVENT_DISCONNECT:
@@ -125,9 +125,12 @@ int TeslaNimbleCentral::gap(ble_gap_event *e,void *arg){
   // procedure owns cookie after this barrier; do not replace it earlier.
   c.pending=0;
   {const TeslaNimbleEvent ended{TeslaNimbleEvent::Disconnected,c.cookie.epoch,c.connection.load(),0,0,nullptr,0};
-   c.connection=0xffff;c.busy=false;bluetooth_memory::sample(bluetooth_memory::Stage::GattCallback,true);
-   // Last access: callback may admit a new epoch; do not touch retired cookie afterward.
+   c.connection=0xffff;bluetooth_memory::sample(bluetooth_memory::Stage::GattCallback,true);
+   // SDK has already failed/freed old GATT procedures, but application callback
+   // state is not drained until its final dispatch returns. Keep admission and
+   // deinitialization closed throughout that dispatch (including reentry).
    if(c.handler)c.handler(ended);
+   c.busy.store(false,std::memory_order_release);
   }return 0;
  case BLE_GAP_EVENT_NOTIFY_RX:
   if(e->notify_rx.conn_handle!=c.connection||e->notify_rx.attr_handle!=c.notify_handle||!e->notify_rx.om)break;

@@ -2,6 +2,11 @@
 #include "../../src/modules/tesla_vehicle/tesla_vehicle.cpp"
 #include "host/nimble_fixture.h"
 #include "cleanroom/controller_fixture.hpp"
+#ifdef TESLA_NIMBLE_REAL_DRAIN_HEADER
+#include TESLA_NIMBLE_REAL_DRAIN_HEADER
+#else
+static void sdk_track_pending_write() {}
+#endif
 #include <cstdio>
 struct TeslaBleModuleTest {
  static constexpr uint64_t A=0x112233445500ULL,B=0x112233445501ULL;
@@ -179,6 +184,101 @@ struct TeslaBleModuleTest {
   on_gatt_bytes={};test_submit={};
   std::printf("PROFILE_PAIRING %s PASS explicit first pairing, durable key, no approval from unauthenticated response, profile auth persistence\n",generating?"generate":"authenticated");
  }
+ static void approval_flow(TeslaVehicle &m,const std::string &mode) {
+  using namespace controller_fixture;
+  Harness peer;IdentityLease key;assert(peer.keys.acquire(key));uint8_t pem[512]{};size_t n=0;assert(key.key()->export_pem(pem,sizeof(pem),n));
+  TeslaBleStorageAdapter store;assert(store.select_profile(0,A));assert(tesla_clean::KeyStorage::committed(store.save_transaction("private_key",pem,n)));
+  assert(tesla_clean::KeyStorage::committed(store.save_transaction("vehicle_vin",reinterpret_cast<const uint8_t *>("5YJ3E1EA7KF000001"),17)));
+  const auto retained=LittleFS.files.at("/config/tesla_p00_112233445500_private_key");
+  HostNimbleDriver driver(m.bluetooth,TeslaVehicle::gatt_callback);ev.index=0;ev.mac=A;explicit_scan(m,0);String error;assert(m.select_profile(0,false,error));auto*r=m.tesla->runtime_owner.get();
+  bool submitted=false,complete=false,finished=false,missing=false;uint32_t pair_at=0,ack_at=0;unsigned main_ticks=0,frames=0;std::vector<uint8_t> wire;
+  WriteFn delayed_ack=nullptr;void*delayed_arg=nullptr;uint16_t delayed_handle=0;bool late_received=false;
+  const bool quarantine=mode=="flow-missing-terminal"||mode=="flow-blocked-submit"||mode=="flow-late-ack-no-main";
+  std::vector<Frame> replies;std::vector<uint8_t> pending_reply;size_t reply_at=0;bool invalid_seen=false;uint32_t status_counter=0;
+  on_gatt_bytes=[&](const uint8_t*p,size_t count){
+   wire.insert(wire.end(),p,p+count);
+   if(wire.size()<2||wire.size()!=size_t(wire[0])*256+wire[1]+2)return;
+   ++frames;Frame f;f.length=wire.size()-2;memcpy(f.data.data(),wire.data()+2,f.length);wire.clear();
+   if((mode=="flow-approval-50s"||mode=="flow-denied-50s")&&complete&&millis()-pair_at>=50000){
+    peer.address=r->routing_address;const auto sent=decode(f);
+    if(sent.hello)replies.push_back(peer.hello(sent,mode=="flow-denied-50s"));
+    else if(!sent.pair){replies.push_back(peer.response(sent,{awake,sizeof(awake)},++status_counter,0,true));replies.push_back(peer.response(sent,{awake,sizeof(awake)},status_counter));}
+   }
+  };
+  test_submit=[&](int stage){
+   if(stage==6 && (mode=="flow-missing-terminal"||mode=="flow-late-ack-no-main"))return;
+   if(stage==5 && test_handle!=21 && complete && mode=="flow-late-ack-no-main"){
+    delayed_ack=test_written;delayed_arg=test_proc_arg;delayed_handle=test_handle;ack_at=millis()+7500;return;
+   }
+   if(stage==5 && test_handle!=21 && complete && mode=="flow-blocked-submit"){
+    clock_ms.fetch_add(10010);m.loop();assert(m.tesla->runtime_owner.get()==r && !r->worker_stopped.load() && !r->task_handle->deleted);return;
+   }
+   if(stage==5 && test_handle!=21 && mode=="flow-delayed-acks"){
+    on_gatt_bytes(test_write.data(),test_write.size());delayed_ack=test_written;delayed_arg=test_proc_arg;delayed_handle=test_handle;ack_at=millis()+1200;return;
+   }
+   if(stage==5 && test_handle!=21 && complete && mode=="flow-link-drop-during-write"){nimble_force_disconnect();return;}
+   if(stage==5 && test_handle!=21 && complete && (mode=="flow-missing-ack"||mode=="flow-missing-terminal")){missing=true;sdk_track_pending_write();return;}
+   nimble_auto_submit(stage);
+  };
+  // Each OS yield dispatches main while the actual production worker remains
+  // inside its current operation. No helper/manual process_commands/tick loop.
+  on_task_delay=[&](uint32_t ms){
+   if(delayed_ack && static_cast<int32_t>(millis()-ack_at)>=0){auto cb=delayed_ack;delayed_ack=nullptr;ble_gatt_error ok{};ble_gatt_attr attr{delayed_handle};cb(4,&ok,&attr,delayed_arg);late_received=true;}
+   if(mode=="flow-late-ack-no-main"&&complete&&ms!=20)return;
+   if(mode=="flow-late-ack-no-main"&&late_received)assert(r->operation.retired() && "late WRITE ACK cannot substitute for missing terminal callback even without main sampling");
+   ++main_ticks;const auto before=std::chrono::steady_clock::now();m.loop();assert(std::chrono::steady_clock::now()-before<std::chrono::milliseconds(100));
+   if(ms==20){
+    if(pending_reply.empty()&&!replies.empty()){
+     const Frame f=replies.front();replies.erase(replies.begin());
+     pending_reply={uint8_t(f.length>>8),uint8_t(f.length)};pending_reply.insert(pending_reply.end(),f.data.begin(),f.data.begin()+f.length);reply_at=0;
+     if(status_counter&&!invalid_seen){invalid_seen=true;assert(!r->authorized.load());}
+    }
+    if(!pending_reply.empty()){
+     os_mbuf mb;const auto n=std::min<size_t>(20,pending_reply.size()-reply_at);mb.bytes.assign(pending_reply.begin()+reply_at,pending_reply.begin()+reply_at+n);ble_gap_event e{};e.type=BLE_GAP_EVENT_NOTIFY_RX;e.notify_rx.conn_handle=4;e.notify_rx.attr_handle=20;e.notify_rx.om=&mb;e.notify_rx.indication=1;test_gap(&e,test_gap_arg);reply_at+=n;
+     if(reply_at==pending_reply.size())pending_reply.clear();
+    }
+   }
+  };
+  on_delay=[&]{
+   if(!running_task || running_task->name!="tesla_ble" || r->profile_pending.load())return;
+   if(!submitted){m.loop();m.tesla->profile_command.get("ev_index")->updateInt(0);api.commands.at("tesla_vehicle/pair")(0,error);assert(error.empty());submitted=true;return;}
+   if(!complete && r->pair_result.load()==int(tesla_clean::VehicleResultCode::PairRequestSent)){
+    complete=true;pair_at=millis();assert(r->pair_tx_total.load()==88 && r->pair_tx_acked.load()==88 && frames==1);assert(!r->authorized.load());
+   }
+   if(!complete)return;
+   if(r->stop_requested.load()){
+    if(quarantine){
+     m.loop();
+     assert(m.tesla->runtime_owner.get()==r && m.tesla->runtime_owner.restart_required());
+     assert(m.tesla->state.get("timeout_cause")->asString()=="gatt_operation");
+     assert(m.tesla->state.get("timeout_operation")->asUint()==unsigned(TeslaVehicle::Write));
+     assert(m.tesla->state.get("timeout_elapsed_ms")->asUint()>10000);
+     assert(!r->authorized.load() && !m.tesla->state.get("paired")->asBool());finished=true;return;
+    }
+    std::printf("APPROVAL_FLOW premature_stop after_pair_ms=%u missing_ack=%d frames=%u main_ticks=%u error=%s\n",millis()-pair_at,missing,frames,main_ticks,m.tesla->state.get("last_error")->asString().c_str());std::fflush(stdout);
+    assert(!r->stop_requested.load() && "normal no-approval/nonresponsive peer must drain link, not permanently quarantine Bluetooth");
+   }
+   if(mode=="flow-approval-50s"&&r->authorized.load()){
+    assert(invalid_seen&&millis()-pair_at>=50000&&millis()-pair_at<60000);
+    m.loop();assert(m.tesla->state.get("paired")->asBool()&&ev.applied==0&&!m.tesla->runtime_owner.restart_required());
+    assert(LittleFS.files.at("/config/tesla_p00_112233445500_private_key")==retained);
+    finished=true;r->stop_requested=true;return;
+   }
+   if(!r->pair_verifying && !r->pair_sending && !r->pair_status_active && !m.tesla->state.get("pairing_pending")->asBool()){
+    if(mode=="flow-approval-50s")std::fprintf(stderr,"AUTH_FLOW frames=%u status=%u invalid=%d replies=%zu elapsed=%u error=%s\n",frames,status_counter,invalid_seen,replies.size(),millis()-pair_at,m.tesla->state.get("last_error")->asString().c_str());
+    assert(mode!="flow-approval-50s" && "valid late authenticated response must complete pairing");
+    assert(millis()-pair_at<=61000 && !r->authorized.load() && !m.tesla->state.get("paired")->asBool());assert(!r->operation.retired() && !m.tesla->runtime_owner.restart_required() && m.bluetooth.active());
+    assert(LittleFS.files.at("/config/tesla_p00_112233445500_private_key")==retained && !LittleFS.files.count("/config/tesla_p00_112233445500_authorized") && ev.applied==0);
+    if(mode=="flow-no-approval")assert(millis()-pair_at>=60000 && frames>3);
+    finished=true;r->stop_requested=true;
+   }
+   assert(millis()-pair_at<62000);
+  };
+  run_task(r->task_handle);on_delay={};on_task_delay={};test_submit=nimble_auto_submit;on_gatt_bytes={};assert(submitted&&complete&&finished&&main_ticks>40);
+  // Quarantine was asserted while ownership was unresolved. Only now deliver
+  // the synthetic terminal callback so the test-owned lifecycle can join.
+  m.loop();if(r->teardown_handle)run_task(r->teardown_handle);m.loop();test_submit={};std::puts("APPROVAL_FLOW PASS actual worker/main/queues/adapter/crypto full bounded no-approval flow; key retained, no false pairing/SoC");
+ }
  static void run(const std::string &mode) {
   if(mode=="quiesce-retains") {
    BluetoothLifecycle bt;HostNimbleDriver driver(bt,TeslaVehicle::gatt_callback);
@@ -287,6 +387,7 @@ struct TeslaBleModuleTest {
 #endif
    std::puts("IDLE_ENABLED PASS active Bluetooth with two stored Tesla profiles: no Tesla runtime/worker/queues/protocol, no scan/connection/storage changes");return;
   }
+  if(mode.rfind("flow-",0)==0){approval_flow(m,mode);return;}
   if(mode=="pairing"||mode=="generate"||mode=="notify-only"||mode=="indicate-and-notify"||mode=="delayed-pair"||mode=="connect-timeout"||mode=="no-card"||mode=="decline"||mode=="link-drop"||mode=="profile-switch"||mode=="partial-pair"||mode=="late-response"){
     host_rx_properties=mode=="notify-only"?16:mode=="indicate-and-notify"?48:32;pairing(m,mode=="generate",mode=="delayed-pair",mode);return;
   }

@@ -364,6 +364,18 @@ f.call=async(t,p)=>{if(p.phase==='prepare_pair'){
 }};
 count=f.calls.length;await findButton('pair').props.onClick();assert.deepEqual(f.calls.slice(count).map(c=>c.payload.phase),['prepare_pair','cancel'],'A new clear->same error during preparation still blocks commit');assert.equal(page.state.command_error,'previous attempt failed');
 normal();
+// Rendered prerequisite explanations are component-wide, not duplicated under
+// Pair/Search and Poll. Distinct diagnostic paragraphs are not swallowed.
+normal();
+f.values['tesla_vehicle/state']={profile_ev_index:0,key_presence:'present',key_present:true,paired:false};event('tesla_vehicle/state');
+f.values['bluetooth/state']={supported:true,phase:'error',restart_required:true};event('bluetooth/state');
+const prerequisiteTexts=()=>nodes().filter(n=>n.type==='p'&&n.props.class==='text-muted'&&n.props.role==='status'&&['tesla_vehicle.content.bluetooth_blocked','tesla_vehicle.content.action_busy'].includes(n.props.children)).map(n=>n.props.children);
+assert.deepEqual(prerequisiteTexts(),['tesla_vehicle.content.bluetooth_blocked']);
+page.state.edit_binding=true;
+assert.deepEqual(prerequisiteTexts(),['tesla_vehicle.content.bluetooth_blocked'],'Search and Poll share the same prerequisite');
+page.state.edit_binding=false;f.values['bluetooth/state']={supported:true,phase:'active'};event('bluetooth/state');f.values['tesla_vehicle/state'].action_busy=true;event('tesla_vehicle/state');
+assert.deepEqual(prerequisiteTexts(),['tesla_vehicle.content.action_busy']);
+normal();console.log('GUIDED_GREY_PREREQUISITE_DEDUP_PASS');
 let prepareResponse;f.call=async(t,p)=>{if(p.phase==='prepare_pair')await new Promise(r=>{prepareResponse=r;});};const pendingUnmount=button('pair').props.onClick();await new Promise(setImmediate);
 count=f.calls.length;page.componentWillUnmount();prepareResponse();await pendingUnmount;assert.equal(f.calls.length,count+1);assert.equal(f.calls.at(-1).payload.phase,'cancel');
 assert(f.calls.every(c=>['tesla_vehicle/scan','tesla_vehicle/profiles_update','tesla_vehicle/guided','tesla_vehicle/forget_key'].includes(c.topic)));

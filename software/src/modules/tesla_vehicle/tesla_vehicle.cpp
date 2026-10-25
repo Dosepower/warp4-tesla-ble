@@ -198,6 +198,9 @@ bool TeslaVehicle::prepare_tesla()
         {"pair_tx_acked_bytes", Config::Uint(0, 0, 1026)},
         {"pair_tx_complete", Config::Bool(false)},
         {"pair_result", Config::Int(-1, -1, 8)},
+        {"timeout_cause", Config::Str("", 0, 24)},
+        {"timeout_operation", Config::Uint(0, 0, 255)},
+        {"timeout_elapsed_ms", Config::Uint(0, 0, UINT32_MAX)},
         {"restart_required", Config::Bool(false)},
         {"last_soc", Config::Float(NAN)},
         {"action_busy", Config::Bool(false)},
@@ -1590,6 +1593,15 @@ void TeslaVehicle::loop()
     }
     if (r != nullptr && (r->operation.supervise(millis()) || r->retirement_operation.supervise(millis()) ||
                          r->worker_watch.expired(millis(), 30000))) {
+        // Snapshot only the first cause; later worker/teardown unwinding must
+        // not overwrite the initiating deadline with a secondary symptom.
+        if (!r->supervision_failed) {
+            const bool operation = r->operation.retired(), retirement = r->retirement_operation.retired();
+            const auto &slot = operation ? r->operation : r->retirement_operation;
+            tesla->state.get("timeout_cause")->updateString(operation ? "gatt_operation" : retirement ? "link_retirement" : "worker_iteration");
+            tesla->state.get("timeout_operation")->updateUint(operation || retirement ? slot.kind() : 0);
+            tesla->state.get("timeout_elapsed_ms")->updateUint(operation || retirement ? slot.elapsed_ms(millis()) : r->worker_watch.elapsed_ms(millis()));
+        }
         // Detect/quarantine only: this cannot interrupt an SDK queue/future wait.
         tesla->runtime_owner.require_restart();
         r->supervision_failed = true;

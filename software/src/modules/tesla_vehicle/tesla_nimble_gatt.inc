@@ -27,11 +27,47 @@ bool TeslaVehicle::gatt_operation(GattOperation kind, uint16_t handle, tesla_war
 #endif
         return submit();
     };
+    // An unanswered ATT write is peer unresponsiveness, not proof that the SDK
+    // submission is stuck. SDK GATT timeout is 30s, beyond our unchanged 10s
+    // ownership watchdog. After a RETURNED submission, start physical retirement
+    // at 7s, leaving 3s for the real DISCONNECT/procedure-drain barrier. Never
+    // reset/reuse a timed-out slot or free a cookie on a guessed elapsed delay.
+    const auto started = millis();
+    bool draining = false, drained = false;
     const bool ok = slot.run(kind, connection, handle, []() { return millis(); }, gated_submit,
-        [r, kind, connection]() {
+        [this, r, kind, connection, handle, started, &slot, &draining, &drained]() {
             if (kind == Discover && r->discovery_ready.load()) { r->operation.complete(kind, connection, 0, true); }
+            if (kind == Write && millis() - started >= 7000) {
+                draining = true;
+                r->closing_link.store(true);
+                auto *c = bluetooth.central();
+                if (c) { c->close(); }
+                // Keep the old operation watch active while host/main run. A
+                // missing terminal callback or blocked close still quarantines
+                // at the original watchdog, retaining all reachable ownership.
+                while (c && !c->idle() && !r->stop_requested.load() && millis() - started <= TeslaBleOperation::TIMEOUT_MS) {
+                    vTaskDelay(pdMS_TO_TICKS(10));
+                }
+                drained = c && c->idle();
+                if (drained) {
+                    r->link_open.store(false);
+                    slot.complete(kind, connection, handle, false);
+                } else {
+                    // A late WRITE success must not substitute for the missing
+                    // terminal barrier, even when main did not sample the wait.
+                    slot.supervise(millis());
+                }
+            }
             vTaskDelay(pdMS_TO_TICKS(10));
-        }, [this, r, identity, generation, kind]() {
+        }, [this, r, identity, generation, kind, connection, handle, &slot]() {
+            // A completed SDK DISCONNECT has already drained the old procedure
+            // and our terminal handler. Fail the write without poisoning a
+            // reusable slot merely because that same event changed session ID.
+            auto *c = bluetooth.central();
+            if (kind == Write && c && c->idle() && !r->stop_requested.load()) {
+                slot.complete(kind, connection, handle, false);
+                return TeslaBleCancellation::Proceed;
+            }
 #if TESLA_BLE_MANUAL_VEHICLE_UI
             if (kind != Close && !active_identity_matches(*identity)) { return TeslaBleCancellation::Cancel; }
 #endif
@@ -42,6 +78,15 @@ bool TeslaVehicle::gatt_operation(GattOperation kind, uint16_t handle, tesla_war
             if (!latest) { return TeslaBleCancellation::Defer; }
             return latest != identity ? TeslaBleCancellation::Cancel : TeslaBleCancellation::Proceed;
         });
+    if (draining) {
+        r->closing_link.store(false);
+        if (drained && !slot.retired()) {
+            // Logical retirement runs on the worker only, after run() has
+            // finished its watch. Vehicle will reject this incomplete frame.
+            disconnect_internal();
+            return false;
+        }
+    }
     if (slot.retired()) {
         post_event(EventType::Error, "BLE operation cancelled/timed out; restart required");
         // A cancelled WRITE must first retire its physical stream using a
