@@ -32,6 +32,12 @@ export interface state {
     timeout_cause: string; // first ownership-supervision failure; no identity data
     timeout_operation: number;
     timeout_elapsed_ms: number;
+    // Identity-free SDK observations, frozen at first ownership fault.
+    connect_attempt?: number;
+    connect_flags?: number; // submit enter/return=1/2, cancel enter/return=4/8, CONNECT/DISCONNECT=16/32
+    connect_submit_rc?: number;
+    connect_cancel_rc?: number;
+    connect_status?: number;
     restart_required: boolean;
     last_soc: number;
     last_update: number;

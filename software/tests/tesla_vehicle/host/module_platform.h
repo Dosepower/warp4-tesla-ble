@@ -209,8 +209,10 @@ inline uint32_t millis() { return clock_ms.load(); }
 inline uint64_t now_us() { return uint64_t{millis()} * 1000; }
 inline std::function<void()> on_delay;
 inline std::function<void(uint32_t)> on_task_delay;
+inline std::atomic<void(*)()> host_bt_delay_hook{nullptr};
 inline void vTaskDelay(uint32_t ms) {
     if (async_bluetooth && running_task && running_task->name == "bluetooth") {
+        if (auto hook = host_bt_delay_hook.load()) { hook(); }
         host_bt_yields.fetch_add(1,std::memory_order_release);
         std::this_thread::sleep_for(std::chrono::microseconds(50)); return;
     }

@@ -45,7 +45,10 @@ void BluetoothLifecycle::host_entry(void *p){auto &c=*static_cast<Context *>(p);
 bool BluetoothLifecycle::teardown(Context &c){
  if(!c.acquired)return false; // failed initialization is quarantined, never steal foreign stack
  if(!c.host_task)return c.central.deinitialize();
- if(!c.central.quiesce())return false;
+ // Cancel/terminate may return an error while its terminal event is already
+ // queued. Keep the host alive for the SAME bounded drain in either case.
+ // An error never establishes idle; missing terminal still retains ownership.
+ c.central.quiesce();
  const auto drain=millis();while(!c.central.idle()&&millis()-drain<5000)vTaskDelay(pdMS_TO_TICKS(5));
  if(!c.central.idle()||!c.central.shutdown())return false;
  const auto start=millis();while(!c.host_done.load(std::memory_order_acquire)&&millis()-start<5000)vTaskDelay(pdMS_TO_TICKS(5));

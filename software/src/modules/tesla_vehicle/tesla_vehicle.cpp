@@ -201,6 +201,11 @@ bool TeslaVehicle::prepare_tesla()
         {"timeout_cause", Config::Str("", 0, 24)},
         {"timeout_operation", Config::Uint(0, 0, 255)},
         {"timeout_elapsed_ms", Config::Uint(0, 0, UINT32_MAX)},
+        {"connect_attempt", Config::Uint(0, 0, UINT32_MAX)},
+        {"connect_flags", Config::Uint(0, 0, 63)},
+        {"connect_submit_rc", Config::Int(-1, -1, INT32_MAX)},
+        {"connect_cancel_rc", Config::Int(-1, -1, INT32_MAX)},
+        {"connect_status", Config::Int(-1, -1, INT32_MAX)},
         {"restart_required", Config::Bool(false)},
         {"last_soc", Config::Float(NAN)},
         {"action_busy", Config::Bool(false)},
@@ -1041,7 +1046,7 @@ void TeslaVehicle::stop_runtime()
     if (completion == TeslaBleTeardown::Result::Failed) {
         tesla->runtime_owner.require_restart();
         tesla->state.get("restart_required")->updateBool(true);
-        if (r->teardown.completed_result() == TeslaBleTeardown::Result::Failed && r->teardown_error[0] != '\0') {
+        if (!r->supervision_failed && r->teardown.completed_result() == TeslaBleTeardown::Result::Failed && r->teardown_error[0] != '\0') {
             // Producer is quiescent. Main teardown failure needs no mailbox lock.
             r->error_order = UINT64_MAX;
             r->supervision_failed = true;
@@ -1599,6 +1604,20 @@ void TeslaVehicle::loop()
             publish_error("Tesla identity/publication sequence exhausted; reboot required");
         }
     }
+    // Sample before retirement; later teardown must not erase this attempt's
+    // first fault. No identifiers, key bytes or radio operations in diagnostics.
+#if defined(TESLA_BLE_USE_NIMBLE) && TESLA_BLE_USE_NIMBLE
+    if (r && !r->supervision_failed) {
+        if (auto *central = bluetooth.central()) {
+            const auto d = central->connect_diagnostic();
+            tesla->state.get("connect_attempt")->updateUint(d.attempt);
+            tesla->state.get("connect_flags")->updateUint(d.flags);
+            tesla->state.get("connect_submit_rc")->updateInt(d.submit_rc);
+            tesla->state.get("connect_cancel_rc")->updateInt(d.cancel_rc);
+            tesla->state.get("connect_status")->updateInt(d.status);
+        }
+    }
+#endif
     const auto supervision_now = millis();
     const bool operation_fault = r && r->operation.supervise(supervision_now);
     const bool retirement_fault = r && r->retirement_operation.supervise(supervision_now);

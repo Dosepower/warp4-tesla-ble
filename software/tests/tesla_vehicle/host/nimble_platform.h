@@ -31,7 +31,7 @@ struct os_mbuf{std::vector<uint8_t> bytes;};
 inline int os_mbuf_copydata(const os_mbuf *m,int at,size_t n,void *out){if(at+n>m->bytes.size())return 1;memcpy(out,m->bytes.data()+at,n);return 0;}
 struct ble_gap_disc_params{uint16_t itvl=0,window=0;uint8_t passive=1,filter_duplicates=0;};
 struct ble_gap_disc_desc{uint8_t event_type=0;ble_addr_t addr;int8_t rssi=-50;uint8_t length_data=0;const uint8_t *data=nullptr;};
-struct ble_gap_event{int type=0;struct{int status=0;uint16_t conn_handle=0;}connect;struct{struct{uint16_t conn_handle=0;}conn;}disconnect;struct{uint16_t conn_handle=0,attr_handle=0;os_mbuf *om=nullptr;bool indication=false;}notify_rx;struct{int status=0;uint16_t conn_handle=0;}enc_change;struct{int reason=0;}disc_complete;ble_gap_disc_desc disc;struct{uint16_t conn_handle=0;}passkey,repeat_pairing;};
+struct ble_gap_event{int type=0;struct{int status=0;uint16_t conn_handle=0;}connect,link_estab;struct{struct{uint16_t conn_handle=0;}conn;}disconnect;struct{uint16_t conn_handle=0,attr_handle=0;os_mbuf *om=nullptr;bool indication=false;}notify_rx;struct{int status=0;uint16_t conn_handle=0;}enc_change;struct{int reason=0;}disc_complete;ble_gap_disc_desc disc;struct{uint16_t conn_handle=0;}passkey,repeat_pairing;};
 struct ble_gatt_error{int status=0;};struct ble_gatt_svc{uint16_t start_handle=0,end_handle=0;};
 struct ble_gatt_chr{uint16_t def_handle=0,val_handle=0;uint8_t properties=0;ble_uuid_any_t uuid;};
 struct ble_gatt_dsc{uint16_t handle=0;ble_uuid_any_t uuid;};struct ble_gatt_attr{uint16_t handle;};

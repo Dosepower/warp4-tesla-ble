@@ -40,6 +40,12 @@ public:
  bool close();
  // Retire this connection attempt, not the host. Only idle() proves drainage.
  int cancel_open();
+ // Attempt-local, identity-free observations. A set bit is an observed
+ // boundary, not proof of peer approval. Frozen by main at the first fault.
+ struct ConnectDiagnostic { uint32_t attempt, flags; int submit_rc, cancel_rc, status; };
+ ConnectDiagnostic connect_diagnostic() const {
+  return {connect_attempt.load(),connect_flags.load(),connect_submit_rc.load(),connect_cancel_rc.load(),connect_status.load()};
+ }
  bool scan_tick(uint32_t now);
  TeslaBleDiscovery discovery;
  uint16_t tx()const{return write_handle;}uint16_t rx()const{return notify_handle;}
@@ -61,6 +67,8 @@ private:
  uint16_t service_start=0,service_end=0,write_handle=0,notify_handle=0,descriptor_end=0,cccd=0;
  unsigned services=0,writes=0,notifies=0,descriptors=0;uint8_t properties=0;
  std::atomic<int> pending{0}; // one request, callbacks terminal before disconnect event
+ std::atomic<uint32_t> connect_attempt{0},connect_flags{0};
+ std::atomic<int> connect_submit_rc{-1},connect_cancel_rc{-1},connect_status{-1};
  struct Advertisement{uint8_t address[6]{},type=255,data[31]{};uint8_t size=0;};
  Advertisement advertisements[8]{};unsigned next_advertisement=0;
 };

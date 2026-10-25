@@ -18,7 +18,19 @@
   std::deque<std::function<void()>> main_callbacks;unsigned queued_executed=0;
   auto main_pass=[&]{auto*worker=running_task;running_task=nullptr;while(!main_callbacks.empty()){auto f=std::move(main_callbacks.front());main_callbacks.pop_front();f();r=m.tesla->runtime_owner.get();++queued_executed;}m.loop();running_task=worker;};
   if(const char*mode=std::getenv("TESLA_REVIEW_SCHEDULE")){if(std::string(mode)=="aged"){TeslaBleDiscovery::Snapshot snap;assert(m.bluetooth.discovery_snapshot(snap));clock_ms.store(snap.completed_at_ms+119000);}}
-  test_submit=nimble_auto_submit;on_task_delay=[&](uint32_t){main_pass();};
+  const bool connect_mixed=std::getenv("TESLA_REVIEW_SCHEDULE")&&std::string(std::getenv("TESLA_REVIEW_SCHEDULE"))=="connect-mixed";
+  unsigned open_attempt=0;uint32_t connect_terminal=0,disconnect_terminal=0;
+  test_submit=[&](int stage){
+   if(connect_mixed&&stage==1){++open_attempt;if(open_attempt==1||open_attempt==3)return;}
+   if(connect_mixed&&stage==7){connect_terminal=millis()+150;return;}
+   if(connect_mixed&&stage==6&&open_attempt==3){disconnect_terminal=millis()+170;return;}
+   nimble_auto_submit(stage);
+  };
+  on_task_delay=[&](uint32_t){
+   if(connect_terminal&&millis()>=connect_terminal){connect_terminal=0;ble_gap_event e{};e.type=BLE_GAP_EVENT_CONNECT;e.connect.status=open_attempt==3?0:13;e.connect.conn_handle=4;test_gap(&e,test_gap_arg);}
+   if(disconnect_terminal&&millis()>=disconnect_terminal){disconnect_terminal=0;nimble_force_disconnect();}
+   main_pass();
+  };
   on_delay=[&]{
    if(r&&(!running_task||running_task->name!="tesla_ble"||r->profile_pending.load()))return;++yields;main_pass();
    if(m.tesla->state.get("pairing_pending")->asBool()){

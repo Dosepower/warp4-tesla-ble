@@ -289,6 +289,19 @@ struct TeslaBleModuleTest {
  #include "host/connect_repeat_contracts.inc"
  #include "host/browser_bridge_contracts.inc"
  static void run(const std::string &mode) {
+  if(mode=="quiesce-error-delayed") {
+   BluetoothLifecycle bt;controller_status=test_status=0;async_bluetooth=true;std::thread host;
+   host_task_created=[&](TaskHandle_t t){if(t->name=="nimble_host")host=std::thread([t]{run_task(t);});};
+   assert(bt.start(TeslaVehicle::gatt_callback));auto*t=tasks.back().get();std::thread lifecycle([t]{run_task(t);});
+   const auto end=std::chrono::steady_clock::now()+std::chrono::seconds(3);
+   while(!bt.active()&&std::chrono::steady_clock::now()<end)std::this_thread::yield();assert(bt.active());
+   const uint8_t addr[]={1,2,3,4,5,6};assert(bt.central()->open(addr,0,1));
+   test_submit=[](int stage){if(stage==7){test_api_rc=7;host_bt_delay_hook.store(+[](){
+    host_bt_delay_hook=nullptr;test_api_rc=0;ble_gap_event e{};e.type=BLE_GAP_EVENT_CONNECT;e.connect.status=13;test_gap(&e,test_gap_arg);
+   });}};
+   bt.request_stop();lifecycle.join();if(bt.failed())test_run_host=false;if(host.joinable())host.join();bt.supervise();host_bt_delay_hook=nullptr;host_task_created={};async_bluetooth=false;
+   assert(bt.stopped()&&!bt.failed()&&"cancel error is not missing terminal: allow bounded real drain");return;
+  }
   if(mode=="quiesce-retains") {
    BluetoothLifecycle bt;HostNimbleDriver driver(bt,TeslaVehicle::gatt_callback);
    auto*c=bt.central();const uint8_t address[]={1,2,3,4,5,6};assert(c->open(address,0,1));

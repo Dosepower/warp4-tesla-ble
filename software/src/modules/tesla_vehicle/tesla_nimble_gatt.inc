@@ -99,7 +99,9 @@ bool TeslaVehicle::gatt_operation(GattOperation kind, uint16_t handle, tesla_war
         if (drained && !slot.retired()) {
             // Logical retirement runs on the worker only, after run() has
             // finished its watch. Vehicle will reject this incomplete frame.
-            disconnect_internal();
+            // OPEN never sent a pairing frame. Let its caller publish the
+            // connection failure, not a misleading possible-transmission loss.
+            disconnect_internal(kind != Open);
             return false;
         }
     }
