@@ -29,6 +29,12 @@ export interface state {
     pair_tx_acked_bytes: number;
     pair_tx_complete: boolean;
     pair_result: number; // -1: no completion; otherwise VehicleResultCode
+    pair_outcome?: 'none' | 'pending' | 'waiting' | 'verifying' | 'approved' | 'vehicle_rejected' | 'local_expiry' | 'connection_failed' | 'link_lost' | 'internal_failure' | 'cancelled' | 'storage_failure';
+    pair_response_seen?: boolean;
+    pair_response_whitelist?: boolean;
+    pair_response_code?: number;
+    pair_response_outer?: number;
+    pair_response_operation?: number;
     timeout_cause: string; // first ownership-supervision failure; no identity data
     timeout_operation: number;
     timeout_elapsed_ms: number;

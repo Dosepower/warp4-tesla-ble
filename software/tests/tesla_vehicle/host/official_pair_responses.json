@@ -1,0 +1,258 @@
+{
+  "source_commit": "fc5a1910ad45c42921d541089e3e366d0b897f52",
+  "encoder": "protoc (independent official vcsec.proto / universal_message.proto)",
+  "cases": [
+    {
+      "name": "information_0",
+      "hex": "22021a00",
+      "code": 0,
+      "terminal": false
+    },
+    {
+      "name": "information_1",
+      "hex": "22041a020801",
+      "code": 1,
+      "terminal": true
+    },
+    {
+      "name": "information_2",
+      "hex": "22041a020802",
+      "code": 2,
+      "terminal": true
+    },
+    {
+      "name": "information_3",
+      "hex": "22041a020803",
+      "code": 3,
+      "terminal": true
+    },
+    {
+      "name": "information_4",
+      "hex": "22041a020804",
+      "code": 4,
+      "terminal": true
+    },
+    {
+      "name": "information_5",
+      "hex": "22041a020805",
+      "code": 5,
+      "terminal": true
+    },
+    {
+      "name": "information_6",
+      "hex": "22041a020806",
+      "code": 6,
+      "terminal": true
+    },
+    {
+      "name": "information_7",
+      "hex": "22041a020807",
+      "code": 7,
+      "terminal": true
+    },
+    {
+      "name": "information_8",
+      "hex": "22041a020808",
+      "code": 8,
+      "terminal": true
+    },
+    {
+      "name": "information_9",
+      "hex": "22041a020809",
+      "code": 9,
+      "terminal": true
+    },
+    {
+      "name": "information_10",
+      "hex": "22041a02080a",
+      "code": 10,
+      "terminal": true
+    },
+    {
+      "name": "information_11",
+      "hex": "22041a02080b",
+      "code": 11,
+      "terminal": true
+    },
+    {
+      "name": "information_12",
+      "hex": "22041a02080c",
+      "code": 12,
+      "terminal": true
+    },
+    {
+      "name": "information_13",
+      "hex": "22041a02080d",
+      "code": 13,
+      "terminal": false
+    },
+    {
+      "name": "information_14",
+      "hex": "22041a02080e",
+      "code": 14,
+      "terminal": true
+    },
+    {
+      "name": "information_15",
+      "hex": "22041a02080f",
+      "code": 15,
+      "terminal": true
+    },
+    {
+      "name": "information_16",
+      "hex": "22041a020810",
+      "code": 16,
+      "terminal": true
+    },
+    {
+      "name": "information_17",
+      "hex": "22041a020811",
+      "code": 17,
+      "terminal": true
+    },
+    {
+      "name": "information_18",
+      "hex": "22041a020812",
+      "code": 18,
+      "terminal": true
+    },
+    {
+      "name": "information_19",
+      "hex": "22041a020813",
+      "code": 19,
+      "terminal": true
+    },
+    {
+      "name": "information_20",
+      "hex": "22041a020814",
+      "code": 20,
+      "terminal": true
+    },
+    {
+      "name": "information_21",
+      "hex": "22041a020815",
+      "code": 21,
+      "terminal": true
+    },
+    {
+      "name": "information_22",
+      "hex": "22041a020816",
+      "code": 22,
+      "terminal": true
+    },
+    {
+      "name": "information_23",
+      "hex": "22041a020817",
+      "code": 23,
+      "terminal": true
+    },
+    {
+      "name": "information_24",
+      "hex": "22041a020818",
+      "code": 24,
+      "terminal": true
+    },
+    {
+      "name": "information_25",
+      "hex": "22041a020819",
+      "code": 25,
+      "terminal": true
+    },
+    {
+      "name": "information_26",
+      "hex": "22041a02081a",
+      "code": 26,
+      "terminal": true
+    },
+    {
+      "name": "information_27",
+      "hex": "22041a02081b",
+      "code": 27,
+      "terminal": true
+    },
+    {
+      "name": "information_28",
+      "hex": "22041a02081c",
+      "code": 28,
+      "terminal": true
+    },
+    {
+      "name": "unknown_999",
+      "hex": "22051a0308e707",
+      "code": 999,
+      "terminal": true
+    },
+    {
+      "name": "unknown_2147483647",
+      "hex": "22081a0608ffffffff07",
+      "code": 2147483647,
+      "terminal": true
+    },
+    {
+      "name": "legacy_error_then_specific",
+      "hex": "220608021a020819",
+      "code": 25,
+      "terminal": true
+    },
+    {
+      "name": "empty_whitelist_success",
+      "hex": "220408021a00",
+      "code": 0,
+      "terminal": false
+    },
+    {
+      "name": "whitelist_wait",
+      "hex": "22041a021801",
+      "code": 0,
+      "terminal": false
+    },
+    {
+      "name": "outer_wait",
+      "hex": "22020801",
+      "code": 0,
+      "terminal": false
+    },
+    {
+      "name": "outer_error_ignored",
+      "hex": "22020802",
+      "code": -1,
+      "terminal": false
+    },
+    {
+      "name": "empty_command_ignored",
+      "hex": "2200",
+      "code": -1,
+      "terminal": false
+    },
+    {
+      "name": "no_response",
+      "hex": "-",
+      "code": -1,
+      "terminal": false
+    },
+    {
+      "name": "truncated",
+      "hex": "22041a0208",
+      "code": -1,
+      "terminal": false
+    },
+    {
+      "name": "malformed",
+      "hex": "22ff",
+      "code": -1,
+      "terminal": false
+    },
+    {
+      "name": "wrong_address",
+      "hex": "32121210414141414141414141414141414141413a020802520622041a020818",
+      "code": -1,
+      "terminal": false
+    },
+    {
+      "name": "wrong_domain",
+      "hex": "32121210414141414141414141414141414141413a020803520622041a020818",
+      "code": -1,
+      "terminal": false
+    }
+  ]
+}

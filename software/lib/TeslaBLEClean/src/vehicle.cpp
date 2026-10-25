@@ -245,7 +245,7 @@ void Vehicle::frame(const Frame &incoming,uint32_t now)
     if(exhausted() || !connected_) { return; }
     VcsecStatus observed;
     if(pair_context_ && now-pair_started_<60000 && ports_.owns(ports_.context,generation_) &&
-       decode_vcsec_status({incoming.data.data(),incoming.length},observed) && observed.kind==VcsecKind::Pairing) {
+       decode_pairing_reply({incoming.data.data(),incoming.length},{address_.data(),16},observed)) {
         // First terminal wins, including when multiple frames arrive in one RX
         // batch. A late WAIT must not hide a specific refusal.
         if(!pair_reply_terminal_) {

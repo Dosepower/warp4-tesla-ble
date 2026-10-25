@@ -95,7 +95,7 @@ private:
     void request_soc(bool manual);
     void process_commands();
     void process_pair_verification();
-    void cancel_pairing(const char *message, uint64_t command);
+    void cancel_pairing(const char *message, uint64_t command, TeslaBleCommandOutcome::PairOutcome reason = TeslaBleCommandOutcome::PairOutcome::InternalFailure);
     void publish_pairing_state();
     void process_module_events();
     bool check_worker_exhaustion();
@@ -194,6 +194,7 @@ private:
         std::atomic<bool> identity_exhausted{false};
         uint64_t terminal_error_order = 0; // Worker-only, copied with shutdown ACK.
         char terminal_error[96] = {};
+        bool pair_terminal_fault = false; // Worker-owned; first pair error survives cleanup.
         char teardown_error[96] = {};
         TeslaBleStorageAdapter storage_adapter;
         TeslaBleTransportAdapter transport_adapter;

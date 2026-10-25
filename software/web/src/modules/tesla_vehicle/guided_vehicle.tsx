@@ -11,6 +11,7 @@ import { InputSelect } from "../../ts/components/input_select";
 import { InputText } from "../../ts/components/input_text";
 
 import { teslaKeyStatus, teslaVehicleReady, teslaBluetoothReady } from "./action_policy";
+import { pairingOutcomeReason } from "./pairing_outcome";
 
 type TeslaConfig = API.getType["tesla_vehicle/profiles"];
 type Profile = TeslaConfig["entries"][number];
@@ -215,7 +216,7 @@ export class TeslaVehicle extends ConfigComponent<"tesla_vehicle/profiles", {}, 
         const status = this.state.tesla_state;
         if (status?.profile_ev_index === this.state.edit_index) return status;
         const saved = this.state.guidance?.profiles.find(p => p.ev_index === this.state.edit_index);
-        return {...status, last_error: '', running: false, connected: false, paired: saved?.paired ?? false,
+        return {...status, last_error: '', pair_outcome: 'none' as const, pair_response_seen: false, running: false, connected: false, paired: saved?.paired ?? false,
             key_present: saved?.key_presence === 'present', key_presence: saved?.key_presence ?? 'unknown' as const,
             pairing_pending: false, pair_request_sent: false};
     }
@@ -539,6 +540,13 @@ export class TeslaVehicle extends ConfigComponent<"tesla_vehicle/profiles", {}, 
     private errorText(text: string) { return text.trim().replace(/\s+/g, ' '); }
     private userReason(text: string) {
         const reason = this.errorText(text);
+        const status = this.profileStatus();
+        // New backend contract: typed origin/outcome/code, never parse a human
+        // error string to guess whether the vehicle replied or our timer expired.
+        if (reason === this.errorText(status?.last_error || '')) {
+            const structured = pairingOutcomeReason(status);
+            if (structured) return structured;
+        }
         // Only this unambiguous backend outcome is an ordinary approval expiry.
         if (reason === 'Approval deadline expired; approval not authenticated') return __("tesla_vehicle.status.approval_expired");
         if (/link\/session lost|transport disconnected|connection lost/i.test(reason)) return __("tesla_vehicle.status.link_lost");
@@ -655,6 +663,9 @@ export class TeslaVehicle extends ConfigComponent<"tesla_vehicle/profiles", {}, 
                 {assigned && resetReason && shownReasons.indexOf(resetReason) < 0 && (!state.edit_binding || resetReason !== setupReason) ? <p role="status" class="text-muted">{resetReason}</p> : undefined}
                 {!status.paired && (status.key_presence === 'present' || status.key_presence === 'cleanup') ? <FormRow><Button type="button" variant="outline-danger" className="w-100" disabled={state.command_busy || !this.deleteAllowed('cleanup')} onClick={() => this.command('cleanup')}>{__("tesla_vehicle.content.cleanup_key")}</Button></FormRow> : undefined}
                 {technicalErrors.map(message => <div key={message} class="text-break">{message}</div>)}
+                {status.pair_response_seen ? <div class="text-break">{__("tesla_vehicle.pair_response.unverified")}<br />
+                    {'VCSEC: information=' + status.pair_response_code + ', outer=' + status.pair_response_outer + ', operation=' + status.pair_response_operation + ', whitelist=' + status.pair_response_whitelist}
+                </div> : undefined}
             </div> : undefined}
         </Fragment>;
     }

@@ -32,7 +32,8 @@ bool decode_vcsec_status(Bytes input,VcsecStatus &output)
 {
     output={}; ProtoReader reader(input); ProtoField field; bool found=false; VcsecStatus candidate;
     while(reader.next(field)) {
-        if(field.number==16 || field.number==17 || field.number==46) { return false; }
+        if(field.number==16 || field.number==17 || field.number==46 ||
+           (field.number>=6 && field.number<=15) || field.number==50 || field.number==51 || field.number==52) { return false; }
         if(field.number!=1 && field.number!=4) { continue; }
         if(found || field.wire!=2) { return false; } found=true;
         const bool vehicle=field.number==1; ProtoReader sub(field.bytes); unsigned seen=0; bool whitelist=false;
@@ -44,7 +45,7 @@ bool decode_vcsec_status(Bytes input,VcsecStatus &output)
                 if(seen || field.wire!=0 || field.integer>2) { return false; } seen=1;
                 candidate.sleep=static_cast<SleepState>(field.integer);
             } else if(field.number==1) {
-                if(seen&1 || field.wire!=0 || field.integer>2) { return false; } seen|=1;
+                if(seen&1 || field.wire!=0 || field.integer>UINT32_MAX) { return false; } seen|=1;
                 operation=static_cast<uint32_t>(field.integer);
             } else if(field.number==2) { return false; } // signed-message status is not pairing completion
             else if(field.number==3) {
@@ -53,7 +54,7 @@ bool decode_vcsec_status(Bytes input,VcsecStatus &output)
                 while(details.next(part)) {
                     if(part.number!=1 && part.number!=3) { continue; }
                     const unsigned bit=1u<<part.number;
-                    if(detail_seen&bit || part.wire!=0 || part.integer>(part.number==1?28u:2u)) { return false; }
+                    if(detail_seen&bit || part.wire!=0 || part.integer>UINT32_MAX) { return false; }
                     detail_seen|=bit;
                     if(part.number==1) { candidate.information=static_cast<uint32_t>(part.integer); }
                     else { whitelist_operation=static_cast<uint32_t>(part.integer); }
@@ -61,13 +62,44 @@ bool decode_vcsec_status(Bytes input,VcsecStatus &output)
                 if(!details.done()) { return false; }
             }
         }
-        if(!sub.done() || (!vehicle && !whitelist)) { return false; }
+        if(!sub.done() || (!vehicle && !whitelist && operation!=1)) { return false; }
         if(!vehicle) {
-            candidate.operation=operation==2 || whitelist_operation==2 || candidate.information?VcsecOperation::Error:
-                (operation==1 || whitelist_operation==1?VcsecOperation::Waiting:VcsecOperation::Success);
+            // protocol.md:824-839: outer WAIT without details means NFC wait;
+            // other legacy outer values never override a populated result.
+            candidate.whitelist=whitelist;
+            candidate.outer_operation=operation;
+            candidate.whitelist_operation=whitelist_operation;
+            candidate.operation=!whitelist?VcsecOperation::Waiting:
+                candidate.information || whitelist_operation>1?VcsecOperation::Error:
+                whitelist_operation==1?VcsecOperation::Waiting:VcsecOperation::Success;
         }
     }
     if(!reader.done() || !found) { return false; }
     output=candidate; return true;
+}
+bool decode_pairing_reply(Bytes input,Bytes address,VcsecStatus &output)
+{
+    if(decode_vcsec_status(input,output)) { return output.kind==VcsecKind::Pairing; }
+    output={};
+    if(!address.valid() || address.size!=16) { return false; }
+    ProtoReader reader(input); ProtoField f; Bytes to,from,payload; unsigned seen=0;
+    while(reader.next(f)) {
+        Bytes *target=nullptr; unsigned bit=0;
+        switch(f.number) {
+        case 6: target=&to;bit=1;break;
+        case 7: target=&from;bit=2;break;
+        case 10: target=&payload;bit=4;break;
+        // Only the documented unencrypted application status route. UUID/HMAC
+        // session processing stays strict and independent in session_wire.cpp.
+        default: return false;
+        }
+        if((seen&bit) || f.wire!=2) { return false; } seen|=bit; *target=f.bytes;
+    }
+    if(!reader.done() || seen!=7) { return false; }
+    ProtoReader destination(to),source(from);
+    if(!destination.next(f) || f.number!=2 || f.wire!=2 || f.bytes.size!=16 ||
+       std::memcmp(f.bytes.data,address.data,16) || !destination.done()) { return false; }
+    if(!source.next(f) || f.number!=1 || f.wire!=0 || f.integer!=2 || !source.done()) { return false; }
+    return decode_vcsec_status(payload,output) && output.kind==VcsecKind::Pairing;
 }
 }

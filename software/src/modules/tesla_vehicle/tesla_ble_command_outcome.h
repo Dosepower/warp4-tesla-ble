@@ -20,6 +20,23 @@ public:
     // Admission survives lossy/coalesced diagnostics. Only terminal main ACK
     // releases ownership, using the existing runtime mutex (no new allocation).
     enum class PairPhase { Idle, Queued, Working, Sent, Approval, Cancelling, Failed };
+    enum class PairOutcome { None, Pending, Waiting, Verifying, Approved, VehicleRejected, LocalExpiry, ConnectionFailed, LinkLost, InternalFailure, Cancelled, StorageFailure };
+    static const char *outcome_name(PairOutcome reason) {
+        switch(reason) {
+        case PairOutcome::Pending:return "pending";
+        case PairOutcome::Waiting:return "waiting";
+        case PairOutcome::Verifying:return "verifying";
+        case PairOutcome::Approved:return "approved";
+        case PairOutcome::VehicleRejected:return "vehicle_rejected";
+        case PairOutcome::LocalExpiry:return "local_expiry";
+        case PairOutcome::ConnectionFailed:return "connection_failed";
+        case PairOutcome::LinkLost:return "link_lost";
+        case PairOutcome::InternalFailure:return "internal_failure";
+        case PairOutcome::Cancelled:return "cancelled";
+        case PairOutcome::StorageFailure:return "storage_failure";
+        default:return "none";
+        }
+    }
     struct Pair {
         uint64_t command = 0;
         uint32_t authority_started = 0, authority_config = 0, authority_binding = 0;
@@ -32,6 +49,9 @@ public:
         bool cleanup_required = false;
         uint64_t order = 0;
         char error[96] = {};
+        PairOutcome outcome = PairOutcome::None;
+        bool response_seen = false, response_whitelist = false;
+        uint32_t response_code = 0, response_outer = 0, response_operation = 0;
     };
     // Explicit admission pins fresh radio evidence to THIS command only. It is
     // not stored authorization and cannot be inherited by a later attempt.
@@ -45,6 +65,7 @@ public:
         pair = {};
         pair.command = ++pair_sequence;
         pair.phase = PairPhase::Queued;
+        pair.outcome = PairOutcome::Pending;
         pair.vehicle = identity;
         pair.authority_started = now;
         pair.authority_config = config;
@@ -90,6 +111,7 @@ public:
         if (lock && !deleting && command == pair.command && pair.phase == PairPhase::Working) {
             pair.phase = PairPhase::Sent;
             pair.sent = true;
+            pair.outcome = PairOutcome::Waiting;
         }
     }
     void pair_approved(uint64_t command, TeslaBleRequestIdentity request)
@@ -97,9 +119,19 @@ public:
         tesla_warp::CheckedMutex::Guard lock(mutex);
         if (lock && !deleting && command == pair.command && pair.phase == PairPhase::Sent) {
             pair.phase = PairPhase::Approval;
+            pair.outcome = PairOutcome::Approved;
             pair.approval = request;
             pair.key_present = pair.key_known = true;
             pair.order = advance_order();
+        }
+    }
+    void pair_response(uint64_t command, uint32_t code, uint32_t outer, uint32_t operation, bool whitelist, bool waiting)
+    {
+        tesla_warp::CheckedMutex::Guard lock(mutex);
+        if (lock && !deleting && command == pair.command && pair.phase == PairPhase::Sent) {
+            pair.response_seen = true; pair.response_whitelist = whitelist;
+            pair.response_code = code; pair.response_outer = outer; pair.response_operation = operation;
+            pair.outcome = waiting ? PairOutcome::Waiting : PairOutcome::Verifying;
         }
     }
     uint64_t retire_pair()
@@ -129,7 +161,7 @@ public:
         tesla_warp::CheckedMutex::Guard lock(mutex, true);
         return lock && exhausted;
     }
-    template<class Cleanup> uint64_t cancel_pair(uint64_t command, const char *message, bool key_present, bool key_known, bool cleanup_required, Cleanup cleanup)
+    template<class Cleanup> uint64_t cancel_pair(uint64_t command, const char *message, bool key_present, bool key_known, bool cleanup_required, Cleanup cleanup, PairOutcome reason = PairOutcome::InternalFailure)
     {
         tesla_warp::CheckedMutex::Guard lock(mutex);
         if (!lock || !command || pair.command != command || pair.phase == PairPhase::Failed) { return 0; }
@@ -139,6 +171,7 @@ public:
         // Terminal visibility is last: main cannot admit a successor before it.
         cleanup();
         pair.phase = PairPhase::Failed;
+        pair.outcome = reason;
         pair.key_present = key_present;
         pair.key_known = key_known;
         pair.cleanup_required = cleanup_required;

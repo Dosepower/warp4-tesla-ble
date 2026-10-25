@@ -362,6 +362,10 @@ void TeslaVehicle::publish_profile()
     tesla->published_index = index;
     tesla->pairing_policy.on_key_removed();
     tesla->state.get("profile_ev_index")->updateInt(index);
+    tesla->state.get("pair_outcome")->updateString("none");
+    tesla->state.get("pair_response_seen")->updateBool(false);
+    tesla->state.get("pair_response_whitelist")->updateBool(false);
+    for (const char *name : {"pair_response_code", "pair_response_outer", "pair_response_operation"}) { tesla->state.get(name)->updateUint(0); }
     tesla->state.get("paired")->updateBool(r->authorized.load());
     tesla->state.get("key_present")->updateBool(r->profile_key_present.load());
     const auto presence = r->profile_key_presence.load();

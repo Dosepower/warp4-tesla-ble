@@ -9,7 +9,7 @@
    for(auto k:texts){key(k);string(c->get(k)->asString());}for(auto k:numbers){key(k);std::cout<<c->get(k)->asInt();}for(auto k:bools){key(k);std::cout<<(c->get(k)->asBool()?"true":"false");}std::cout<<'}';
   };
   auto emit=[&]{m.loop();m.publish_guidance();std::cout<<"BRIDGE {\"serial\":"<<++serial<<",\"epoch\":"<<(r?r->epoch:0)<<",\"clock_ms\":"<<millis()<<",\"pair_started_ms\":"<<(r?r->pair_started_ms:0)<<",\"frames\":"<<frames<<",\"yields\":"<<yields<<",\"error\":";string(error);std::cout<<",\"state\":";
-   object(&m.tesla->state,{"key_presence","last_error"},{"profile_ev_index","active_ev_index"},{"running","stopping","connected","key_present","paired","pairing_pending","pair_request_sent","restart_required","action_busy"});
+   object(&m.tesla->state,{"key_presence","last_error","pair_outcome"},{"profile_ev_index","active_ev_index","pair_response_code","pair_response_outer","pair_response_operation"},{"running","stopping","connected","key_present","paired","pairing_pending","pair_request_sent","restart_required","action_busy","pair_response_seen","pair_response_whitelist"});
    std::cout<<",\"guidance\":{\"generation\":";string(m.tesla->guidance.get("generation")->asString());std::cout<<",\"revision\":"<<m.tesla->config_revision<<",\"request\":";string(m.tesla->guidance.get("request")->asString());std::cout<<",\"ready\":"<<(m.tesla->guidance.get("ready")->asBool()?"true":"false")<<",\"profiles\":[";
    auto rows=m.tesla->guidance.get("profiles");for(size_t i=0;i<rows->count();++i){if(i)std::cout<<',';object(rows->get(i),{"ev_mac","key_presence"},{"ev_index"},{"namespace_clean","binding_fresh","paired"});}std::cout<<"]},\"profiles\":{\"entries\":[";
    for(int i=0;i<2;++i){if(i)std::cout<<',';object(m.find_profile(i),{"ev_mac","vin","ble_address"},{"ev_index","ble_address_type","discovery_revision","poll_interval"},{"enable","wake_once"});}std::cout<<"]},\"discovery\":";
@@ -20,6 +20,9 @@
   if(const char*mode=std::getenv("TESLA_REVIEW_SCHEDULE")){if(std::string(mode)=="aged"){TeslaBleDiscovery::Snapshot snap;assert(m.bluetooth.discovery_snapshot(snap));clock_ms.store(snap.completed_at_ms+119000);}}
   const bool connect_mixed=std::getenv("TESLA_REVIEW_SCHEDULE")&&std::string(std::getenv("TESLA_REVIEW_SCHEDULE"))=="connect-mixed";
   unsigned open_attempt=0;uint32_t connect_terminal=0,disconnect_terminal=0;
+  unsigned response_attempt=0;
+  std::vector<std::string> responses;
+  if(const char *sequence=std::getenv("TESLA_PAIR_RESPONSE_SEQUENCE")){std::istringstream list(sequence);std::string hex;while(std::getline(list,hex,';'))responses.push_back(hex);}
   test_submit=[&](int stage){
    if(connect_mixed&&stage==1){++open_attempt;if(open_attempt==1||open_attempt==3)return;}
    if(connect_mixed&&stage==7){connect_terminal=millis()+150;return;}
@@ -34,7 +37,15 @@
   on_delay=[&]{
    if(r&&(!running_task||running_task->name!="tesla_ble"||r->profile_pending.load()))return;++yields;main_pass();
    if(m.tesla->state.get("pairing_pending")->asBool()){
-    if(m.tesla->state.get("pair_request_sent")->asBool()&&!active){active=true;waiting=false;emit();std::this_thread::sleep_for(std::chrono::milliseconds(250));}return;
+    if(m.tesla->state.get("pair_request_sent")->asBool()&&!active){
+     active=true;waiting=false;emit();std::this_thread::sleep_for(std::chrono::milliseconds(250));
+     if(response_attempt<responses.size()){
+      const auto hex=responses[response_attempt++];std::vector<uint8_t>payload;
+      for(size_t i=0;i<hex.size();i+=2){unsigned b;assert(std::sscanf(hex.c_str()+i,"%2x",&b)==1);payload.push_back(b);}
+      std::vector<uint8_t>wire{uint8_t(payload.size()>>8),uint8_t(payload.size())};wire.insert(wire.end(),payload.begin(),payload.end());
+      for(size_t i=0;i<wire.size();i+=3){os_mbuf mb;mb.bytes.assign(wire.begin()+i,wire.begin()+std::min(wire.size(),i+3));ble_gap_event e{};e.type=BLE_GAP_EVENT_NOTIFY_RX;e.notify_rx.conn_handle=4;e.notify_rx.attr_handle=20;e.notify_rx.om=&mb;test_gap(&e,test_gap_arg);}
+     }
+    }return;
    }
    if(waiting||active||serial==0){waiting=false;active=false;emit();}
    std::string line;if(!std::getline(std::cin,line)||line=="quit"){r->stop_requested=true;return;}

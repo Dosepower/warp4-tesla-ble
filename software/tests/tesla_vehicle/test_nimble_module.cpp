@@ -10,6 +10,7 @@ static void sdk_track_pending_write() {}
 #include <cstdio>
 #include <iostream>
 #include <sstream>
+#include <fstream>
 struct TeslaBleModuleTest {
  static constexpr uint64_t A=0x112233445500ULL,B=0x112233445501ULL;
  static void entry(Config *p,int index) {
@@ -139,6 +140,7 @@ struct TeslaBleModuleTest {
     else if(scenario=="profile-switch") {++ev.generation;ev.index=1;ev.mac=B;m.refresh_live_session();m.update_active_vehicle();}
     else {clock_ms.fetch_add(60000);m.process_pair_verification();}
     m.process_module_events();m.publish_bluetooth_state();
+    if(scenario=="link-drop")assert(m.tesla->state.get("pair_outcome")->asString()=="link_lost");
     assert(!r->connected.load() && !r->authorized.load() && !m.tesla->state.get("paired")->asBool());
     assert(!m.tesla->state.get("pairing_pending")->asBool() && !r->stop_requested.load() && !r->operation.retired());
     assert(m.bluetooth.active() && !m.tesla->state.get("restart_required")->asBool());

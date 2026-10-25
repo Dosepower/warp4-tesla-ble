@@ -198,6 +198,12 @@ bool TeslaVehicle::prepare_tesla()
         {"pair_tx_acked_bytes", Config::Uint(0, 0, 1026)},
         {"pair_tx_complete", Config::Bool(false)},
         {"pair_result", Config::Int(-1, -1, 8)},
+        {"pair_outcome", Config::Str("none", 0, 24)},
+        {"pair_response_seen", Config::Bool(false)},
+        {"pair_response_whitelist", Config::Bool(false)},
+        {"pair_response_code", Config::Uint(0, 0, UINT32_MAX)},
+        {"pair_response_outer", Config::Uint(0, 0, UINT32_MAX)},
+        {"pair_response_operation", Config::Uint(0, 0, UINT32_MAX)},
         {"timeout_cause", Config::Str("", 0, 24)},
         {"timeout_operation", Config::Uint(0, 0, 255)},
         {"timeout_elapsed_ms", Config::Uint(0, 0, UINT32_MAX)},
@@ -1143,6 +1149,7 @@ void TeslaVehicle::process_commands()
         const auto accepted = r->command_outcome.claim_pair();
         if (!accepted) { return; }
         r->pair_command = accepted->command;
+        r->pair_terminal_fault = false;
         r->reset_pair_diagnostics();
 #if TESLA_BLE_MANUAL_VEHICLE_UI
         if (!active_identity_matches(*captured) || *captured != accepted->vehicle || captured->index != r->configured_ev_index ||
@@ -1177,7 +1184,8 @@ void TeslaVehicle::process_commands()
                    !r->storage->initialize_identity(*r->keys, {TeslaBleTransportAdapter::random, nullptr}))) {
             cancel_pairing("Could not durably initialize Tesla pairing key", r->pair_command);
         } else if (!ensure_connected()) {
-            cancel_pairing("Could not connect to Tesla for pairing", r->pair_command);
+            cancel_pairing("Could not connect to Tesla for pairing", r->pair_command,
+                r->operation.retired() || r->retirement_operation.retired() ? TeslaBleCommandOutcome::PairOutcome::InternalFailure : TeslaBleCommandOutcome::PairOutcome::ConnectionFailed);
         } else if (r->stop_requested.load() || r->session.identity() != captured) {
             cancel_pairing("Vehicle changed during pairing connection", r->pair_command);
         } else if (!tesla_clean::KeyStorage::committed(r->storage->save_transaction("warp_ev_mac", encoded_mac.data(), encoded_mac.size()))) {
@@ -1201,7 +1209,7 @@ void TeslaVehicle::process_commands()
                 r->pair_result.store(static_cast<int>(result.code));
                 if (r->stop_requested.load() || result.context != request.request ||
                     result.generation != r->connection_generation.load() || !r->session.matches(request)) {
-                    cancel_pairing("Pairing link/session lost; transmission may have occurred; approval not authenticated", command); return;
+                    cancel_pairing("Pairing link/session lost; transmission may have occurred; approval not authenticated", command, TeslaBleCommandOutcome::PairOutcome::LinkLost); return;
                 }
                 r->pair_sending = false;
                 if (result.code == tesla_clean::VehicleResultCode::PairRequestSent) {
@@ -1329,15 +1337,23 @@ void TeslaVehicle::process_pair_verification()
 #endif
     const bool session_lost = r->stop_requested.load() || !r->session.matches(r->pair_request);
     tesla_clean::VcsecStatus response;
-    if (!session_lost && r->command_outcome.pair_current(r->pair_command) &&
-        r->vehicle->take_pairing_status(r->pair_request.request, r->connection_generation.load(), response) &&
-        response.operation == tesla_clean::VcsecOperation::Error && response.information != 13) {
-        char message[96];
-        snprintf(message, sizeof(message), "VCSEC whitelist information=%lu; unauthenticated current-link response", static_cast<unsigned long>(response.information));
-        r->command_outcome.retire_pair();
-        disconnect_internal(false);
-        cancel_pairing(message, r->pair_command);
-        return;
+    if (!session_lost && millis() - r->pair_started_ms < 60000 && r->command_outcome.pair_current(r->pair_command) &&
+        r->vehicle->take_pairing_status(r->pair_request.request, r->connection_generation.load(), response)) {
+        r->command_outcome.pair_response(r->pair_command, response.information, response.outer_operation,
+            response.whitelist_operation, response.whitelist, response.operation == tesla_clean::VcsecOperation::Waiting);
+        if (response.operation == tesla_clean::VcsecOperation::Error && response.information != 13) {
+            char message[96];
+            snprintf(message, sizeof(message), "VCSEC whitelist information=%lu; unauthenticated current-link response", static_cast<unsigned long>(response.information));
+            // Freeze the actual first response before CLOSE callbacks/errors.
+            // Admission stays closed through the complete physical drainage.
+            r->command_outcome.begin_worker_cleanup();
+            cancel_pairing(message, r->pair_command, TeslaBleCommandOutcome::PairOutcome::VehicleRejected);
+            disconnect_internal(false);
+            r->command_outcome.end_cleanup();
+            return;
+        }
+        // NONE/already-listed are not authenticated success. Continue the
+        // existing verification without re-sending PRESENT_KEY.
     }
     if (session_lost || millis() - r->pair_started_ms >= 60000) {
         // Classify before disconnect_internal retires the session itself. A real
@@ -1345,7 +1361,8 @@ void TeslaVehicle::process_pair_verification()
         r->command_outcome.retire_pair();
         disconnect_internal(false);
         cancel_pairing(session_lost ? "Pairing verification link/session lost; approval not authenticated" :
-            "Approval deadline expired; approval not authenticated", r->pair_command);
+            "Approval deadline expired; approval not authenticated", r->pair_command,
+            session_lost ? TeslaBleCommandOutcome::PairOutcome::LinkLost : TeslaBleCommandOutcome::PairOutcome::LocalExpiry);
         return;
     }
     if (r->pair_status_active || r->command_outcome.forgetting()) { return; }
@@ -1358,18 +1375,19 @@ void TeslaVehicle::process_pair_verification()
         // Old completions cannot clear a successor's status flags.
         if (result.context != request.request || result.generation != r->connection_generation.load() ||
             !r->session.matches(request) || r->stop_requested.load()) {
-            cancel_pairing("Pairing verification link/session lost; approval not authenticated", command); return;
+            cancel_pairing("Pairing verification link/session lost; approval not authenticated", command, TeslaBleCommandOutcome::PairOutcome::LinkLost); return;
         }
         r->pair_status_active = false;
         if (result.code == tesla_clean::VehicleResultCode::Status && result.authenticated) {
 #if TESLA_BLE_MANUAL_VEHICLE_UI
             const uint8_t authorized = 1;
             if (!tesla_clean::KeyStorage::committed(r->storage->save_transaction("authorized", &authorized, 1))) {
-                cancel_pairing("Authenticated approval could not be persisted; key retained", command); return;
+                cancel_pairing("Authenticated approval could not be persisted; key retained", command, TeslaBleCommandOutcome::PairOutcome::StorageFailure); return;
             }
             r->authorized.store(true);
 #endif
             r->pair_verifying = false;
+            r->vehicle->end_pairing_status(request.request);
             r->pair_approval_waiting.store(true);
             post_event(EventType::PairApproved, nullptr, NAN, request, true, true);
         } else {
@@ -1385,7 +1403,7 @@ void TeslaVehicle::process_pair_verification()
     if (!r->pair_status_active) { r->pair_next_ms = millis() + 1000; }
 }
 
-void TeslaVehicle::cancel_pairing(const char *message, uint64_t command)
+void TeslaVehicle::cancel_pairing(const char *message, uint64_t command, TeslaBleCommandOutcome::PairOutcome reason)
 {
     Runtime *r = tesla->runtime_owner.get();
     const auto presence = r->storage->private_key_presence();
@@ -1401,7 +1419,8 @@ void TeslaVehicle::cancel_pairing(const char *message, uint64_t command)
         r->pair_sending = r->pair_verifying = r->pair_status_active = false;
         r->pair_approval_waiting.store(false);
         strlcpy(r->terminal_error, message, sizeof(r->terminal_error));
-    });
+        r->pair_terminal_fault = true;
+    }, reason);
     if (order) { r->terminal_error_order = order; }
     if (order && r->vehicle) { r->vehicle->end_pairing_status(r->pair_request.request); }
 }
@@ -1415,6 +1434,14 @@ void TeslaVehicle::publish_pairing_state()
             r->configured_ev_index, true, true, 50, [](float) {});
     });
     if (!pair) { return; } // Contention never means idle.
+    if (pair->command) {
+        tesla->state.get("pair_outcome")->updateString(TeslaBleCommandOutcome::outcome_name(pair->outcome));
+        tesla->state.get("pair_response_seen")->updateBool(pair->response_seen);
+        tesla->state.get("pair_response_whitelist")->updateBool(pair->response_whitelist);
+        tesla->state.get("pair_response_code")->updateUint(pair->response_code);
+        tesla->state.get("pair_response_outer")->updateUint(pair->response_outer);
+        tesla->state.get("pair_response_operation")->updateUint(pair->response_operation);
+    }
     using Phase = TeslaBleCommandOutcome::PairPhase;
     const bool terminal = pair->completed;
     if (terminal) {
@@ -1505,6 +1532,7 @@ void TeslaVehicle::post_event(EventType type, const char *message, float soc,
         return;
     }
     if (type == EventType::Error) {
+        if (r->pair_terminal_fault) { return; } // First pair error survives later cleanup faults.
         if (message) { strlcpy(r->terminal_error, message, sizeof(r->terminal_error)); }
         const auto presence = r->storage->private_key_presence();
         r->terminal_error_order = r->command_outcome.publish(OutcomeKind::Error, presence == TeslaBleStorageAdapter::KeyPresence::Present, message,

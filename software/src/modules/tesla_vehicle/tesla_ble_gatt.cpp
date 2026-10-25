@@ -204,7 +204,8 @@ void TeslaVehicle::disconnect_internal(bool cancel_pair)
     if (r->operation.retired()) { r->stop_requested.store(true); }
     if (r->vehicle) { r->vehicle->close(retired); }
     if (cancelled) {
-        cancel_pairing("Pairing link/session lost; transmission may have occurred; approval not authenticated", cancelled);
+        cancel_pairing("Pairing link/session lost; transmission may have occurred; approval not authenticated", cancelled,
+            r->operation.retired() || r->retirement_operation.retired() ? TeslaBleCommandOutcome::PairOutcome::InternalFailure : TeslaBleCommandOutcome::PairOutcome::LinkLost);
     }
     r->pending_disconnect.take(); // No old stream token may survive retirement.
     r->command_outcome.end_cleanup();
