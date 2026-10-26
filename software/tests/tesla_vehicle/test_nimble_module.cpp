@@ -7,6 +7,10 @@
 #else
 static void sdk_track_pending_write() {}
 #endif
+#ifdef TESLA_BLE_BINDING_VFS_TEST
+#include <condition_variable>
+extern std::function<int(const char *, const std::string &)> vfs_bridge_fault;
+#endif
 #include <cstdio>
 #include <iostream>
 #include <sstream>
@@ -293,6 +297,7 @@ struct TeslaBleModuleTest {
  #include "host/pair_response_contracts.inc"
 #include "host/rx_capacity_contracts.inc"
 #include "host/rx_burst_contracts.inc"
+#include "host/binding_persistence_contracts.inc"
  static void run(const std::string &mode) {
   if(mode=="quiesce-error-delayed") {
    BluetoothLifecycle bt;controller_status=test_status=0;async_bluetooth=true;std::thread host;
@@ -420,6 +425,9 @@ struct TeslaBleModuleTest {
   if(mode=="browser-bridge"){browser_bridge(m);return;}
   if(mode.rfind("authority-",0)==0){authority_flow(m,mode);return;}
   if(mode=="flow-repeat"||mode=="flow-repeat-cleanup"){repeated_flow(m,mode=="flow-repeat-cleanup");return;}
+#ifdef TESLA_BLE_BINDING_VFS_TEST
+  if(mode.rfind("binding-",0)==0){binding_flow(m,mode);return;}
+#endif
 #ifdef TESLA_NIMBLE_REAL_DRAIN_HEADER
   if(mode.rfind("followup-",0)==0){followup_flow(m,mode);return;}
 #endif

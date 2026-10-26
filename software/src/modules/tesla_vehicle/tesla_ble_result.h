@@ -55,6 +55,18 @@ public:
     {
         tesla_warp::ScalarPublicationMutex::Guard lock(writer_mutex);
         if (!lock) { return; }
+        // Main (every loop) and worker (every pass) republish the unchanged
+        // live identity. Each write opens an odd-version window in which a
+        // concurrent reader reports "unavailable", and the worker's storage
+        // mutation guard then refuses an in-progress pairing transaction.
+        // Republishing equal bytes changes nothing: leave the coherence tag
+        // untouched, so readers fail closed only during a genuine change.
+        // Scalar writer copy (no address of the argument is taken), so the
+        // caller frames of this noinline function stay as before.
+        if (writer_published && writer_generation == identity.generation &&
+            writer_index == identity.index && writer_mac == identity.mac) { return; }
+        writer_generation = identity.generation; writer_index = identity.index; writer_mac = identity.mac;
+        writer_published = true;
         version.store(++writer_version);
         generation_low.store(static_cast<uint32_t>(identity.generation));
         generation_high.store(static_cast<uint32_t>(identity.generation >> 32));
@@ -82,6 +94,10 @@ private:
     static_assert(alignof(std::atomic<uint32_t>) >= 4, "Aligned ESP32 word accesses required");
     tesla_warp::ScalarPublicationMutex writer_mutex;
     uint32_t writer_version = 0; // Accessed only under writer_mutex.
+    // Last published value; accessed only under writer_mutex.
+    uint64_t writer_generation = 0, writer_mac = 0;
+    int writer_index = -1;
+    bool writer_published = false;
     std::atomic<uint32_t> version{0}, generation_low{0}, generation_high{0}, index{UINT32_MAX}, mac_low{0}, mac_high{0};
 };
 
