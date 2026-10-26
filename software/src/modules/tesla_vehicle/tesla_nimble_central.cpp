@@ -52,10 +52,14 @@ void TeslaNimbleCentral::emit(TeslaNimbleEvent::Kind kind,int status,uint16_t ha
 bool TeslaNimbleCentral::open(const uint8_t *a,uint8_t type,uint64_t epoch){
  if(!ready()||!a||type>1||!epoch||discovery.busy()||ble_gap_disc_active())return false;
  bool expected=false;if(!busy.compare_exchange_strong(expected,true))return false;
- cookie.epoch=epoch;connection=0xffff;cancelling_open=false;write_handle=notify_handle=cccd=0;pending=TeslaNimbleEvent::Open;
+ // Publish the attempt's peer before pending=Open: readers that observe
+ // pending==Open (retire_unannounced, possibly from the lifecycle task) see it.
+ ble_addr_t peer{};peer.type=type;for(unsigned i=0;i<6;++i)peer.val[i]=a[5-i];open_peer=peer;
+ cookie.epoch=epoch;connection=0xffff;cancelling_open=false;write_handle=notify_handle=cccd=0;
+ unannounced=0xffff;open_cancel_accepted=false;unannounced_terminating=false;link_terminate_accepted=false;
+ pending=TeslaNimbleEvent::Open;
  connect_flags=0;connect_submit_rc=-1;connect_cancel_rc=-1;connect_status=-1;
  connect_attempt.fetch_add(1);connect_flags.fetch_or(1); // entered SDK submit
- ble_addr_t peer{};peer.type=type;for(unsigned i=0;i<6;++i)peer.val[i]=a[5-i];
  // Leave a bounded callback-delivery margin before the worker's 10s GATT
  // watchdog. Equal SDK/worker deadlines race a normal absent-peer timeout
  // into permanent ownership quarantine.
@@ -112,6 +116,24 @@ int TeslaNimbleCentral::written(uint16_t conn,const ble_gatt_error *e,ble_gatt_a
  c.pending=0;c.emit(static_cast<TeslaNimbleEvent::Kind>(kind),e?e->status:BLE_HS_EUNKNOWN,expected);return 0;
 }
 bool TeslaNimbleCentral::close(){if(connection==0xffff)return false;return ble_gap_terminate(connection,BLE_ERR_REM_USER_CONN_TERM)==0;}
+int TeslaNimbleCentral::retire_unannounced(){
+ // Pinned IDF ble_gap_rx_conn_complete() resets the master procedure at HCI
+ // LE Connection Complete (ble_gap_conn_cancel then returns EALREADY) but,
+ // with DEFER_CONN_EVENTS, posts CONNECT only after remote feature/version
+ // exchange. Until then this OPEN owns a physical link we were never told
+ // about. Only a master link to this attempt's exact peer is retired here.
+ if(!busy.load()||connection.load()!=0xffff||pending.load()!=TeslaNimbleEvent::Open)return -1;
+ ble_gap_conn_desc desc{};
+ if(ble_gap_conn_find_by_addr(&open_peer,&desc)!=0||desc.role!=BLE_GAP_ROLE_MASTER||desc.conn_handle==0xffff)return -1;
+ uint16_t expected=0xffff;
+ if(!unannounced.compare_exchange_strong(expected,desc.conn_handle)&&expected!=desc.conn_handle)return -1;
+ connect_flags.fetch_or(64);
+ if(unannounced_terminating.load())return 0;
+ const int rc=ble_gap_terminate(desc.conn_handle,BLE_ERR_REM_USER_CONN_TERM);
+ // EALREADY: the SDK already marked it TERMINATING; its DISCONNECT follows.
+ if(rc==0||rc==BLE_HS_EALREADY){unannounced_terminating=true;connect_flags.fetch_or(128);return 0;}
+ return rc;
+}
 int TeslaNimbleCentral::cancel_open(){
  // Set BEFORE submission: success can race cancellation. Never expose a late
  // link as usable, and never interpret an API return as terminal ownership.
@@ -119,9 +141,25 @@ int TeslaNimbleCentral::cancel_open(){
  if(!busy.load())return 0;
  const auto conn=connection.load();
  connect_flags.fetch_or(4);
- const int rc=conn==0xffff?ble_gap_conn_cancel():ble_gap_terminate(conn,BLE_ERR_REM_USER_CONN_TERM);
- connect_cancel_rc=rc;connect_flags.fetch_or(8);
- return rc;
+ int rc,link=-1;
+ if(conn!=0xffff){
+  // Repeat calls are drain steps: once this path's terminate was accepted
+  // only the SDK's DISCONNECT can finish ownership; never resubmit it.
+  if(link_terminate_accepted.load())rc=BLE_HS_EALREADY;
+  else{rc=ble_gap_terminate(conn,BLE_ERR_REM_USER_CONN_TERM);if(rc==0||rc==BLE_HS_EALREADY)link_terminate_accepted=true;}
+ }
+ else{
+  // One LE Create Connection Cancel per attempt; repeating it while the SDK
+  // still reports M_CONN would only produce controller Command Disallowed.
+  rc=open_cancel_accepted.load()?BLE_HS_EALREADY:ble_gap_conn_cancel();
+  // EALREADY: no M_CONN procedure remains for this attempt; never resubmit.
+  if(rc==0||rc==BLE_HS_EALREADY)open_cancel_accepted=true;
+  // Also after an accepted cancel: the controller can still complete the
+  // link. Its terminate result (flags 64/128) supersedes EALREADY.
+  link=retire_unannounced();
+ }
+ int expected=-1;connect_cancel_rc.compare_exchange_strong(expected,rc);connect_flags.fetch_or(8);
+ return link!=-1?link:rc;
 }
 int TeslaNimbleCentral::gap(ble_gap_event *e,void *arg){
  if(!e||!arg)return 0;auto &c=*static_cast<Cookie *>(arg)->owner;
@@ -135,7 +173,20 @@ int TeslaNimbleCentral::gap(ble_gap_event *e,void *arg){
   if(c.retiring.load()||c.cancelling_open.load()){c.close();return 0;}
   c.emit(TeslaNimbleEvent::Open,0);break;
  case BLE_GAP_EVENT_DISCONNECT:
-  if(e->disconnect.conn.conn_handle!=c.connection)return 0;
+  if(e->disconnect.conn.conn_handle!=c.connection){
+   // Pinned IDF ble_gap_conn_broken() delivers DISCONNECT for a master link
+   // even when CONNECT was never posted (e.g. 0x3E during feature exchange),
+   // after deleting the connection and failing its GATT procedures. That is
+   // the terminal of this pending OPEN: no CONNECT can follow for the handle.
+   // Only this cookie's links reach here; a learned handle must also match.
+   if(c.connection.load()!=0xffff||c.pending!=TeslaNimbleEvent::Open||!c.busy.load())return 0;
+   const auto learned=c.unannounced.load();
+   if(learned!=0xffff&&learned!=e->disconnect.conn.conn_handle)return 0;
+   c.connect_flags.fetch_or(256);c.pending=0;
+   const TeslaNimbleEvent ended{TeslaNimbleEvent::Open,c.cookie.epoch,0xffff,0,e->disconnect.reason?e->disconnect.reason:BLE_HS_EUNKNOWN,nullptr,0};
+   if(c.handler)c.handler(ended);
+   c.busy.store(false,std::memory_order_release);return 0;
+  }
   c.connect_flags.fetch_or(32);
   // IDF ble_gap.c calls gattc_connection_broken before this callback. No prior
   // procedure owns cookie after this barrier; do not replace it earlier.

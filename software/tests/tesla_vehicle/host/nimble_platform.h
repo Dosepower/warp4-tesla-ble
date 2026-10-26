@@ -14,7 +14,9 @@ constexpr int configMAX_PRIORITIES=25;
 constexpr int BLE_HS_EUNKNOWN=1,BLE_HS_EDONE=14,BLE_HS_EAUTHEN=23,BLE_HS_IO_NO_INPUT_OUTPUT=3,BLE_GAP_REPEAT_PAIRING_IGNORE=0;
 constexpr int BLE_ERR_REM_USER_CONN_TERM=19;
 constexpr int BLE_HS_EALREADY=2;
+#ifndef TESLA_NIMBLE_REAL_GAP
 inline int ble_gap_conn_cancel();
+#endif
 #ifndef TESLA_BLE_MODULE_HOST_TEST
 constexpr int ESP_BT_CONTROLLER_STATUS_IDLE=0;
 #endif
@@ -31,7 +33,11 @@ struct os_mbuf{std::vector<uint8_t> bytes;};
 inline int os_mbuf_copydata(const os_mbuf *m,int at,size_t n,void *out){if(at+n>m->bytes.size())return 1;memcpy(out,m->bytes.data()+at,n);return 0;}
 struct ble_gap_disc_params{uint16_t itvl=0,window=0;uint8_t passive=1,filter_duplicates=0;};
 struct ble_gap_disc_desc{uint8_t event_type=0;ble_addr_t addr;int8_t rssi=-50;uint8_t length_data=0;const uint8_t *data=nullptr;};
-struct ble_gap_event{int type=0;struct{int status=0;uint16_t conn_handle=0;}connect,link_estab;struct{struct{uint16_t conn_handle=0;}conn;}disconnect;struct{uint16_t conn_handle=0,attr_handle=0;os_mbuf *om=nullptr;bool indication=false;}notify_rx;struct{int status=0;uint16_t conn_handle=0;}enc_change;struct{int reason=0;}disc_complete;ble_gap_disc_desc disc;struct{uint16_t conn_handle=0;}passkey,repeat_pairing;};
+struct ble_gap_sec_state{unsigned encrypted:1;unsigned authenticated:1;unsigned bonded:1;unsigned key_size:5;};
+struct ble_gap_conn_desc{ble_gap_sec_state sec_state{};ble_addr_t our_id_addr,peer_id_addr,our_ota_addr,peer_ota_addr;uint16_t conn_handle=0,conn_itvl=0,conn_latency=0,supervision_timeout=0;uint8_t role=0,master_clock_accuracy=0;};
+constexpr int BLE_GAP_ROLE_MASTER=0,BLE_GAP_ROLE_SLAVE=1;
+struct ble_gap_upd_params{uint16_t itvl_min=0,itvl_max=0,latency=0,supervision_timeout=0;};
+struct ble_gap_event{int type=0;struct{int status=0;uint16_t conn_handle=0;}connect,link_estab;struct{int reason=0;ble_gap_conn_desc conn;}disconnect;struct{uint16_t conn_handle=0;int status=0;}term_failure;struct{ble_gap_upd_params *self_params=nullptr;const ble_gap_upd_params *peer_params=nullptr;uint16_t conn_handle=0;}conn_update_req;struct{uint16_t conn_handle=0,attr_handle=0;os_mbuf *om=nullptr;bool indication=false;}notify_rx;struct{int status=0;uint16_t conn_handle=0;}enc_change;struct{int reason=0;}disc_complete;ble_gap_disc_desc disc;struct{uint16_t conn_handle=0;}passkey,repeat_pairing;};
 struct ble_gatt_error{int status=0;};struct ble_gatt_svc{uint16_t start_handle=0,end_handle=0;};
 struct ble_gatt_chr{uint16_t def_handle=0,val_handle=0;uint8_t properties=0;ble_uuid_any_t uuid;};
 struct ble_gatt_dsc{uint16_t handle=0;ble_uuid_any_t uuid;};struct ble_gatt_attr{uint16_t handle;};
@@ -72,9 +78,24 @@ inline int ble_gap_disc(uint8_t,int32_t,const ble_gap_disc_params*p,GapFn cb,voi
 #endif
 test_scan_params=*p;test_scan=cb;test_scan_arg=arg;test_scanning=true;return test_api_rc;}
 inline int test_connect_timeout=0;
+#ifndef TESLA_NIMBLE_REAL_GAP
 inline int ble_gap_connect(uint8_t,const ble_addr_t *p,int32_t timeout,const void *,GapFn f,void *a){test_connect_timeout=timeout;++test_connects;test_peer=*p;test_gap=f;test_gap_arg=a;if(!test_api_rc&&test_submit)test_submit(1);return test_api_rc;}
-inline int ble_gap_conn_cancel(){if(!test_api_rc&&test_submit)test_submit(7);return test_api_rc;}
+#endif
+inline int test_cancel_rc=-1; // >=0: modeled SDK return of ble_gap_conn_cancel (e.g. EALREADY after HCI link completion)
+#ifndef TESLA_NIMBLE_REAL_GAP
+inline int ble_gap_conn_cancel(){if(test_cancel_rc>=0){if(test_submit)test_submit(7);return test_cancel_rc;}if(!test_api_rc&&test_submit)test_submit(7);return test_api_rc;}
+#endif
+// Host boundary for ble_gap_conn_find_by_addr: an HCI link that completed
+// LE Connection Complete while CONNECT is still deferred (real SDK order).
+inline int test_unannounced_handle=-1;inline ble_addr_t test_lookup_peer;inline int test_lookups=0;
+#ifndef TESLA_NIMBLE_REAL_GAP
+inline int ble_gap_conn_find_by_addr(const ble_addr_t *a,ble_gap_conn_desc *d){++test_lookups;if(a)test_lookup_peer=*a;if(test_unannounced_handle<0)return 7;if(d){*d={};d->conn_handle=uint16_t(test_unannounced_handle);d->role=BLE_GAP_ROLE_MASTER;if(a)d->peer_ota_addr=*a;}return 0;}
+#else
+int ble_gap_conn_find_by_addr(const ble_addr_t *,ble_gap_conn_desc *);int ble_gap_conn_cancel();int ble_gap_terminate(uint16_t,uint8_t);int ble_gap_connect(uint8_t,const ble_addr_t *,int32_t,const void *,GapFn,void *);
+#endif
+#ifndef TESLA_NIMBLE_REAL_GAP
 inline int ble_gap_terminate(uint16_t,uint8_t){++test_terminates;if(!test_api_rc&&test_submit)test_submit(6);return test_api_rc;}
+#endif
 inline int ble_gattc_disc_svc_by_uuid(uint16_t,const ble_uuid_t *,SvcFn f,void *a){test_service=f;test_proc_arg=a;if(!test_api_rc&&test_submit)test_submit(2);return test_api_rc;}
 inline int ble_gattc_disc_all_chrs(uint16_t,uint16_t,uint16_t,ChrFn f,void *a){test_char=f;test_proc_arg=a;if(!test_api_rc&&test_submit)test_submit(3);return test_api_rc;}
 inline int ble_gattc_disc_all_dscs(uint16_t,uint16_t s,uint16_t e,DscFn f,void *a){assert(e>=s);test_descriptor=f;test_proc_arg=a;if(!test_api_rc&&test_submit)test_submit(4);return test_api_rc;}

@@ -49,7 +49,9 @@ bool BluetoothLifecycle::teardown(Context &c){
  // queued. Keep the host alive for the SAME bounded drain in either case.
  // An error never establishes idle; missing terminal still retains ownership.
  c.central.quiesce();
- const auto drain=millis();while(!c.central.idle()&&millis()-drain<5000)vTaskDelay(pdMS_TO_TICKS(5));
+ // Repeat the idempotent retirement step: a raced/unannounced link may only
+ // become terminable after the first cancel returned.
+ const auto drain=millis();for(unsigned step=1;!c.central.idle()&&millis()-drain<5000;++step){vTaskDelay(pdMS_TO_TICKS(5));if(step%20==0&&!c.central.idle())c.central.quiesce();}
  if(!c.central.idle()||!c.central.shutdown())return false;
  const auto start=millis();while(!c.host_done.load(std::memory_order_acquire)&&millis()-start<5000)vTaskDelay(pdMS_TO_TICKS(5));
  if(!c.host_done.load(std::memory_order_acquire)||!c.central.deinitialize())return false;

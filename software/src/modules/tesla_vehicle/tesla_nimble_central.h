@@ -39,9 +39,16 @@ public:
  bool write(const uint8_t *,size_t);
  bool close();
  // Retire this connection attempt, not the host. Only idle() proves drainage.
+ // Idempotent: repeat while draining. At most one LE cancel and one accepted
+ // terminate per attempt; an HCI link that completed while the SDK still
+ // defers CONNECT (feature/version exchange) is located and terminated.
  int cancel_open();
  // Attempt-local, identity-free observations. A set bit is an observed
  // boundary, not proof of peer approval. Frozen by main at the first fault.
+ // 1/2 submit entered/returned, 4/8 cancel entered/returned, 16 CONNECT,
+ // 32 matched DISCONNECT, 64 unannounced HCI link found during cancel,
+ // 128 its terminate accepted, 256 its DISCONNECT drained this OPEN.
+ // cancel_rc is the first cancel/terminate result of the attempt.
  struct ConnectDiagnostic { uint32_t attempt, flags; int submit_rc, cancel_rc, status; };
  ConnectDiagnostic connect_diagnostic() const {
   return {connect_attempt.load(),connect_flags.load(),connect_submit_rc.load(),connect_cancel_rc.load(),connect_status.load()};
@@ -63,6 +70,11 @@ private:
  Cookie cookie; // immutable from successful open submission through disconnect barrier
  std::atomic<bool> synchronized{false},failed{false},busy{false},running{false},retiring{false},cancelling_open{false};
  std::atomic<uint16_t> connection{0xffff};
+ // Physical handle of an HCI-complete link whose CONNECT the SDK still defers.
+ std::atomic<uint16_t> unannounced{0xffff};
+ std::atomic<bool> open_cancel_accepted{false},unannounced_terminating{false},link_terminate_accepted{false};
+ ble_addr_t open_peer{};
+ int retire_unannounced();
  Handler handler=nullptr;bool initialized=false;uint8_t own_type=0;
  uint16_t service_start=0,service_end=0,write_handle=0,notify_handle=0,descriptor_end=0,cccd=0;
  unsigned services=0,writes=0,notifies=0,descriptors=0;uint8_t properties=0;

@@ -58,8 +58,12 @@ bool TeslaVehicle::gatt_operation(GattOperation kind, uint16_t handle, tesla_war
                 // Keep the old operation watch active while host/main run. A
                 // missing terminal callback or blocked close still quarantines
                 // at the original watchdog, retaining all reachable ownership.
-                while (c && !c->idle() && millis() - started <= TeslaBleOperation::TIMEOUT_MS) {
+                for (unsigned step = 1; c && !c->idle() && millis() - started <= TeslaBleOperation::TIMEOUT_MS; ++step) {
                     vTaskDelay(pdMS_TO_TICKS(10));
+                    // Idempotent retirement step: a link the controller completed
+                    // after (or despite) the LE cancel is unannounced while the SDK
+                    // defers CONNECT; only its real DISCONNECT establishes idle().
+                    if (kind == Open && step % 10 == 0 && !c->idle()) { c->cancel_open(); }
                 }
                 drained = c && c->idle();
 #ifndef TESLA_BLE_MODULE_HOST_TEST

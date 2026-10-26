@@ -208,7 +208,7 @@ bool TeslaVehicle::prepare_tesla()
         {"timeout_operation", Config::Uint(0, 0, 255)},
         {"timeout_elapsed_ms", Config::Uint(0, 0, UINT32_MAX)},
         {"connect_attempt", Config::Uint(0, 0, UINT32_MAX)},
-        {"connect_flags", Config::Uint(0, 0, 63)},
+        {"connect_flags", Config::Uint(0, 0, 511)},
         {"connect_submit_rc", Config::Int(-1, -1, INT32_MAX)},
         {"connect_cancel_rc", Config::Int(-1, -1, INT32_MAX)},
         {"connect_status", Config::Int(-1, -1, INT32_MAX)},
@@ -1748,9 +1748,18 @@ void TeslaVehicle::loop()
         r->supervision_failed = true;
         r->stop_requested.store(true);
         tesla->state.get("restart_required")->updateBool(true);
+        bool open_undrained = false;
+#if defined(TESLA_BLE_USE_NIMBLE) && TESLA_BLE_USE_NIMBLE
+        // OPEN whose SDK submission returned: the watchdog saw a missing
+        // terminal/drain barrier, not a blocked submission or worker.
+        if (operation_fault && r->operation.kind() == uint32_t(Open)) {
+            if (auto *central = bluetooth.central()) { open_undrained = (central->connect_diagnostic().flags & 2) != 0; }
+        }
+#endif
         publish_error((operation_fault && r->operation.cause() == TeslaBleOperation::Cause::Cancelled) ||
                       (retirement_fault && r->retirement_operation.cause() == TeslaBleOperation::Cause::Cancelled) ?
             "Tesla BLE cancellation undrained; ownership retained; reboot required" :
+            open_undrained ? "Tesla BLE connection attempt undrained; ownership retained; reboot required" :
             "Tesla BLE worker/submission timed out; ownership retained; reboot required");
     }
     if (r != nullptr && (changed || (!tesla->config.get("enable")->asBool() && r->service_enabled) ||
