@@ -15,8 +15,14 @@
 //   -pair      : burst during the final PRESENT_KEY fragment instead of the
 //                first verification session-request (hello) fragment
 // Special modes: rx-max-frame, rx-split-timer, rx-overload, rx-deferred-overflow,
-//                rx-identity-change, rx-stale-mixed, rx-bad-only
+//                rx-identity-change, rx-stale-mixed, rx-bad-only, rx-max-frame-sync,
+//                rx-tiny-max-frame, rx-capacity-units (queue-level contract units)
+// Optional fragmentation suffix (H1): -p<N> splits the concatenated burst stream
+// into N-byte notification payloads, -f<N> splits every framed message
+// separately (short tail per frame). N is a notification PAYLOAD length, not an
+// ATT MTU. Default (no suffix): historical <=20-byte split.
 static void rx_burst_flow(TeslaVehicle &m,const std::string &mode) {
+ if(mode=="rx-capacity-units"){rx_capacity_units();return;}
  using namespace controller_fixture;
  Harness peer;IdentityLease key;assert(peer.keys.acquire(key));uint8_t pem[512]{};size_t n=0;assert(key.key()->export_pem(pem,sizeof(pem),n));
  TeslaBleStorageAdapter store;assert(store.select_profile(0,A));assert(tesla_clean::KeyStorage::committed(store.save_transaction("private_key",pem,n)));
@@ -25,11 +31,16 @@ static void rx_burst_flow(TeslaVehicle &m,const std::string &mode) {
  HostNimbleDriver driver(m.bluetooth,TeslaVehicle::gatt_callback);ev.index=0;ev.mac=A;explicit_scan(m,0);String error;assert(m.select_profile(0,false,error));auto*r=m.tesla->runtime_owner.get();
 
  // ---- parse mode
+ std::string base=mode;size_t payload=0;bool per_frame=false;
+ {const auto dash=base.rfind('-');
+  if(dash!=std::string::npos&&base.size()>dash+2&&(base[dash+1]=='p'||base[dash+1]=='f')&&std::all_of(base.begin()+dash+2,base.end(),[](char c){return c>='0'&&c<='9';})){
+   payload=std::stoul(base.substr(dash+2));per_frame=base[dash+1]=='f';base.resize(dash);assert(payload>=1&&payload<=512);}}
+ const bool tiny_max=base=="rx-tiny-max-frame";if(tiny_max){payload=1;per_frame=false;}
  std::string when="yield";size_t count=12;uint32_t ack_delay=200;bool pair_target=false;
- const bool max_frame=mode=="rx-max-frame",split_timer=mode=="rx-split-timer",overload=mode=="rx-overload",deferred_overflow=mode=="rx-deferred-overflow";
- const bool identity_change=mode=="rx-identity-change",stale_mixed=mode=="rx-stale-mixed",bad_only=mode=="rx-bad-only",late_approval=mode=="rx-late-approval";
- if(max_frame){when="yield";ack_delay=200;}
- else if(overload){when="yield";count=70;ack_delay=200;}
+ const bool max_frame=base=="rx-max-frame"||base=="rx-max-frame-sync"||tiny_max,split_timer=base=="rx-split-timer",overload=base=="rx-overload",deferred_overflow=base=="rx-deferred-overflow";
+ const bool identity_change=base=="rx-identity-change",stale_mixed=base=="rx-stale-mixed",bad_only=base=="rx-bad-only",late_approval=base=="rx-late-approval";
+ if(max_frame){when=base=="rx-max-frame-sync"?"sync":"yield";ack_delay=200;}
+ else if(overload){when="yield";count=0;ack_delay=200;}
  else if(deferred_overflow){when="yield";ack_delay=200;}
  else if(identity_change){when="paced";count=12;ack_delay=1000;}
  else if(stale_mixed){when="yield";count=12;ack_delay=200;}
@@ -37,11 +48,14 @@ static void rx_burst_flow(TeslaVehicle &m,const std::string &mode) {
  else if(late_approval){when="yield";count=12;ack_delay=200;}
  else if(split_timer){when="split";ack_delay=1500;}
  else {
-  std::istringstream in(mode.substr(3));std::string tok;std::vector<std::string> t;while(std::getline(in,tok,'-'))t.push_back(tok);
+  std::istringstream in(base.substr(3));std::string tok;std::vector<std::string> t;while(std::getline(in,tok,'-'))t.push_back(tok);
   assert(t.size()>=3);when=t[0];count=std::stoul(t[1]);ack_delay=std::stoul(t[2]);pair_target=t.size()>3&&t[3]=="pair";
   assert(when=="sync"||when=="yield"||when=="paced");
  }
- const bool expect_overflow=overload,expect_failure=overload||deferred_overflow||identity_change||bad_only;
+ // Deliberate overload is derived from the CURRENT capacity (default split):
+ // RX_QUEUE_DEPTH+6 notifications of 20 bytes, beyond the bounded intake.
+ if(overload&&!payload)count=TeslaVehicle::RX_QUEUE_DEPTH+6;
+ const bool expect_overflow=overload||tiny_max,expect_failure=overload||tiny_max||deferred_overflow||identity_change||bad_only;
  const bool regular=!max_frame&&!split_timer&&!overload&&!deferred_overflow;
 
  // ---- helpers
@@ -90,11 +104,23 @@ static void rx_burst_flow(TeslaVehicle &m,const std::string &mode) {
    if(pair_target)frames={wait,filler(200),wait};
    else if(max_frame)frames={filler(1024),wait,peer.hello(s)};
    else if(deferred_overflow)frames={wait,wait,wait,wait,wait,wait};
-   else if(overload)frames={filler(1024),filler(1024)};
+   else if(overload)frames={filler(1024),filler(1024),filler(1024)};
    else if(late_approval){++statuses;++status_counter;frames={wait,peer.response(s,{awake,sizeof(awake)},status_counter,0,true),peer.response(s,{awake,sizeof(awake)},status_counter)};}
    else frames={wait,peer.hello(s)};
-   auto all=framed(frames);burst=split(all,overload?count:max_frame?(all.size()+19)/20:count);
-   if(overload){burst.resize(count);}burst_size=burst.size();
+   auto all=framed(frames);
+   if(payload){
+    burst.clear();
+    if(per_frame){for(const auto&f:frames)for(auto&n:rx_split(framed({f}),payload))burst.push_back(n);}
+    else for(auto&n:rx_split(all,payload))burst.push_back(n);
+    size_t slots=0,shorter=0;for(auto&n:burst){slots+=rx_cost(n.size());shorter+=n.size()<RX_CONTRACT_FULL_MIN;}
+    std::printf("RX_BURST_FRAGMENTATION mode=%s payload=%zu per_frame=%d frames=%zu stream_bytes=%zu notifications=%zu slots=%zu short=%zu\n",mode.c_str(),payload,per_frame,frames.size(),all.size(),burst.size(),slots,shorter);
+    // Matrix bursts with payload >= 20 are inside the independent contract window.
+    if(max_frame&&!tiny_max&&payload>=RX_CONTRACT_FULL_MIN)assert(all.size()<=RX_CONTRACT_BYTES&&shorter<=RX_CONTRACT_SHORT);
+   } else {
+    burst=split(all,overload?count:max_frame?(all.size()+19)/20:count);
+    if(overload){assert(burst.size()>=count);burst.resize(count);}
+   }
+   burst_size=burst.size();
    if(stale_mixed){
     // Stale generation, foreign connection and foreign handle interleaved; none may consume capacity or frame state.
     std::deque<std::vector<uint8_t>> mixed;for(auto&p:burst){mixed.push_back(p);mixed.push_back({0xff,0xff,0xff});}burst=mixed;
@@ -140,7 +166,7 @@ static void rx_burst_flow(TeslaVehicle &m,const std::string &mode) {
    assert(false&&"legitimate RX burst during outstanding WRITE overflowed the RX queue and dropped the session");
   }
   if(!complete)return;
-  if(regular&&burst_size)assert(burst_size>8&&"burst must exceed the former 8-entry RX queue");
+  if(regular&&burst_size&&!payload)assert(burst_size>8&&"burst must exceed the former 8-entry RX queue");
   assert(!r->stop_requested.load()&&!r->operation.retired()&&"bounded RX burst must never quarantine Bluetooth");
   if(r->authorized.load()){
    m.loop();m.publish_bluetooth_state();

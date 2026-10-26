@@ -1478,9 +1478,23 @@ void TeslaVehicle::publish_pairing_state()
     }
 }
 
-
 bool TeslaVehicle::enqueue_rx(QueueHandle_t queue, uint64_t generation, const uint8_t *data, size_t size, uint32_t *peak)
 {
+    // Compile-time proof of the RX intake contract in tesla_vehicle.h: for every
+    // admissible full notification size n (20..512) the slot cost satisfies
+    // 23 * ceil(n / 22) <= 2 * n, so a guaranteed burst needs at most
+    // floor(2 * RX_GUARANTEE_BYTES / 23) full-notification slots plus one slot per
+    // short notification. A bare depth literal is not accepted as the proof.
+    constexpr auto slot_cost_lemma = [] {
+        for (size_t n = RX_FULL_PAYLOAD_MIN; n <= RX_NOTIFICATION_MAX; ++n) {
+            if (23 * ((n + RX_CHUNK_BYTES - 1) / RX_CHUNK_BYTES) > 2 * n) { return false; }
+        }
+        return true;
+    };
+    static_assert(slot_cost_lemma(), "per-notification chunk waste bound must hold for every full notification size");
+    static_assert(RX_QUEUE_DEPTH >= 2 * RX_GUARANTEE_BYTES / 23 + RX_GUARANTEE_SHORT, "RX queue must hold the guaranteed burst at worst-case fragmentation");
+    static_assert(RX_GUARANTEE_BYTES >= 1024 + 2, "guaranteed burst contains one maximum framed message");
+    static_assert(RX_FULL_PAYLOAD_MIN - 1 <= RX_CHUNK_BYTES, "a short notification costs exactly one slot");
     // Single producer (BLE host callback). Free space can only grow until these
     // sends finish, so the up-front check makes one notification all-or-nothing.
     // A refusal still invalidates the session at the caller: dropping any byte

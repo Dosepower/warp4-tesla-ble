@@ -291,6 +291,7 @@ struct TeslaBleModuleTest {
  #include "host/connect_repeat_contracts.inc"
  #include "host/browser_bridge_contracts.inc"
  #include "host/pair_response_contracts.inc"
+#include "host/rx_capacity_contracts.inc"
 #include "host/rx_burst_contracts.inc"
  static void run(const std::string &mode) {
   if(mode=="quiesce-error-delayed") {

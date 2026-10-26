@@ -81,19 +81,35 @@ private:
     // RX transport queue element: one fixed chunk of a notification byte stream.
     // Framing is stream based (FrameReceiver), so splitting a notification into
     // ordered chunks of the same connection generation is semantically neutral.
-    // Bounded intake: 64 chunks hold one maximum framed message (1024+2 bytes)
-    // delivered as default-MTU notifications (52 x 20 bytes) plus headroom, in
-    // 64 x 32 = 2048 bytes (previously 8 x 528 = 4224 bytes for 8 notifications).
+    // Bounded intake contract. Every notification of 1..RX_NOTIFICATION_MAX bytes
+    // is admitted while space remains (no valid size is filtered); n bytes cost
+    // ceil(n / RX_CHUNK_BYTES) slots because each notification starts a new
+    // chunk, and are admitted all-or-nothing. GUARANTEED without any consumer
+    // progress (one synchronous submit or one scheduler yield): any notification
+    // sequence of at most RX_GUARANTEE_BYTES stream bytes (one maximum framed
+    // message 1024+2 plus 256 accompanying bytes) whose notifications carry at
+    // least RX_FULL_PAYLOAD_MIN bytes (ATT minimum MTU 23 - 3), except at most
+    // RX_GUARANTEE_SHORT shorter ones (Vehicle defers at most 4 complete frames
+    // per transmission, plus one frame in progress). Lemma (checked for every
+    // admissible size in tesla_vehicle.cpp): ceil(n/22) <= 2n/23 for n >= 20,
+    // tight at n = 23; hence such a burst needs at most
+    // floor(2 * RX_GUARANTEE_BYTES / 23) + RX_GUARANTEE_SHORT = 116 slots.
+    // Tiny notifications are bounded by slots (116 one-byte notifications), not
+    // promised unbounded. Beyond capacity the session is invalidated (fail-safe).
+    // Queue data: 116 x 32 = 3712 bytes (8 x 528 = 4224 before the RX fix).
     static constexpr size_t RX_CHUNK_BYTES = 22;
-    static constexpr size_t RX_QUEUE_DEPTH = 64;
     static constexpr size_t RX_NOTIFICATION_MAX = 512; // ATT attribute maximum; unchanged admission bound.
+    static constexpr size_t RX_FULL_PAYLOAD_MIN = 20;
+    static constexpr size_t RX_GUARANTEE_BYTES = 1024 + 2 + 256;
+    static constexpr size_t RX_GUARANTEE_SHORT = 5;
+    static constexpr size_t RX_QUEUE_DEPTH = 2 * RX_GUARANTEE_BYTES / 23 + RX_GUARANTEE_SHORT;
     struct RxFragment {
         uint64_t connection_generation = 0;
         uint16_t length = 0;
         uint8_t data[RX_CHUNK_BYTES] = {};
     };
     static_assert(sizeof(RxFragment) == 32, "RX queue element budget");
-    static_assert(RX_QUEUE_DEPTH * 20 >= 1024 + 2, "one maximum framed message at default ATT MTU");
+    static_assert(RX_QUEUE_DEPTH == 116, "RX queue depth derived from the fragmentation contract");
     // Producer side (BLE host callback only): all chunks of one notification or none.
     static bool enqueue_rx(QueueHandle_t queue, uint64_t generation, const uint8_t *data, size_t size, uint32_t *peak = nullptr);
     size_t drain_rx();
