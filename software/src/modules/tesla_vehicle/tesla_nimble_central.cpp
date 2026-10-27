@@ -191,7 +191,7 @@ int TeslaNimbleCentral::gap(ble_gap_event *e,void *arg){
   // IDF ble_gap.c calls gattc_connection_broken before this callback. No prior
   // procedure owns cookie after this barrier; do not replace it earlier.
   c.pending=0;
-  {const TeslaNimbleEvent ended{TeslaNimbleEvent::Disconnected,c.cookie.epoch,c.connection.load(),0,0,nullptr,0};
+  {const TeslaNimbleEvent ended{TeslaNimbleEvent::Disconnected,c.cookie.epoch,c.connection.load(),0,e->disconnect.reason,nullptr,0};
    c.connection=0xffff;bluetooth_memory::sample(bluetooth_memory::Stage::GattCallback,true);
    // SDK has already failed/freed old GATT procedures, but application callback
    // state is not drained until its final dispatch returns. Keep admission and

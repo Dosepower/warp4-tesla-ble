@@ -5,6 +5,7 @@
 #include <atomic>
 #include <cassert>
 #include <cmath>
+#include <condition_variable>
 #include <cstdint>
 #include <cstring>
 #include <deque>
@@ -55,6 +56,7 @@ public:
     }
     size_t count() const { return elements.size(); }
     Config *get(const char *key) { return children.at(key).get(); }
+    bool has(const char *key) const { return children.count(key) != 0; } // test-only presence probe
     const Config *get(const char *key) const { return children.at(key).get(); }
     bool asBool() const { return boolean; }
     int asInt() const { return integer; }
@@ -109,6 +111,8 @@ struct HostChargingBoundary {
     template<class... A> void set_charging_current(A&&...) { ++host_charge_calls; }
 };
 inline HostChargingBoundary charge_authorization, evse, evse_v2;
+// Optional deterministic interleaving probe (card-confirm contention test only).
+inline std::function<void()> host_profile_mac_probe;
 struct HostEV {
     template<class... A> void on_ev_connected(A&&...) { ++host_charge_calls; }
     template<class... A> void start_charging(A&&...) { ++host_charge_calls; }
@@ -121,7 +125,7 @@ struct HostEV {
     struct LiveIdentity { uint64_t generation; int index; uint64_t mac; };
     LiveIdentity get_live_identity() const { return {generation,index,mac}; }
     std::map<int,uint64_t> profiles{{0,0x112233445500},{1,0x112233445501},{2,0x112233445566}};
-    uint64_t get_profile_mac(int i) const { auto p=profiles.find(i);return p==profiles.end()?0:p->second; }
+    uint64_t get_profile_mac(int i) const { if (host_profile_mac_probe) { host_profile_mac_probe(); } auto p=profiles.find(i);return p==profiles.end()?0:p->second; }
     struct SocPublication { int index; uint64_t mac; float soc; };
     std::vector<SocPublication> publications;
     unsigned tesla_source_updates=0;
@@ -208,6 +212,9 @@ inline HostMasterSerial Serial;
 inline std::atomic<uint32_t> clock_ms{1};
 inline uint32_t millis() { return clock_ms.load(); }
 inline uint64_t now_us() { return uint64_t{millis()} * 1000; }
+// Deterministic pair-trace interleaving (production macro is empty in firmware).
+inline std::function<void(int)> host_pair_trace_point;
+#define TESLA_PAIR_TRACE_POINT(point) do { if (host_pair_trace_point) { host_pair_trace_point(point); } } while (0)
 inline std::function<void()> on_delay;
 inline std::function<void(uint32_t)> on_task_delay;
 inline std::atomic<void(*)()> host_bt_delay_hook{nullptr};

@@ -35,14 +35,14 @@ bool TeslaVehicle::gatt_operation(GattOperation kind, uint16_t handle, tesla_war
     const auto identity = r->session.identity();
     if (!identity) { return false; } // No submission against unavailable identity.
 #if TESLA_BLE_MANUAL_VEHICLE_UI
-    if (kind != Close && (!active_identity_matches(*identity) || !runtime_binding_matches())) { return false; }
+    if (kind != Close && (!active_identity_matches(*identity) || !runtime_binding_matches(true))) { return false; }
 #endif
     const auto generation = r->connection_generation.load();
     const auto connection = kind == Register || kind == Open ? 0 : r->gatt_connection.load();
     auto &slot = kind == Close ? r->retirement_operation : r->operation;
     const auto gated_submit = [this, identity, kind, &submit]() {
 #if TESLA_BLE_MANUAL_VEHICLE_UI
-        if (kind != Close && (!active_identity_matches(*identity) || !runtime_binding_matches())) { return false; }
+        if (kind != Close && (!active_identity_matches(*identity) || !runtime_binding_matches(true))) { return false; }
 #endif
         return submit();
     };
@@ -78,7 +78,7 @@ bool TeslaVehicle::ensure_connected()
     process_disconnect(); // Consume current cleanup before any replacement readiness.
     if (r->stop_requested.load()) { return false; }
 #if TESLA_BLE_MANUAL_VEHICLE_UI
-    if (!runtime_binding_matches()) { return false; }
+    if (!runtime_binding_matches(true)) { return false; }
 #endif
     if (r->connected.load() && r->link_open.load()) { return true; }
     // Initial connection cleanup is not loss of an accepted pairing's link.
@@ -229,7 +229,12 @@ bool TeslaVehicle::transport_recover_frame(uint64_t generation)
 {
     // Never assert a peer frame reset on the same physical link.
     Runtime *r = tesla->runtime_owner.get();
-    if (r && generation == r->physical_generation.load()) { disconnect_internal(); }
+    if (r && generation == r->physical_generation.load()) {
+        const int32_t status = r->trace.write_status.load();
+        r->trace_cause(Runtime::TraceCause::FrameRefused, status ? status :
+            r->vehicle && r->vehicle->deferred_overflows() != r->trace.deferred_base ? -2 : -1);
+        disconnect_internal();
+    }
     return false;
 }
 

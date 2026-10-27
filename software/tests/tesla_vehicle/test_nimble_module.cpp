@@ -15,6 +15,8 @@ extern std::function<int(const char *, const std::string &)> vfs_bridge_fault;
 #include <iostream>
 #include <sstream>
 #include <fstream>
+#include <deque>
+#include "host/card_confirm_access.h"
 struct TeslaBleModuleTest {
  static constexpr uint64_t A=0x112233445500ULL,B=0x112233445501ULL;
  static void entry(Config *p,int index) {
@@ -298,6 +300,8 @@ struct TeslaBleModuleTest {
 #include "host/rx_capacity_contracts.inc"
 #include "host/rx_burst_contracts.inc"
 #include "host/binding_persistence_contracts.inc"
+#include "host/pair_trace_contracts.inc"
+#include "host/card_confirm_contracts.inc"
  static void run(const std::string &mode) {
   if(mode=="quiesce-error-delayed") {
    BluetoothLifecycle bt;controller_status=test_status=0;async_bluetooth=true;std::thread host;
@@ -431,6 +435,8 @@ struct TeslaBleModuleTest {
 #ifdef TESLA_NIMBLE_REAL_DRAIN_HEADER
   if(mode.rfind("followup-",0)==0){followup_flow(m,mode);return;}
 #endif
+  if(mode.rfind("trace-",0)==0){trace_flow(m,mode);return;}
+  if(mode.rfind("card-",0)==0){card_flow(m,mode);return;}
   if(mode.rfind("flow-",0)==0){approval_flow(m,mode);return;}
   if(mode=="pairing"||mode=="generate"||mode=="notify-only"||mode=="indicate-and-notify"||mode=="delayed-pair"||mode=="connect-timeout"||mode=="no-card"||mode=="decline"||mode=="link-drop"||mode=="profile-switch"||mode=="partial-pair"||mode=="late-response"){
     host_rx_properties=mode=="notify-only"?16:mode=="indicate-and-notify"?48:32;pairing(m,mode=="generate",mode=="delayed-pair",mode);return;

@@ -35,6 +35,19 @@ export interface state {
     pair_response_code?: number;
     pair_response_outer?: number;
     pair_response_operation?: number;
+    // Nonsecret first-cause pairing trace (numbers/fixed labels only; Details/diagnostics, never authority).
+    pair_stage?: 'none' | 'claimed' | 'connected' | 'sent' | 'verifying' | 'response' | 'approved';
+    pair_loss_cause?: 'none' | 'remote_disconnect' | 'security' | 'rx_overflow' | 'frame_refused' | 'send_completion' | 'verify_session' | 'identity_change' | 'profile_reload' | 'stop' | 'operation_timeout' | 'operation_cancelled' | 'unavailable';
+    pair_loss_stage?: string;
+    pair_loss_detail?: number; // HCI/ATT/SM status or fixed negative code
+    pair_loss_elapsed_ms?: number; // first loss relative to PRESENT_KEY completion
+    pair_disconnect_reason?: number; // first HCI disconnect reason of the attempt, -1 none
+    pair_verify_polls?: number;
+    pair_verify_denied?: number;
+    pair_rx_notifications?: number;
+    pair_rx_frames?: number;
+    pair_rx_pair_replies?: number;
+    pair_rx_session_replies?: number;
     timeout_cause: string; // first ownership-supervision failure; no identity data
     timeout_operation: number;
     timeout_elapsed_ms: number;

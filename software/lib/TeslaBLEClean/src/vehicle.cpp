@@ -229,6 +229,7 @@ void Vehicle::tick()
 void Vehicle::emitted(void *p,const Frame &incoming)
 {
     auto &v=*static_cast<Vehicle *>(p); const uint32_t now=v.ports_.now(v.ports_.context);
+    if(v.frames_seen_!=UINT32_MAX) { ++v.frames_seen_; }
     if(v.transmission_) {
         if(v.deferred_count_==v.deferred_.size()) {
             if(!v.deferred_overflow_ && v.deferred_overflows_!=UINT32_MAX) { ++v.deferred_overflows_; }
@@ -252,6 +253,7 @@ void Vehicle::frame(const Frame &incoming,uint32_t now)
     // before acceptance and must not underflow out of the window.
     if(pair_context_ && now-pair_tx_started_<(pair_started_-pair_tx_started_)+60000u && ports_.owns(ports_.context,generation_) &&
        decode_pairing_reply({incoming.data.data(),incoming.length},{address_.data(),16},observed)) {
+        if(pair_replies_seen_!=UINT32_MAX) { ++pair_replies_seen_; }
         // First terminal wins, including when multiple frames arrive in one RX
         // batch. A late WAIT must not hide a specific refusal.
         if(!pair_reply_terminal_) {
@@ -264,6 +266,7 @@ void Vehicle::frame(const Frame &incoming,uint32_t now)
     auto &c=commands_[0]; if(now-c.started>=c.timing.total_ms) { return; }
     SessionWireReply hello;
     if(decode_session_reply({incoming.data.data(),incoming.length},{address_.data(),16},hello)) {
+        if(session_replies_seen_!=UINT32_MAX) { ++session_replies_seen_; }
         const Stage expected=hello.domain==Domain::Vcsec?Stage::WaitVcsecAuth:Stage::WaitInfoAuth;
         auto &ch=channel(hello.domain); SessionInfo decoded;
         if(c.stage!=expected) {

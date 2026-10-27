@@ -77,21 +77,21 @@ bool TeslaVehicle::fresh_binding(int index,uint64_t mac,const char *vin,const ch
         ev.get_profile_mac(index)==mac && bluetooth.discovery_matches(scope,revision,record+19,type);
 }
 
-bool TeslaVehicle::runtime_binding_matches()
+bool TeslaVehicle::runtime_binding_matches(bool worker)
 {
     auto *r=tesla->runtime_owner.get();
     if (!r || r->profile_pending.load() || !r->profile_ready.load() || !r->profile_actionable.load()) { return false; }
     const auto identity=r->session.identity();
     if (!identity || !active_identity_matches(*identity) || identity->index!=r->configured_ev_index ||
         identity->mac!=r->profile_mac || ev.get_profile_mac(identity->index)!=r->profile_mac ||
-        !r->command_outcome.binding_identity_current(*identity)) { return false; }
+        !r->command_outcome.binding_identity_current(*identity, worker)) { return false; }
     // Fresh discovery is required at admission. Only the accepted in-flight
     // command may outlive its TTL: at most 120s (30s worker setup + bounded
     // send + the full 60s approval window). Identity/config/profile/transport
     // remain immutable while it owns the runtime. Cancellation revokes this
     // authority immediately; no subsequent poll/retry inherits it.
     const auto authority = r->command_outcome.pair_binding_current(millis(), *identity,
-            tesla->config_revision, r->binding_revision);
+            tesla->config_revision, r->binding_revision, worker);
     if (authority) { return *authority && bluetooth.discovery_authority_current(r->binding_revision); }
     // Stored authorization reuses the key, never an expired radio discovery.
     TeslaBleDiscovery::Scope scope;scope.index=r->configured_ev_index;scope.mac=r->profile_mac;
@@ -292,6 +292,7 @@ void TeslaVehicle::apply_profile()
     auto *r = tesla->runtime_owner.get();
     if (!r->profile_pending.load(std::memory_order_acquire)) { return; }
     const auto request = r->profile_request;
+    r->trace_cause(Runtime::TraceCause::ProfileReload, 0);
     disconnect_internal(); // Retire old link/protocol before touching any namespace.
     if (r->stop_requested.load()) { return; }
     r->vehicle.reset(); r->keys.reset();

@@ -33,6 +33,12 @@
 #include "bluetooth_master_bench.h"
 #include "bluetooth_lifecycle.h"
 
+// Pair-trace interleaving points (1 reader after cause load, 2 writer admitted,
+// 3 writer claimed). Empty in firmware; host tests may pause a task there.
+#ifndef TESLA_PAIR_TRACE_POINT
+#define TESLA_PAIR_TRACE_POINT(point) do {} while (0)
+#endif
+
 class TeslaBleStorageAdapter;
 class TeslaBleTransportAdapter;
 
@@ -127,6 +133,8 @@ private:
     void process_commands();
     void process_pair_verification();
     void cancel_pairing(const char *message, uint64_t command, TeslaBleCommandOutcome::PairOutcome reason = TeslaBleCommandOutcome::PairOutcome::InternalFailure);
+    void queue_pair_trace(uint64_t command, const char *outcome); // worker-only, nonsecret
+    void flush_pair_trace(); // worker-only, shallow stack
     void publish_pairing_state();
     void process_module_events();
     bool check_worker_exhaustion();
@@ -175,7 +183,10 @@ private:
     void publish_discovery();
     bool discovery_allowed() const;
     bool fresh_binding(int index, uint64_t mac, const char *vin, const char *address, uint8_t type, uint32_t revision);
-    bool runtime_binding_matches();
+    // worker=true only from the Tesla worker task (never main, never under the
+    // outcome/session/discovery locks): waits briefly for main's zero-wait
+    // publication instead of treating lock contention as revoked authority.
+    bool runtime_binding_matches(bool worker = false);
     Config make_profile();
     String validate_profiles(Config &update, ConfigSource source);
     Config *find_profile(int index) const;
@@ -318,7 +329,139 @@ private:
         std::atomic<uint32_t> rx_peak{0}, rx_overflows{0}; // producer-written
         uint32_t rx_write_serviced = 0; // worker-only: chunks consumed inside WRITE waits
         bool rx_dispatching = false;    // worker-only: drain_rx() active (no nested drain)
-        void reset_pair_diagnostics() { pair_tx_total=0;pair_tx_attempted=0;pair_tx_acked=0;pair_result=-1;rx_peak=0;rx_overflows=0;rx_write_serviced=0; }
+        void reset_pair_diagnostics() { pair_tx_total=0;pair_tx_attempted=0;pair_tx_acked=0;pair_result=-1;rx_peak=0;rx_overflows=0;rx_write_serviced=0;trace_logging=false;trace.reset(); }
+        // Worker-only log lifecycle, deliberately separate from the write gate:
+        // true from trace_arm() (explicit claimed attempt) until its terminal
+        // entry is queued or diagnostics are reset. A DIRTY successor is active
+        // but never ARMED, so it logs (as unavailable) without admitting writers.
+        bool trace_logging = false;
+        // Nonsecret per-attempt pairing trace (numbers only: no MAC/VIN/address/
+        // key/payload). The FIRST loss cause is frozen; later cleanup, our own
+        // CLOSE or secondary callbacks cannot overwrite it. Diagnostics only,
+        // never authority for enrollment, authorization or charging.
+        enum class TraceStage : uint32_t { None, Claimed, Connected, Sent, Verifying, Response, Approved };
+        // Unavailable is never written as a cause: snapshots report it for an
+        // attempt whose record may contain a write that overlapped freeze/reset.
+        enum class TraceCause : uint32_t { None, RemoteDisconnect, Security, RxOverflow, FrameRefused, SendCompletion,
+            VerifySession, IdentityChange, ProfileReload, Stop, OperationTimeout, OperationCancelled, Unavailable };
+        // Coherent copy of one attempt's record (numbers only, 48 bytes).
+        struct TraceSnapshot {
+            uint32_t stage = 0, cause = 0, loss_stage = 0, elapsed = 0, polls = 0, denied = 0;
+            uint32_t notifications = 0, frames = 0, pair_replies = 0, session_replies = 0;
+            int32_t detail = 0, disconnect = -1;
+        };
+        struct PairTrace {
+            // One 32-bit gate word: epoch | DIRTY | RESETTING | ARMED | admitted writers.
+            // Every record mutation (any task) is admitted by a CAS that requires
+            // ARMED and increments the writer count; it leaves afterwards. The
+            // worker alone resets (epoch+1, RESETTING while zeroing), arms and
+            // freezes (clears ARMED). Writers still admitted at freeze/reset make
+            // that record DIRTY: it is then reported Unavailable, never mixed.
+            // Readers take one bounded snapshot (no retry loop) and discard it if
+            // the epoch/RESETTING/DIRTY bits changed meanwhile.
+            static constexpr uint32_t WRITERS = 0xffu, ARMED = 1u << 8, RESETTING = 1u << 9, DIRTY = 1u << 10, EPOCH_ONE = 1u << 11;
+            std::atomic<uint32_t> gate{0};
+            // loss_claim elects the single first-cause writer; loss_cause is
+            // published LAST (release), so any reader that observes a cause also
+            // observes that same writer's detail/stage/time (never a torn mix).
+            std::atomic<uint32_t> stage{0}, loss_claim{0}, loss_cause{0}, loss_stage{0}, sent_at{0}, loss_at{0};
+            std::atomic<int32_t> loss_detail{0}, disconnect_reason{-1}, write_status{0};
+            std::atomic<uint32_t> polls{0}, denied{0}, rx_notifications{0}, frames{0}, pair_replies{0}, session_replies{0};
+            uint32_t frames_base = 0, pair_replies_base = 0, session_replies_base = 0, deferred_base = 0; // worker-only
+            bool armed() const { return gate.load() & ARMED; }
+            // Lock-free, non-blocking: a CAS failure means another gate operation
+            // succeeded (bounded per attempt); never waits for another task.
+            bool enter() {
+                uint32_t g = gate.load();
+                do { if (!(g & ARMED) || (g & WRITERS) == WRITERS) { return false; } } while (!gate.compare_exchange_weak(g, g + 1));
+                return true;
+            }
+            void leave() { gate.fetch_sub(1, std::memory_order_release); }
+            // Worker only. No writer can be admitted while RESETTING/disarmed.
+            void reset() {
+                uint32_t g = gate.load(), d;
+                do { d = ((g + EPOCH_ONE) & ~(EPOCH_ONE - 1)) | RESETTING | (g & WRITERS) | ((g & WRITERS) ? DIRTY : 0); }
+                while (!gate.compare_exchange_weak(g, d));
+                stage=0;loss_cause=0;loss_claim=0;loss_stage=0;sent_at=0;loss_at=0;loss_detail=0;disconnect_reason=-1;write_status=0;
+                polls=0;denied=0;rx_notifications=0;frames=0;pair_replies=0;session_replies=0;
+                gate.fetch_and(~RESETTING, std::memory_order_release);
+            }
+            void arm() { if (!(gate.load() & DIRTY)) { gate.fetch_or(ARMED); } } // worker only
+            void freeze() { // worker only; terminal: no later write is admitted
+                uint32_t g = gate.load();
+                while (!gate.compare_exchange_weak(g, (g & ~ARMED) | ((g & WRITERS) ? DIRTY : 0))) {}
+            }
+            void note_disconnect(int32_t reason) { if (enter()) { TESLA_PAIR_TRACE_POINT(2); int32_t none = -1; disconnect_reason.compare_exchange_strong(none, reason); leave(); } }
+            void note_write_status(int32_t status) { if (enter()) { write_status.store(status); leave(); } }
+            void note_write_refused() { if (enter()) { int32_t none = 0; write_status.compare_exchange_strong(none, -3); leave(); } }
+            void note_rx() { if (enter()) { rx_notifications.fetch_add(1); leave(); } }
+            void count_poll() { if (enter()) { polls.fetch_add(1); leave(); } }
+            void count_denied() { if (enter()) { denied.fetch_add(1); leave(); } }
+            void mark_sent(uint32_t now) { if (enter()) { sent_at.store(now ? now : 1); leave(); } }
+            // Any task. One bounded pass; false = overlapped a reset/freeze change: discard.
+            bool snapshot(TraceSnapshot &s) const {
+                const uint32_t g1 = gate.load(std::memory_order_acquire);
+                if (g1 & RESETTING) { return false; }
+                s = TraceSnapshot{};
+                if (g1 & DIRTY) { s.cause = static_cast<uint32_t>(TraceCause::Unavailable); }
+                else {
+                    s.cause = loss_cause.load(std::memory_order_acquire); // published last by the single claimant
+                    TESLA_PAIR_TRACE_POINT(1);
+                    const uint32_t sent = sent_at.load(), lost = s.cause ? loss_at.load() : 0;
+                    s.stage = stage.load(); s.loss_stage = s.cause ? loss_stage.load() : 0; s.detail = s.cause ? loss_detail.load() : 0;
+                    s.elapsed = sent && lost ? lost - sent : 0; s.disconnect = disconnect_reason.load();
+                    s.polls = polls.load(); s.denied = denied.load(); s.notifications = rx_notifications.load();
+                    s.frames = frames.load(); s.pair_replies = pair_replies.load(); s.session_replies = session_replies.load();
+                }
+                std::atomic_thread_fence(std::memory_order_acquire);
+                return ((g1 ^ gate.load(std::memory_order_relaxed)) & ~(WRITERS | ARMED)) == 0;
+            }
+        } trace;
+        // Any task/callback. Only while an attempt is armed; first writer wins.
+        void trace_cause(TraceCause cause, int32_t detail) {
+            if (!trace.enter()) { return; }
+            TESLA_PAIR_TRACE_POINT(2);
+            uint32_t expected = 0;
+            if (trace.loss_claim.compare_exchange_strong(expected, 1)) {
+                TESLA_PAIR_TRACE_POINT(3);
+                trace.loss_detail.store(detail); trace.loss_stage.store(trace.stage.load());
+                const uint32_t now = millis(); trace.loss_at.store(now ? now : 1);
+                trace.loss_cause.store(static_cast<uint32_t>(cause), std::memory_order_release);
+            }
+            trace.leave();
+        }
+        void trace_stage(TraceStage stage) {
+            if (!trace.enter()) { return; }
+            auto old = trace.stage.load();
+            while (old < static_cast<uint32_t>(stage) && !trace.stage.compare_exchange_weak(old, static_cast<uint32_t>(stage))) {}
+            trace.leave();
+        }
+        // Worker-only: counts are deltas of nonsecret SDK counters for this attempt.
+        void trace_arm() {
+            trace.reset();
+            if (vehicle) {
+                trace.frames_base = vehicle->frames_seen(); trace.pair_replies_base = vehicle->pair_replies_seen();
+                trace.session_replies_base = vehicle->session_replies_seen(); trace.deferred_base = vehicle->deferred_overflows();
+            }
+            trace.arm(); trace_stage(TraceStage::Claimed);
+            trace_logging = true;
+        }
+        void trace_sample() {
+            if (!vehicle || !trace.enter()) { return; }
+            trace.frames.store(vehicle->frames_seen() - trace.frames_base);
+            trace.pair_replies.store(vehicle->pair_replies_seen() - trace.pair_replies_base);
+            trace.session_replies.store(vehicle->session_replies_seen() - trace.session_replies_base);
+            trace.leave();
+        }
+        // Worker-only snapshot buffer; formatted and flushed to the event log at
+        // a shallow worker stack point, never inside SDK completions/GATT waits.
+        struct TraceEntry {
+            const char *outcome = nullptr; // static literal
+            uint32_t command = 0, acked = 0, total = 0;
+            TraceSnapshot trace;
+        } trace_entries[3];
+        uint8_t trace_entry_count = 0;
+        uint32_t trace_entries_dropped = 0;
     };
 
     struct Tesla {

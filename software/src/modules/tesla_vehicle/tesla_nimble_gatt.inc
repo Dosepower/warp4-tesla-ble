@@ -19,14 +19,14 @@ bool TeslaVehicle::gatt_operation(GattOperation kind, uint16_t handle, tesla_war
     const auto identity = r->session.identity();
     if (!identity) { return false; } // No submission against unavailable identity.
 #if TESLA_BLE_MANUAL_VEHICLE_UI
-    if (kind != Close && (!active_identity_matches(*identity) || !runtime_binding_matches())) { return false; }
+    if (kind != Close && (!active_identity_matches(*identity) || !runtime_binding_matches(true))) { return false; }
 #endif
     const auto generation = r->connection_generation.load();
     const auto connection = kind == Register || kind == Open ? 0 : r->gatt_connection.load();
     auto &slot = kind == Close ? r->retirement_operation : r->operation;
     const auto gated_submit = [this, identity, kind, &submit]() {
 #if TESLA_BLE_MANUAL_VEHICLE_UI
-        if (kind != Close && (!active_identity_matches(*identity) || !runtime_binding_matches())) { return false; }
+        if (kind != Close && (!active_identity_matches(*identity) || !runtime_binding_matches(true))) { return false; }
 #endif
         return submit();
     };
@@ -52,6 +52,8 @@ bool TeslaVehicle::gatt_operation(GattOperation kind, uint16_t handle, tesla_war
                 (void)event;
 #endif
                 draining = true;
+                r->trace_cause(cancelled ? Runtime::TraceCause::OperationCancelled : Runtime::TraceCause::OperationTimeout,
+                    int32_t(kind) * 256 + int32_t((event >> 32) == slot.generation() ? event & 0xff : 0));
                 r->closing_link.store(true);
                 auto *c = bluetooth.central();
                 if (c) { if (kind == Open) { c->cancel_open(); } else { c->close(); } }
@@ -129,7 +131,7 @@ bool TeslaVehicle::gatt_operation(GattOperation kind, uint16_t handle, tesla_war
 bool TeslaVehicle::ensure_connected()
 {
  Runtime *r=tesla->runtime_owner.get();process_disconnect();
- auto *c=bluetooth.central();if(!c||r->stop_requested.load()||!runtime_binding_matches())return false;
+ auto *c=bluetooth.central();if(!c||r->stop_requested.load()||!runtime_binding_matches(true))return false;
  if(r->connected.load()&&r->link_open.load())return true;
  disconnect_internal(false);if(r->stop_requested.load())return false;
  const auto generation=r->session.connection();r->physical_generation.store(generation);
@@ -200,7 +202,14 @@ bool TeslaVehicle::transport_recover_frame(uint64_t generation)
 {
     // Never assert a peer frame reset on the same physical link.
     Runtime *r = tesla->runtime_owner.get();
-    if (r && generation == r->physical_generation.load()) { disconnect_internal(); }
+    if (r && generation == r->physical_generation.load()) {
+        // Detail: failed ATT/host status of the refused write; -2 SDK deferred-RX
+        // overflow; -1 SDK ownership/budget refusal before any failed write.
+        const int32_t status = r->trace.write_status.load();
+        r->trace_cause(Runtime::TraceCause::FrameRefused, status ? status :
+            r->vehicle && r->vehicle->deferred_overflows() != r->trace.deferred_base ? -2 : -1);
+        disconnect_internal();
+    }
     return false;
 }
 
@@ -228,6 +237,9 @@ bool TeslaVehicle::transport_write_bytes(const uint8_t *data, size_t size)
         // Conservative lower bound: only count a successful matching ATT
         // completion plus ownership checks. Refusal is NOT proof of no TX.
         if(pairing && ok)r->pair_tx_acked.store(r->pair_tx_acked.load()+length);
+        // Nonsecret: a write that failed without an ATT error status (refused
+        // submission, ownership gate or drained cancellation).
+        if(!ok)r->trace.note_write_refused();
         return ok;
     });
 }
@@ -242,21 +254,27 @@ void TeslaVehicle::gatt_callback(const TeslaNimbleEvent &e)
  if(e.connection!=conn)return;
  if(e.kind==TeslaNimbleEvent::Discover){r->operation.complete(Discover,conn,0,e.status==0);return;}
  if(e.kind==TeslaNimbleEvent::Descriptor){r->operation.complete(Descriptor,conn,0,e.status==0);return;}
- if(e.kind==TeslaNimbleEvent::Write){r->operation.complete(Write,conn,e.handle,e.status==0);return;}
+ if(e.kind==TeslaNimbleEvent::Write){if(e.status)r->trace.note_write_status(e.status);r->operation.complete(Write,conn,e.handle,e.status==0);return;}
  if(e.kind==TeslaNimbleEvent::Security){
+  r->trace_cause(Runtime::TraceCause::Security,e.status);
   r->transport_cancel_event.store((uint64_t{r->operation.generation()} << 32) | 1);
   r->command_outcome.begin_cleanup();r->connected=false;r->pending_disconnect.store(r->session.disconnect());r->advance_connection();return;
  }
  if(e.kind==TeslaNimbleEvent::Disconnected){
+  // Nonsecret HCI/host reason of the FIRST disconnect in this attempt, local
+  // CLOSE included (status carries the SDK disconnect reason).
+  r->trace.note_disconnect(e.status);
   if(r->closing_link.load()){r->retirement_operation.complete(Close,conn,0,true);return;}
   if(!r->link_open.load()&&!r->connected.load())return;
+  r->trace_cause(Runtime::TraceCause::RemoteDisconnect,e.status);
   r->command_outcome.begin_cleanup();const auto generation=r->session.disconnect();r->connected=false;r->link_open=false;r->notify_handle=0;r->advance_connection();r->pending_disconnect.store(generation);owner->post_event(EventType::Disconnected);return;
  }
  if(e.kind==TeslaNimbleEvent::Rx){
   if(!r->connected.load()||!r->link_open.load()||e.handle!=r->notify_handle.load()||!e.data||!e.size||e.size>RX_NOTIFICATION_MAX)return;
+  r->trace.note_rx();
   uint32_t peak=r->rx_peak.load();
   const bool queued=enqueue_rx(r->queues.rx(),e.epoch,e.data,e.size,&peak);
   if(peak>r->rx_peak.load())r->rx_peak.store(peak); // host task is the only writer while connected
-  if(!queued){const auto overflows=r->rx_overflows.load();if(overflows!=UINT32_MAX)r->rx_overflows.store(overflows+1);r->transport_cancel_event.store((uint64_t{r->operation.generation()} << 32) | 2);r->command_outcome.begin_cleanup();r->connected=false;r->pending_disconnect.store(r->session.disconnect());r->advance_connection();}
+  if(!queued){r->trace_cause(Runtime::TraceCause::RxOverflow,int32_t(e.size));const auto overflows=r->rx_overflows.load();if(overflows!=UINT32_MAX)r->rx_overflows.store(overflows+1);r->transport_cancel_event.store((uint64_t{r->operation.generation()} << 32) | 2);r->command_outcome.begin_cleanup();r->connected=false;r->pending_disconnect.store(r->session.disconnect());r->advance_connection();}
  }
 }

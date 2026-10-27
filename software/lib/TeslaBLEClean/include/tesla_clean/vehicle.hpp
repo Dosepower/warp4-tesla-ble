@@ -78,6 +78,9 @@ class Vehicle {
     size_t deferred_count_=0;
     bool deferred_overflow_=false;
     uint32_t deferred_overflows_=0; // Nonsecret diagnostic count only.
+    // Nonsecret saturating counts of complete received frames and of frames
+    // decoded as pairing/session replies. Diagnostics only, never authority.
+    uint32_t frames_seen_=0,pair_replies_seen_=0,session_replies_seen_=0;
     // PRESENT_KEY has no request UUID. Only one explicitly sent request on
     // this physical generation may observe its unauthenticated status. Never
     // use this observation as session/key authorization.
@@ -115,6 +118,9 @@ public:
     // re-entering protocol processing or starting nested GATT work.
     bool transmitting() const { return connected_ && transmission_!=0; }
     uint32_t deferred_overflows() const { return deferred_overflows_; }
+    uint32_t frames_seen() const { return frames_seen_; }
+    uint32_t pair_replies_seen() const { return pair_replies_seen_; }
+    uint32_t session_replies_seen() const { return session_replies_seen_; }
     uint32_t high_water(Domain d) const { return d==Domain::Vcsec?vcsec_.high_water:info_.high_water; }
     // An intentionally empty completion is optional. Callers preparing a callback
     // must check assign's result separately; absence is not an allocation-error marker.

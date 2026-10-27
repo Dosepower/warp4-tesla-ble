@@ -87,9 +87,12 @@ public:
     }
     // nullopt means no active action: ordinary live discovery is mandatory.
     // A present false is revoked authority, never permission to fall back.
-    std::optional<bool> pair_binding_current(uint32_t now, TeslaBleIdentity identity, uint32_t config, uint32_t binding)
+    // Main passes wait=false (zero-wait; contention is "not current"). The worker
+    // passes wait=true: contention with a main publication is NOT revocation and
+    // must not refuse a mid-frame WRITE. Main never waits while holding this lock.
+    std::optional<bool> pair_binding_current(uint32_t now, TeslaBleIdentity identity, uint32_t config, uint32_t binding, bool wait = false)
     {
-        tesla_warp::CheckedMutex::Guard lock(mutex, true);
+        tesla_warp::CheckedMutex::Guard lock(mutex, !wait);
         if (!lock || deleting || cleanup_pending || exhausted) { return false; }
         if (!pair.command || pair.phase == PairPhase::Queued) { return std::nullopt; }
         return
@@ -99,9 +102,9 @@ public:
     }
     // Pin consent to the accepted SLAC generation, including a reconnect of
     // the same profile/MAC. Never let a fresh session inherit an older action.
-    bool binding_identity_current(TeslaBleIdentity identity)
+    bool binding_identity_current(TeslaBleIdentity identity, bool wait = false)
     {
-        tesla_warp::CheckedMutex::Guard lock(mutex, true);
+        tesla_warp::CheckedMutex::Guard lock(mutex, !wait);
         return lock && !deleting && !exhausted && (!pair.command ||
             (pair.vehicle == identity && pair.phase != PairPhase::Failed && pair.phase != PairPhase::Cancelling));
     }
