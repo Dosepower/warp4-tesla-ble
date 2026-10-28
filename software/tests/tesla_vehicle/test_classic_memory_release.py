@@ -5,7 +5,7 @@ The boot Bluetooth decision block is copied verbatim from actual initArduino.
 from pathlib import Path
 import os, subprocess, tempfile, sys, re, signal
 S=Path(__file__).resolve().parents[2]; S=S.parent
-root=Path(os.environ.get('TESLA_BLE_SDK_SOURCE_ROOT', '.pio/tesla-sdk'))
+root=Path(os.environ.get('TESLA_BLE_SDK_SOURCE_ROOT', '/home/hermes/.hermes/cache/scratch/warp4-bt-ram-sdk-v2'))
 core=Path(os.environ.get('TESLA_CLASSIC_TEST_CORE',root/'builder/components/arduino'))
 I=root/'esp-idf-secure'
 header=r'''

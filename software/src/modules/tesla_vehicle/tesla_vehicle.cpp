@@ -42,6 +42,15 @@ extern WebServer server;
 
 static constexpr uint32_t RESPONSE_TIMEOUT_MS = 40000;
 
+// Wall-clock receive time for SoC publication. 0 = clock not synchronized:
+// never substitute uptime as a time of day.
+static uint32_t tesla_wall_clock_seconds()
+{
+    struct timeval tv;
+    if (!rtc.clock_synced(&tv) || tv.tv_sec <= 0 || static_cast<uint64_t>(tv.tv_sec) > UINT32_MAX) { return 0; }
+    return static_cast<uint32_t>(tv.tv_sec);
+}
+
 static TeslaBleIdentity current_ev_identity()
 {
 #if TESLA_BLE_MANUAL_VEHICLE_UI
@@ -70,6 +79,9 @@ static std::array<uint8_t, 6> encode_vehicle_mac(uint64_t mac)
 }
 
 #include "tesla_profiles.inc"
+#if TESLA_BLE_MANUAL_VEHICLE_UI
+#include "tesla_auto_poll.inc"
+#endif
 
 
 void TeslaVehicle::pre_setup()
@@ -230,6 +242,13 @@ bool TeslaVehicle::prepare_tesla()
         {"last_soc", Config::Float(NAN)},
         {"action_busy", Config::Bool(false)},
         {"last_update", Config::Uptime()},
+        // Unix seconds of the last consumed authenticated SoC; 0 = WARP clock unsynchronized.
+        {"last_update_unix", Config::Uint(0, 0, UINT32_MAX)},
+        // Terminal outcome of the last SoC operation (see PollOutcome).
+        {"poll_outcome", Config::Str("none", 0, 24)},
+        {"poll_outcome_automatic", Config::Bool(false)},
+        // Autonomous firmware scheduler: off|initial|waiting|not_charging|not_paired|searching|polling|not_found|failed.
+        {"auto_poll", Config::Str("off", 0, 12)},
         {"last_error", Config::Str("", 0, 96)},
     });
 
@@ -1122,6 +1141,7 @@ void TeslaVehicle::update_active_vehicle()
 #if TESLA_BLE_MANUAL_VEHICLE_UI
     r->manual_poll_pending.store(false);
     r->poll_requested.store(false);
+    r->auto_poll_requested.store(false);
 #endif
     r->in_flight_started_ms = 0;
     r->next_poll_ms = millis();
@@ -1272,23 +1292,51 @@ void TeslaVehicle::process_commands()
     if (r->poll_requested.exchange(false)) {
         request_soc(true);
     }
+#if TESLA_BLE_MANUAL_VEHICLE_UI
+    if (r->auto_poll_requested.exchange(false)) {
+        request_soc(false);
+    }
+#endif
     check_worker_exhaustion();
+}
+
+void TeslaVehicle::set_poll_outcome(Runtime *r, PollOutcome outcome, bool automatic)
+{
+    r->poll_outcome.store(static_cast<uint8_t>(outcome));
+    r->poll_outcome_automatic.store(automatic);
+    r->poll_outcome_sequence.fetch_add(1);
 }
 
 void TeslaVehicle::request_soc(bool manual)
 {
     if (check_worker_exhaustion()) { return; }
     Runtime *r = tesla->runtime_owner.get();
-    if (!r->command_outcome.forward_available()) { if (manual) { r->poll_requested.store(true); } return; }
+#if TESLA_BLE_MANUAL_VEHICLE_UI
+    // An automatic operation that cannot start now ends without radio contact;
+    // the main-task scheduler tries again at its next interval. Never queued.
+    const bool automatic = !manual;
+    const auto defer_soc_request = [r, manual]() {
+        if (manual) { r->poll_requested.store(true); return; }
+        set_poll_outcome(r, PollOutcome::Busy, true); r->manual_poll_pending.store(false);
+    };
+    const auto outcome = [r](PollOutcome value, bool is_automatic) { set_poll_outcome(r, value, is_automatic); };
+#else
+    const bool automatic = false;
+    const auto defer_soc_request = [r, manual]() { if (manual) { r->poll_requested.store(true); } };
+    const auto outcome = [](PollOutcome, bool) {};
+#endif
+    if (!r->command_outcome.forward_available()) { defer_soc_request(); return; }
     if (r->in_flight_started_ms != 0 || r->pair_sending || r->pair_verifying || r->pair_status_active || r->pair_approval_waiting.load()) {
-        if (manual) { r->poll_requested.store(true); }
+        defer_soc_request();
         return;
     }
     const auto captured = r->session.identity();
-    if (!captured) { if (manual) { r->poll_requested.store(true); } return; }
+    if (!captured) { defer_soc_request(); return; }
 #if TESLA_BLE_MANUAL_VEHICLE_UI
     if (!active_identity_matches(*captured)) {
-        r->manual_poll_pending.store(false); post_event(EventType::Error, "SLAC identity changed before SoC action"); return;
+        r->manual_poll_pending.store(false);
+        if (manual) { post_event(EventType::Error, "SLAC identity changed before SoC action"); }
+        outcome(PollOutcome::Failed, automatic); return;
     }
 #endif
     if (captured->mac == 0 || captured->mac != r->bound_vehicle_mac.load() ||
@@ -1296,6 +1344,7 @@ void TeslaVehicle::request_soc(bool manual)
         if (manual) {
             post_event(EventType::Error, "Connected vehicle MAC is not bound to this Tesla key");
         }
+        outcome(PollOutcome::Failed, automatic);
         r->next_poll_ms = millis() + r->poll_interval_seconds * 1000U;
         r->manual_poll_pending.store(false);
         return;
@@ -1305,18 +1354,24 @@ void TeslaVehicle::request_soc(bool manual)
     if (r->in_flight.request == 0) {
         if (check_worker_exhaustion()) { return; }
         post_event(EventType::Error, "Could not connect to current Tesla over BLE");
+        outcome(PollOutcome::Failed, automatic);
         r->next_poll_ms = millis() + r->poll_interval_seconds * 1000U;
         r->manual_poll_pending.store(false);
         return;
     }
-    TeslaBleSocRequestDecision decision = r->policy.begin_request(captured->generation, r->configured_ev_index, manual || r->wake_once);
+    // Manual requests may wake when needed; automatic ones only with the
+    // profile's explicit wake permission. The policy spaces wakes over time.
+    TeslaBleSocRequestDecision decision = r->policy.begin_request(captured->generation, r->configured_ev_index,
+        manual || r->wake_once, millis());
     if (!decision.allowed || r->in_flight.request == 0) {
+        r->policy.request_refused(decision, millis()); // Nothing enqueued: release an unused wake reservation.
         r->session.disarm(r->in_flight);
         r->in_flight = {};
         r->in_flight_started_ms = 0;
         if (manual) {
             post_event(EventType::Error, "Configured EV profile is not currently connected");
         }
+        outcome(PollOutcome::Failed, automatic);
         r->next_poll_ms = millis() + r->poll_interval_seconds * 1000U;
         r->manual_poll_pending.store(false);
         return;
@@ -1326,16 +1381,38 @@ void TeslaVehicle::request_soc(bool manual)
     r->in_flight_started_ms = millis() ? millis() : 1;
     const auto request = r->in_flight;
     tesla_clean::VehicleCompletion completion;
-    const bool ready = completion.assign([this, r, request](const tesla_clean::VehicleResult &result) {
-        if (result.context != request.request || result.generation != r->connection_generation.load() ||
-            r->stop_requested.load() || !r->session.matches(request)) { return; }
+    const bool ready = completion.assign([this, r, request, decision, manual, automatic, outcome](const tesla_clean::VehicleResult &result) {
+        if (result.context != request.request) { return; }
+        // Settle the wake reservation from the controller's own wire fact before
+        // any publication filter: a retired link/session does not undo a
+        // possibly exposed wake, and an unused reservation is released.
+        r->policy.settle_wake(decision, result.wake_exposed, millis());
+        if (result.generation != r->connection_generation.load() ||
+            r->stop_requested.load() || !r->session.matches(request)) {
+            // Link/session/identity retired: never published as a result, but the
+            // operation's terminal status is still visible (no silent outcome).
+            outcome(result.wake_exposed ? PollOutcome::WokenNoSoc : PollOutcome::Failed, automatic);
+            return;
+        }
         const bool soc = result.code == tesla_clean::VehicleResultCode::Soc && result.authenticated;
         if (soc && r->policy.accept_result(request.vehicle.generation, request.vehicle.index, result.battery)) {
             post_event(EventType::Soc, nullptr, result.battery, request, true, true);
+            outcome(PollOutcome::Ok, automatic);
         } else {
             r->session.disarm(request);
             r->policy.on_transport_disconnected();
-            if (result.code != tesla_clean::VehicleResultCode::SkippedAsleep) { post_event(EventType::Error, "Tesla authenticated SoC request failed"); }
+            // Explicit outcomes; the last published SoC stays unchanged and is never refreshed here.
+            const bool asleep = result.code == tesla_clean::VehicleResultCode::SkippedAsleep;
+            const bool woken = !asleep && !soc && result.wake_exposed;
+            outcome(asleep ? (decision.wake_limited ? PollOutcome::AsleepWakeLimited : PollOutcome::AsleepWakeDisabled) :
+                    woken ? PollOutcome::WokenNoSoc : PollOutcome::Failed, automatic);
+            // A sleeping vehicle without wake permission is a normal automatic
+            // outcome (poll_outcome), not an error banner.
+            const char *failure = asleep ?
+                (manual ? "Tesla asleep; wake skipped, last wake less than 2 min ago; SoC not updated" : nullptr) :
+                woken ? "Tesla wake sent but no SoC received in time; SoC not updated" :
+                "Tesla authenticated SoC request failed";
+            if (failure) { post_event(EventType::Error, failure); }
         }
         r->in_flight_started_ms = 0;
         r->manual_poll_pending.store(false);
@@ -1344,12 +1421,13 @@ void TeslaVehicle::request_soc(bool manual)
                                                    : tesla_clean::WakePolicy::NoWakeSkip, r->in_flight.request, std::move(completion),
                                                    {RESPONSE_TIMEOUT_MS, 5000, 10000});
     if (!accepted) {
-        r->policy.request_refused(decision);
+        r->policy.request_refused(decision, millis());
         check_worker_exhaustion();
         r->session.disarm(r->in_flight);
         r->in_flight = {};
         r->in_flight_started_ms = 0;
         post_event(EventType::Error, "Tesla SoC command refused; no request is in flight");
+        outcome(PollOutcome::Failed, automatic);
         r->manual_poll_pending.store(false);
     }
     r->next_poll_ms = millis() + r->poll_interval_seconds * 1000U;
@@ -1741,6 +1819,13 @@ void TeslaVehicle::post_event(EventType type, const char *message, float soc,
     event.authenticated = authenticated;
     event.correlated = correlated;
     event.soc = soc;
+    if (type == EventType::Soc) {
+        // Only caller: the worker's accepted authenticated SoC result. Receive time
+        // is fixed here; Rtc::clock_synced() is gettimeofday() plus a constant
+        // bound check (no Rtc member state), so it is safe from the worker task.
+        event.received_uptime = now_us();
+        event.received_unix = tesla_wall_clock_seconds();
+    }
     if (message != nullptr) {
         strlcpy(event.message, message, sizeof(event.message));
         if (type == EventType::Error) { strlcpy(r->terminal_error, message, sizeof(r->terminal_error)); }
@@ -1817,6 +1902,7 @@ void TeslaVehicle::loop()
 #if TESLA_BLE_MANUAL_VEHICLE_UI
     publish_profile();
     publish_guidance();
+    auto_poll();
 #endif
     const bool changed = tesla->runtime_update_requested.exchange(false);
     if (changed) {
@@ -2047,7 +2133,10 @@ void TeslaVehicle::process_module_events()
                     tesla->state.get("pairing_pending")->updateBool(tesla->pairing_policy.pairing_pending());
                 }
                 tesla->state.get("last_soc")->updateFloat(event.soc);
-                tesla->state.get("last_update")->updateUptime(now_us());
+                // Receive time captured by the worker at acceptance; never re-read here,
+                // so queue delay or a later NTP sync/step cannot alter it (0 stays 0).
+                tesla->state.get("last_update")->updateUptime(event.received_uptime);
+                tesla->state.get("last_update_unix")->updateUint(event.received_unix);
                 if (tesla_ble_publication_newer(event.order, r->error_order)) {
                     r->error_order = event.order;
                     publish_error("");

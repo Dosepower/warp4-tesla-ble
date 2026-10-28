@@ -13,6 +13,10 @@ struct VehicleResult {
     uint8_t battery=0;
     SleepState sleep=SleepState::Unknown;
     bool authenticated=false;
+    // True once this command handed an RKE wake frame to the transport, including a
+    // partial, refused or unacknowledged write: the vehicle may have received it.
+    // Callers use it to settle a wake budget; it is never authentication evidence.
+    bool wake_exposed=false;
 };
 using VehicleCompletion=CheckedCallback<void(const VehicleResult &)>;
 struct VehicleTiming { uint32_t total_ms=5000,response_ms=500,transmit_ms=500; };
@@ -41,6 +45,9 @@ class Vehicle {
         uint32_t started=0,transmitted=0,retry_at=0;
         VehicleTiming timing;
         unsigned attempts=0;
+        // Post-wake VCSEC status probes: paced and separately bounded (see tick/encrypted).
+        unsigned wake_polls=0;
+        uint32_t retry_delay=100;
         bool delayed=false,wake_sent=false,has_request=false,refresh=false;
         VehicleCompletion completion;
     };
@@ -93,7 +100,7 @@ class Vehicle {
     bool advance();
     bool enqueue(Kind kind,WakePolicy policy,uint64_t context,VehicleCompletion &&completion,VehicleTiming timing);
     void finish(VehicleResultCode code,uint8_t battery=0,SleepState sleep=SleepState::Unknown,bool authenticated=false);
-    void retry(Stage stage,uint32_t now);
+    void retry(Stage stage,uint32_t now,uint32_t delay=100);
     bool transmit(Bytes payload,Transmission &tx);
     void drain(Transmission &tx);
     static bool transmit_owns(void *,uint64_t);
@@ -105,6 +112,13 @@ class Vehicle {
     bool authenticate(Domain d,Stage waiting,Stage next,uint32_t now);
     void encrypted(Domain d,Bytes payload,Stage waiting,uint32_t now);
 public:
+    // After a (possibly) exposed wake, VCSEC reports asleep until the car has woken.
+    // Probe its status at this pace (official/reference transport retry interval) and
+    // never with the 100 ms backoff. Probes count against their own cap, bounded in
+    // addition by the command's unchanged total deadline, not the generic 8-attempt
+    // budget that protects session/command retries. A wake is still never resent.
+    static constexpr uint32_t wake_status_interval_ms=1000;
+    static constexpr unsigned max_wake_status_polls=40;
     bool exhausted() const { return operation_retired_ || serial_ == UINT64_MAX || receiver_.exhausted() || vcsec_.exhausted() || info_.exhausted(); }
     Vehicle(IdentityStore &keys,Bytes vin,Bytes routing_address,VehiclePorts ports);
     Vehicle(const Vehicle &)=delete;

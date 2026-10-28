@@ -32,9 +32,9 @@ static void boundary(uint64_t initial) {
     id.generation += uint64_t{1} << 32; session.publish(id);
     assert(!session.matches(fresh) && session.identity()->generation == id.generation);
     TeslaBleSocPolicy policy; policy.on_vehicle_changed(initial,2);
-    auto decision = policy.begin_request(initial,2,false); assert(decision.allowed);
+    auto decision = policy.begin_request(initial,2,false,0); assert(decision.allowed);
     policy.on_vehicle_changed(initial+(uint64_t{1}<<32),2);
-    assert(policy.begin_request(initial+(uint64_t{1}<<32),2,false).allowed);
+    assert(policy.begin_request(initial+(uint64_t{1}<<32),2,false,0).allowed);
     assert(!policy.accept_result(decision.generation,2,50));
     TeslaBleCommandOutcome outcome; outcome.sequence = initial;
     outcome.publish(TeslaBleCommandOutcome::Kind::PairStarted,true);

@@ -2,6 +2,7 @@
 // Only OS/config/SDK boundaries are substituted. TeslaVehicle and its Runtime,
 // worker, main, queues ownership, adapters and protocol remain production code.
 #include <algorithm>
+#include <sys/time.h>
 #include <atomic>
 #include <cassert>
 #include <cmath>
@@ -77,13 +78,16 @@ public:
         text = v; return true;
     }
     void updateFloat(float v) { floating = v; }
-    void updateUptime(uint64_t) {}
+    void updateUptime(uint64_t v) { uptime = v; }
+    float asFloat() const { return floating; }      // test-only readback
+    uint64_t asUptime() const { return uptime; }    // test-only readback
     void updateInt(int v) { integer = v; }
 private:
     std::map<std::string, std::shared_ptr<Config>> children;
     bool boolean = false;
     int integer = 0;
     float floating = NAN;
+    uint64_t uptime = 0;
     String text;
     const Config *prototype=nullptr;
     unsigned array_max=0;
@@ -111,6 +115,23 @@ struct HostChargingBoundary {
     template<class... A> void set_charging_current(A&&...) { ++host_charge_calls; }
 };
 inline HostChargingBoundary charge_authorization, evse, evse_v2;
+// EVSE-owned "evse/state" as published through the API (charger_state values of
+// src/modules/evse_common/evse_common.h). Tests set it; production only reads it
+// on the main task via api.getState(). Not part of api.states (tests count those).
+#ifndef CHARGER_STATE_CHARGING
+#define CHARGER_STATE_NOT_PLUGGED_IN 0
+#define CHARGER_STATE_WAITING_FOR_RELEASE 1
+#define CHARGER_STATE_READY_TO_CHARGE 2
+#define CHARGER_STATE_CHARGING 3
+#define CHARGER_STATE_ERROR 4
+#endif
+struct HostEvseState {
+    // Default: actively charging, so the pre-existing periodic contracts keep
+    // their meaning (periodic requests are only made during active charging).
+    Config state = Config::Object({{"charger_state", Config::Uint(CHARGER_STATE_CHARGING, 0, 4)}});
+    void set_charger_state(uint32_t value) { state.get("charger_state")->updateUint(value); }
+};
+inline HostEvseState host_evse;
 // Optional deterministic interleaving probe (card-confirm contention test only).
 inline std::function<void()> host_profile_mac_probe;
 struct HostEV {
@@ -149,6 +170,10 @@ struct HostAPI {
     std::map<std::string,Config> written_configs;
     void writeConfig(const char *name, ConfigRoot *config) { written_configs.insert_or_assign(name,config->clone()); }
     void removeConfig(const char *) {}
+    const Config *getState(const char *name, bool = true) {
+        if (std::strcmp(name, "evse/state") == 0) { return &host_evse.state; }
+        const auto it = states.find(name); return it == states.end() ? nullptr : it->second;
+    }
     void addPersistentConfig(const char *name, ConfigRoot *config, std::initializer_list<int>, std::initializer_list<const char *>) { states[name] = config; }
     void addState(const char *name, ConfigRoot *config) { states[name] = config; }
     void addState(const char *name, ConfigRoot *config,std::initializer_list<const char *>,std::initializer_list<const char *>) { states[name]=config; }
@@ -212,6 +237,16 @@ inline HostMasterSerial Serial;
 inline std::atomic<uint32_t> clock_ms{1};
 inline uint32_t millis() { return clock_ms.load(); }
 inline uint64_t now_us() { return uint64_t{millis()} * 1000; }
+// Host RTC: unsynchronized unless a test sets a wall-clock base (seconds at millis()==0).
+struct HostRtc {
+    std::atomic<bool> synced{false};
+    std::atomic<int64_t> base_seconds{0};
+    bool clock_synced(struct timeval *out) {
+        if (!synced.load()) { return false; }
+        out->tv_sec = static_cast<time_t>(base_seconds.load() + millis() / 1000); out->tv_usec = 0; return true;
+    }
+};
+inline HostRtc rtc;
 // Deterministic pair-trace interleaving (production macro is empty in firmware).
 inline std::function<void(int)> host_pair_trace_point;
 #define TESLA_PAIR_TRACE_POINT(point) do { if (host_pair_trace_point) { host_pair_trace_point(point); } } while (0)
