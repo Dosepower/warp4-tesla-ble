@@ -1359,10 +1359,20 @@ void TeslaVehicle::request_soc(bool manual)
         r->manual_poll_pending.store(false);
         return;
     }
-    // Manual requests may wake when needed; automatic ones only with the
-    // profile's explicit wake permission. The policy spaces wakes over time.
+    // Manual requests may wake when needed. Automatic requests wake exactly when
+    // the charge-aware scheduler permits it for the handed-over cycle (plug-in
+    // request incl. bounded retries, charge start/resume, periodic while
+    // charging; never a post-wake follow-up). The persisted legacy profile flag
+    // "wake_once" no longer gates automatic wakes in these builds, so a stored
+    // false cannot silently block them; builds without the scheduler keep it.
+    // The policy spaces wakes over time (MIN_WAKE_SPACING_MS) in every case.
+#if TESLA_BLE_MANUAL_VEHICLE_UI
+    const bool wake_wanted = manual || r->auto_poll_wake.load();
+#else
+    const bool wake_wanted = manual || r->wake_once;
+#endif
     TeslaBleSocRequestDecision decision = r->policy.begin_request(captured->generation, r->configured_ev_index,
-        manual || r->wake_once, millis());
+        wake_wanted, millis());
     if (!decision.allowed || r->in_flight.request == 0) {
         r->policy.request_refused(decision, millis()); // Nothing enqueued: release an unused wake reservation.
         r->session.disarm(r->in_flight);
@@ -1391,7 +1401,8 @@ void TeslaVehicle::request_soc(bool manual)
             r->stop_requested.load() || !r->session.matches(request)) {
             // Link/session/identity retired: never published as a result, but the
             // operation's terminal status is still visible (no silent outcome).
-            outcome(result.wake_exposed ? PollOutcome::WokenNoSoc : PollOutcome::Failed, automatic);
+            outcome(result.wake_exposed ? (result.awake_after_wake ? PollOutcome::WokenNoSoc : PollOutcome::WakeSentNoSoc) :
+                    PollOutcome::Failed, automatic);
             return;
         }
         const bool soc = result.code == tesla_clean::VehicleResultCode::Soc && result.authenticated;
@@ -1403,14 +1414,17 @@ void TeslaVehicle::request_soc(bool manual)
             r->policy.on_transport_disconnected();
             // Explicit outcomes; the last published SoC stays unchanged and is never refreshed here.
             const bool asleep = result.code == tesla_clean::VehicleResultCode::SkippedAsleep;
-            const bool woken = !asleep && !soc && result.wake_exposed;
+            const bool wake_sent = !asleep && !soc && result.wake_exposed;
+            // "Woken" only with authenticated awake evidence after the wake.
+            const bool woken = wake_sent && result.awake_after_wake;
             outcome(asleep ? (decision.wake_limited ? PollOutcome::AsleepWakeLimited : PollOutcome::AsleepWakeDisabled) :
-                    woken ? PollOutcome::WokenNoSoc : PollOutcome::Failed, automatic);
+                    woken ? PollOutcome::WokenNoSoc : wake_sent ? PollOutcome::WakeSentNoSoc : PollOutcome::Failed, automatic);
             // A sleeping vehicle without wake permission is a normal automatic
             // outcome (poll_outcome), not an error banner.
             const char *failure = asleep ?
                 (manual ? "Tesla asleep; wake skipped, last wake less than 2 min ago; SoC not updated" : nullptr) :
-                woken ? "Tesla wake sent but no SoC received in time; SoC not updated" :
+                woken ? "Tesla woke up but no SoC received in time; SoC not updated" :
+                wake_sent ? "Tesla wake sent but no SoC received in time; SoC not updated" :
                 "Tesla authenticated SoC request failed";
             if (failure) { post_event(EventType::Error, failure); }
         }

@@ -7,6 +7,7 @@ interface TeslaProfile {
     ev_index: number;
     ev_mac: string;
     poll_interval: number;
+    // Legacy persisted field, kept for schema compatibility; no longer gates automatic wakes.
     wake_once: boolean;
 }
 export interface profiles { entries: TeslaProfile[]; }
@@ -62,10 +63,10 @@ export interface state {
     last_update: number;
     // Unix seconds of the last consumed authenticated SoC; 0 = WARP clock not synchronized.
     last_update_unix: number;
-    poll_outcome: 'none' | 'ok' | 'asleep_wake_disabled' | 'asleep_wake_limited' | 'woken_no_soc' | 'failed' | 'busy';
+    poll_outcome: 'none' | 'ok' | 'asleep_wake_disabled' | 'asleep_wake_limited' | 'woken_no_soc' | 'failed' | 'busy' | 'wake_sent_no_soc';
     poll_outcome_automatic: boolean;
     // Firmware background scheduler (works without an open browser).
-    auto_poll: 'off' | 'waiting' | 'not_paired' | 'searching' | 'polling' | 'not_found' | 'failed';
+    auto_poll: 'off' | 'initial' | 'waiting' | 'not_charging' | 'not_paired' | 'searching' | 'polling' | 'not_found' | 'failed' | 'after_wake';
     last_error: string;
 }
 export interface guidance {

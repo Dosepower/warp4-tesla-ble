@@ -61,6 +61,51 @@ int main()
         expect(r.wakes==1 && r.post_wake<=Vehicle::max_wake_status_polls && r.h.clock-start<=40000+40,"one wake, bounded, at deadline");
         std::printf("never awake: post-wake probes=%u ended after %u ms\n",r.post_wake,r.h.clock-start);
     }
+    // Waking infotainment: VCSEC awake 2 s after the wake, but the infotainment ignores
+    // session requests for a while after its first one (synthetic model of the documented
+    // behaviour, yoziru TeslaBLE v6.2.0 include/vehicle.h:158-163; real durations unknown).
+    auto info_boot=[&](uint32_t ignore_ms,Run &r,unsigned &ignored) {
+        uint32_t info_first=0;
+        r.awake=[&r]{return r.wake_at && r.h.clock-r.wake_at>=2000;};
+        r.on_sent=[&r,&ignored,info_first,ignore_ms](const Sent &s) mutable {
+            if(s.hello && s.domain==Domain::Infotainment) {
+                if(!info_first) { info_first=r.h.clock; }
+                if(r.h.clock-info_first<ignore_ms) { ++ignored; return false; }
+            }
+            return true;
+        };
+        assert(r.h.vehicle.open(r.h.link)); const uint32_t start=r.h.clock;
+        assert(r.h.vehicle.charge_state_poll(WakePolicy::WakeIfNeeded,1,r.h.callback(r.results),soc_timing)); r.pump(start+60000);
+        std::printf("info boot %u ms: ignored infotainment session requests=%u result=%d after %u ms\n",ignore_ms,ignored,
+                    r.results.empty()?-1:static_cast<int>(r.results[0].code),r.h.clock-start);
+        return r.h.clock-start;
+    };
+    { // Short infotainment delay (8 s): SoC in the same operation, awake evidence reported.
+        Run r; unsigned ignored=0; const uint32_t took=info_boot(8000,r,ignored);
+        expect(r.results.size()==1 && r.results[0].code==VehicleResultCode::Soc && r.results[0].battery==72 && r.results[0].wake_exposed &&
+               r.results[0].awake_after_wake && r.wakes==1 && ignored>=1 && took<=40000+40,"short infotainment delay: SoC, woken evidence, one wake");
+    }
+    { // Long infotainment delay (20 s): the unchanged per-operation session-challenge cap
+      // (3 per domain) ends the operation without SoC, but with authenticated awake
+      // evidence and exactly one wake. Recovery is a separate later operation without a
+      // wake (firmware post-wake follow-up), never a second wake or a raised auth budget.
+        Run r; unsigned ignored=0; const uint32_t took=info_boot(20000,r,ignored);
+        expect(r.results.size()==1 && r.results[0].code!=VehicleResultCode::Soc && r.results[0].wake_exposed && r.results[0].awake_after_wake &&
+               r.wakes==1 && ignored==3 && took<=40000+40,"long infotainment delay: no SoC, woken evidence, one wake, bounded");
+    }
+    { // Never awake: wake exposed, but no awake evidence (honest "wake sent", not "woken").
+        Run r; assert(r.h.vehicle.open(r.h.link));
+        assert(r.h.vehicle.charge_state_poll(WakePolicy::WakeIfNeeded,1,r.h.callback(r.results),soc_timing)); r.pump(r.h.clock+60000);
+        expect(r.results.size()==1 && r.results[0].wake_exposed && !r.results[0].awake_after_wake,"never awake: no awake evidence");
+    }
+    { // VCSEC awake, infotainment never answers within the deadline: woken (evidence), no SoC, Expired.
+        Run r; r.awake=[&r]{return r.wake_at && r.h.clock-r.wake_at>=1000;};
+        r.on_sent=[](const Sent &s){ return !(s.hello && s.domain==Domain::Infotainment); };
+        assert(r.h.vehicle.open(r.h.link)); const uint32_t start=r.h.clock;
+        assert(r.h.vehicle.charge_state_poll(WakePolicy::WakeIfNeeded,1,r.h.callback(r.results),soc_timing)); r.pump(start+60000);
+        expect(r.results.size()==1 && r.results[0].code!=VehicleResultCode::Soc && r.results[0].wake_exposed && r.results[0].awake_after_wake &&
+               r.wakes==1 && r.h.clock-start<=40000+40,"silent infotainment: woken evidence, no SoC, bounded by the unchanged deadline");
+    }
     { // Independent probe cap even with a much longer total budget.
         Run r; assert(r.h.vehicle.open(r.h.link));
         assert(r.h.vehicle.charge_state_poll(WakePolicy::WakeIfNeeded,1,r.h.callback(r.results),{200000,5000,10000})); r.pump(r.h.clock+200000);

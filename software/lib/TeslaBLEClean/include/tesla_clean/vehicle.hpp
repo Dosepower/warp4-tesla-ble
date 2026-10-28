@@ -17,6 +17,10 @@ struct VehicleResult {
     // partial, refused or unacknowledged write: the vehicle may have received it.
     // Callers use it to settle a wake budget; it is never authentication evidence.
     bool wake_exposed=false;
+    // True only if, after this command exposed a wake, an authenticated VCSEC
+    // vehicle status reported the vehicle awake. Evidence that the car actually
+    // woke up (for honest reporting); never authority for anything else.
+    bool awake_after_wake=false;
 };
 using VehicleCompletion=CheckedCallback<void(const VehicleResult &)>;
 struct VehicleTiming { uint32_t total_ms=5000,response_ms=500,transmit_ms=500; };
@@ -48,7 +52,7 @@ class Vehicle {
         // Post-wake VCSEC status probes: paced and separately bounded (see tick/encrypted).
         unsigned wake_polls=0;
         uint32_t retry_delay=100;
-        bool delayed=false,wake_sent=false,has_request=false,refresh=false;
+        bool delayed=false,wake_sent=false,has_request=false,refresh=false,awake_after_wake=false;
         VehicleCompletion completion;
     };
     struct Channel {

@@ -14,6 +14,17 @@
 //   - charge pause (e.g. PV/charge-manager pause) or charge end: no further
 //     automatic request, scan or wake. The last successful value keeps its
 //     real receive time; nothing is refreshed or re-stamped.
+// Wake coupling: an automatic request may wake an asleep vehicle exactly in the
+// contexts above (plug-in request incl. its bounded retries, charge start/resume,
+// periodic while charging), always subject to TeslaBleSocPolicy's per-operation
+// single wake and MIN_WAKE_SPACING_MS. There is no user wake switch any more;
+// the legacy persisted profile flag "wake_once" is not consulted (no config rewrite).
+// Post-wake follow-up: if an operation (manual or automatic) exposed a wake but
+// delivered no SoC, ONE later request without any wake follows after
+// AUTO_POLL_POST_WAKE_DELAY_MS (a just woken infotainment can need longer than one
+// operation's session budget). An automatic origin needs its context to persist
+// (charging, or the plug-in request still open); a manual origin belongs to the
+// user's explicit request. The follow-up never wakes, so it cannot re-arm itself.
 // The EVSE state is only observed (read-only); this module never starts,
 // stops, releases or authorizes charging.
 // One cycle reuses the existing production predicates unchanged:
@@ -38,6 +49,9 @@ static constexpr uint32_t AUTO_POLL_SELECT_TIMEOUT_MS = 15000;
 // sooner than this gap after any finished SoC operation (manual or automatic).
 static constexpr uint32_t AUTO_POLL_CHARGE_START_DELAY_MS = 5000;
 static constexpr uint32_t AUTO_POLL_MIN_GAP_MS = 30000; // = smallest configurable interval
+// Post-wake follow-up: measured from the end of the waking operation; equal to the
+// minimum gap, so it never crowds any other request.
+static constexpr uint32_t AUTO_POLL_POST_WAKE_DELAY_MS = AUTO_POLL_MIN_GAP_MS;
 // Plug-in request: at most this many cycles per plug-in session; backoff
 // after the first and second unsuccessful one.
 static constexpr uint8_t AUTO_POLL_INITIAL_ATTEMPTS = 3;
@@ -90,13 +104,25 @@ void TeslaVehicle::auto_poll()
         if (tesla->poll_outcome_epoch != r->epoch || tesla->poll_outcome_seen != sequence) {
             // Per runtime epoch; a new worker's sequence restarts at 0 (nothing to publish yet).
             tesla->poll_outcome_epoch = r->epoch; tesla->poll_outcome_seen = sequence;
-            static const char *const names[] = {"none", "ok", "asleep_wake_disabled", "asleep_wake_limited", "woken_no_soc", "failed", "busy"};
+            static const char *const names[] = {"none", "ok", "asleep_wake_disabled", "asleep_wake_limited", "woken_no_soc", "failed", "busy", "wake_sent_no_soc"};
             const auto value = r->poll_outcome.load();
             if (sequence != 0 && value < sizeof(names) / sizeof(names[0])) {
                 tesla->state.get("poll_outcome")->updateString(names[value]);
                 tesla->state.get("poll_outcome_automatic")->updateBool(r->poll_outcome_automatic.load());
                 a.last_operation_ms = now; a.operation_seen = true;
                 a.last_operation_manual = !r->poll_outcome_automatic.load();
+                const auto outcome = static_cast<PollOutcome>(value);
+                if (outcome == PollOutcome::Ok) {
+                    a.post_wake_armed = a.post_wake = false; // SoC delivered: no follow-up needed
+                    // A fresh SoC (e.g. the user's manual request) supersedes an older
+                    // automatic failure; never leave it shown as the current state.
+                    const auto &shown = tesla->state.get("auto_poll")->asString();
+                    if (a.phase == Tesla::AutoPoll::Phase::Idle && (shown == "not_found" || shown == "failed" || shown == "after_wake")) {
+                        auto_poll_publish(a.initial_done && !auto_poll_actively_charging() ? "not_charging" : "waiting");
+                    }
+                } else if (outcome == PollOutcome::WokenNoSoc || outcome == PollOutcome::WakeSentNoSoc) {
+                    a.post_wake_armed = true; a.post_wake_manual = a.last_operation_manual;
+                }
             }
         }
     }
@@ -140,6 +166,7 @@ void TeslaVehicle::auto_poll()
     // retryable: an unsuccessful plug-in request may be retried (bounded).
     auto end_cycle = [&](const char *state, bool retryable = true) {
         a.phase = Tesla::AutoPoll::Phase::Idle;
+        a.cycle_post_wake = a.cycle_post_wake_manual = false;
         // The demand is served (once, even by a failure) only if no edge arrived
         // after this cycle's request hand-over (or start, without hand-over).
         if (a.cycle_edges == a.charge_edges) { a.charge_start = false; }
@@ -167,8 +194,9 @@ void TeslaVehicle::auto_poll()
         auto_poll_publish(state);
     };
     auto retry_later = [&] { a.next_ms = now + AUTO_POLL_RETRY_MS; a.interval_scheduled = false; };
-    // A charge cycle whose charging ended before vehicle contact: no request.
-    const bool charge_cycle_obsolete = !a.cycle_initial && !charging;
+    // A charge cycle whose charging ended before vehicle contact: no request
+    // (a follow-up of the user's explicit request is not a charge cycle).
+    const bool charge_cycle_obsolete = !a.cycle_initial && !a.cycle_post_wake_manual && !charging;
     char vin[18]{}, address[18]{};
     strlcpy(vin, p->get("vin")->asString().c_str(), sizeof(vin));
     strlcpy(address, p->get("ble_address")->asString().c_str(), sizeof(address));
@@ -180,11 +208,21 @@ void TeslaVehicle::auto_poll()
             // results of the current generation): no extra plug-in request.
             a.initial_done = true;
         }
-        if (a.initial_done && !charging) {
+        if (a.post_wake_armed) {
+            // Schedule the single post-wake follow-up (no wake) after the waking operation.
+            a.post_wake_armed = false; a.post_wake = true;
+            a.next_ms = a.last_operation_ms + AUTO_POLL_POST_WAKE_DELAY_MS; a.interval_scheduled = false;
+            auto_poll_publish("after_wake");
+        }
+        if (a.post_wake && !a.post_wake_manual && a.initial_done && !charging) {
+            // Automatic origin whose context ended (pause/end): no new request.
+            a.post_wake = false;
+        }
+        if (a.initial_done && !charging && !a.post_wake) {
             // Charge pause/end (or never charging after the plug-in request):
             // no automatic request, scan or wake until charging really starts.
             const auto &shown = tesla->state.get("auto_poll")->asString();
-            if (shown == "waiting" || shown == "initial") { auto_poll_publish("not_charging"); }
+            if (shown == "waiting" || shown == "initial" || shown == "after_wake") { auto_poll_publish("not_charging"); }
             return;
         }
         if (a.interval_scheduled && a.interval_applied_ms != interval_ms) {
@@ -200,7 +238,7 @@ void TeslaVehicle::auto_poll()
         // and a retry of the own plug-in request wait AUTO_POLL_MIN_GAP_MS; after
         // an explicit (manual) request the plug-in request and periodic requests
         // wait one interval, so they never crowd the user's own requests.
-        const bool short_gap = a.charge_start || (!a.initial_done && !a.last_operation_manual);
+        const bool short_gap = a.charge_start || a.post_wake || (!a.initial_done && !a.last_operation_manual);
         if (a.operation_seen && now - a.last_operation_ms < (short_gap ? AUTO_POLL_MIN_GAP_MS : interval_ms)) { return; }
         // Never interleave with an explicit user flow or any busy worker state.
         TeslaBleDiscovery::Snapshot s{};
@@ -211,6 +249,8 @@ void TeslaVehicle::auto_poll()
             retry_later(); return;
         }
         a.cycle_initial = !a.initial_done; a.cycle_edges = a.charge_edges;
+        // The follow-up is consumed by starting its cycle: at most one attempt.
+        a.cycle_post_wake = a.post_wake; a.cycle_post_wake_manual = a.post_wake && a.post_wake_manual; a.post_wake = false;
         // Read-only probe under the same idle gate as publish_guidance().
         TeslaBleStorageAdapter store;
         if (!store.select_profile(live.index, live.mac) ||
@@ -222,7 +262,9 @@ void TeslaVehicle::auto_poll()
         scope.index = live.index; scope.mac = live.mac; scope.generation = live.generation;
         memcpy(scope.searched_vin, vin, 17);
         if (!tesla_ble_vehicle_name(vin, scope.name) || !bluetooth.request_discovery(scope)) {
-            a.cycle_initial = false; retry_later(); return;
+            // Not started: no radio contact, the follow-up (if any) stays pending.
+            a.cycle_initial = false; a.post_wake = a.cycle_post_wake; a.cycle_post_wake = a.cycle_post_wake_manual = false;
+            retry_later(); return;
         }
         a.scan_baseline = s.revision; a.config_revision = tesla->config_revision;
         a.phase = Tesla::AutoPoll::Phase::Scanning; a.phase_ms = now;
@@ -261,6 +303,9 @@ void TeslaVehicle::auto_poll()
         }
         a.outcome_sequence0 = r->poll_outcome_sequence.load();
         a.cycle_edges = a.charge_edges; // this request is issued after every edge seen so far
+        // Wake permission of this hand-over: every scheduler context except the
+        // post-wake follow-up (stored before the request flag the worker claims).
+        r->auto_poll_wake.store(!a.cycle_post_wake);
         r->auto_poll_requested.store(true);
         a.phase = Tesla::AutoPoll::Phase::Polling; a.phase_ms = now;
         auto_poll_publish("polling");
@@ -283,7 +328,9 @@ void TeslaVehicle::auto_poll()
         bool retryable = true;
         if (own_runtime && r->poll_outcome_sequence.load() != a.outcome_sequence0 && r->poll_outcome_automatic.load()) {
             const auto value = static_cast<PollOutcome>(r->poll_outcome.load());
-            retryable = value != PollOutcome::Ok && value != PollOutcome::AsleepWakeDisabled;
+            // "Asleep, wake not permitted" is final for the plug-in request only as a
+            // configuration decision; a no-wake follow-up finding the car asleep is not.
+            retryable = value != PollOutcome::Ok && !(value == PollOutcome::AsleepWakeDisabled && !a.cycle_post_wake);
         }
         end_cycle("waiting", retryable);
         return;

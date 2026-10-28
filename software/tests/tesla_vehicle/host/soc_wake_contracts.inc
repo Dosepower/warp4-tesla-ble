@@ -13,7 +13,7 @@
 // across operations allowed, spaced by TeslaBleSocPolicy::MIN_WAKE_SPACING_MS.
 // RED/GREEN lines are printed; a violated expectation exits 1 with "RED: <reason>".
 struct SocRun {
- unsigned wakes=0,wake_partial=0,statuses=0,statuses_after_wake=0,hellos=0,charges=0,frames=0;
+ unsigned wakes=0,wake_partial=0,statuses=0,statuses_after_wake=0,hellos=0,charges=0,frames=0,info_ignored=0;
  std::vector<uint32_t> after_wake_at;
  uint32_t committed=0,finished=0,update_unix=0;
  bool automatic=false,outcome_automatic=false;
@@ -27,8 +27,11 @@ static void soc_wake_flow(TeslaVehicle &m,const std::string &mode) {
  using Phase=TeslaVehicle::Tesla::AutoPoll::Phase;
  static const char *const ASLEEP_LIMITED="Tesla asleep; wake skipped, last wake less than 2 min ago; SoC not updated";
  static const char *const WAKE_NO_SOC="Tesla wake sent but no SoC received in time; SoC not updated";
+ static const char *const WOKEN_NO_SOC="Tesla woke up but no SoC received in time; SoC not updated";
  constexpr uint32_t SPACING=TeslaBleSocPolicy::MIN_WAKE_SPACING_MS;
  const bool automatic_mode=mode.rfind("soc-auto",0)==0;
+ // Manual scenario whose firmware post-wake follow-up must be able to reach the vehicle.
+ const bool bound_mode=automatic_mode||mode=="soc-wake-followup";
  Harness peer;
  {
   // Already paired profile 0 (fixture key) with its verified transport binding,
@@ -40,7 +43,7 @@ static void soc_wake_flow(TeslaVehicle &m,const std::string &mode) {
   assert(tesla_clean::KeyStorage::committed(store.save_transaction("vehicle_vin",reinterpret_cast<const uint8_t *>("5YJ3E1EA7KF000001"),17)));
   assert(tesla_clean::KeyStorage::committed(store.save_transaction("warp_ev_mac",mac.data(),mac.size())));
   assert(tesla_clean::KeyStorage::committed(store.save_transaction("authorized",&auth,1)));
-  if(automatic_mode){uint8_t transport[26]{};assert(profile_transport_record("5YJ3E1EA7KF000001","01:02:03:04:05:06",0,transport));
+  if(bound_mode){uint8_t transport[26]{};assert(profile_transport_record("5YJ3E1EA7KF000001","01:02:03:04:05:06",0,transport));
    assert(tesla_clean::KeyStorage::committed(store.save_transaction("ble_binding",transport,sizeof(transport))));}
  }
  host_rx_properties=32;
@@ -50,6 +53,10 @@ static void soc_wake_flow(TeslaVehicle &m,const std::string &mode) {
  bool car_awake=false,advertising=true;uint32_t wake_at=0,awake_after_wake=0;bool never_wakes=false;
  bool drop_on_status=false,drop_on_wake_fragment=false,drop_after_wake=false,next_is_wake=false,unplug_on_charge=false;
  unsigned wake_fragments=0;bool pending_drop=false;
+ // Synthetic waking infotainment (documented in TeslaBLE v6.2.0 include/vehicle.h:158-163; the
+ // real duration is unknown): infotainment session requests are ignored for info_boot_ms after
+ // the first one following a wake. 0 = answers at once (all pre-existing scenarios).
+ uint32_t info_boot_ms=0,info_first=0;
  bool hold_on_hello=false,hold_replies=false; // test-only: keep a claimed automatic operation in flight
  auto vcsec_awake=[&]{return car_awake||(wake_at&&!never_wakes&&millis()-wake_at>=awake_after_wake);};
  std::vector<SocRun> runs;SocRun *run=nullptr;bool auto_run=false;
@@ -61,7 +68,10 @@ static void soc_wake_flow(TeslaVehicle &m,const std::string &mode) {
  auto on_frame=[&](const Frame &f){
   const auto s=decode(f);peer.address=r->routing_address;
   ++total_frames;if(run)++run->frames;
-  if(s.hello){if(run)++run->hellos;replies.push_back(peer.hello(s));if(hold_on_hello&&run){hold_on_hello=false;hold_replies=true;}return;}
+  if(s.hello){if(run)++run->hellos;
+   if(s.domain==Domain::Infotainment&&info_boot_ms&&wake_at){if(!info_first)info_first=millis();
+    if(millis()-info_first<info_boot_ms){if(run)++run->info_ignored;return;}}
+   replies.push_back(peer.hello(s));if(hold_on_hello&&run){hold_on_hello=false;hold_replies=true;}return;}
   if(s.pair){assert(false && "no pairing in SoC contracts");return;}
   if(s.domain==Domain::Infotainment){
    if(run)++run->charges;
@@ -130,8 +140,9 @@ static void soc_wake_flow(TeslaVehicle &m,const std::string &mode) {
   x.error=m.tesla->state.get("last_error")->asString().c_str();x.soc=m.tesla->state.get("last_soc")->asFloat();
   x.update=m.tesla->state.get("last_update")->asUptime();x.update_unix=m.tesla->state.get("last_update_unix")->asUint();x.applied=ev.applied;
   x.outcome=m.tesla->state.get("poll_outcome")->asString().c_str();x.outcome_automatic=m.tesla->state.get("poll_outcome_automatic")->asBool();
-  std::printf("SOC_RUN %s #%zu %s wakes=%u partial=%u statuses=%u after_wake=%u hellos=%u charges=%u applied=%d start=%u ms=%u outcome=%s error='%s'\n",mode.c_str(),runs.size(),
-   x.automatic?"auto":"manual",x.wakes,x.wake_partial,x.statuses,x.statuses_after_wake,x.hellos,x.charges,x.applied,x.committed,x.finished-x.committed,x.outcome.c_str(),x.error.c_str());std::fflush(stdout);
+  std::printf("SOC_RUN %s #%zu %s wakes=%u partial=%u statuses=%u after_wake=%u hellos=%u info_ignored=%u charges=%u applied=%d start=%u ms=%u outcome=%s auto_poll=%s error='%s'\n",mode.c_str(),runs.size(),
+   x.automatic?"auto":"manual",x.wakes,x.wake_partial,x.statuses,x.statuses_after_wake,x.hellos,x.info_ignored,x.charges,x.applied,x.committed,x.finished-x.committed,x.outcome.c_str(),
+   m.tesla->state.get("auto_poll")->asString().c_str(),x.error.c_str());std::fflush(stdout);
  };
  unsigned auto_settle=0;
  std::function<void()> before_main;
@@ -209,7 +220,7 @@ static void soc_wake_flow(TeslaVehicle &m,const std::string &mode) {
  auto until=[&](std::function<bool()> condition){steps.push_back([condition]{return condition();});};
  auto step=[&](std::function<void()> action){steps.push_back([action]{action();return true;});};
  auto runs_done=[&](size_t n){return [&,n]{return runs.size()>=n&&!auto_run&&!run;};};
- auto sleep_again=[&]{car_awake=false;wake_at=0;next_is_wake=false;};
+ auto sleep_again=[&]{car_awake=false;wake_at=0;next_is_wake=false;info_first=0;};
  // ---- scenarios ----
  if(mode=="soc-reservation") {           // manual button repeatedly usable; wake on demand, spaced
   request([&]{car_awake=true;});                      // R1 awake: no wake on the wire
@@ -246,13 +257,15 @@ static void soc_wake_flow(TeslaVehicle &m,const std::string &mode) {
   car_awake=true;
   until(runs_done(2));                                 // A1, A2: awake, no wake
   step([&]{sleep_again();});
-  until(runs_done(3));                                 // A3: asleep, wake not permitted
+  // No wake switch any more: the stored legacy wake_once=false must not block the
+  // periodic request during active charging from waking (once, spaced).
+  until(runs_done(3));                                 // A3: asleep while charging -> one wake -> SoC
   until([&]{if(auto_run||m.tesla->auto_poll.phase!=Phase::Idle||r->manual_poll_pending.load())return false;
-   p->get("wake_once")->updateBool(true);return save_profile();}); // user enables wake in the UI
-  step([&]{sleep_again();awake_after_wake=0;});
-  until(runs_done(4));                                 // A4: asleep -> one wake -> SoC
+   return save_profile();});                           // unrelated profile save keeps wake_once=false untouched
   step([&]{sleep_again();});
-  until(runs_done(5));                                 // A5: asleep, 60 s after the wake -> spaced, no wake
+  until(runs_done(4));                                 // A4: asleep, 60 s after the wake -> spaced, no wake
+  step([&]{sleep_again();});
+  until(runs_done(5));                                 // A5: asleep, >= spacing after A3's wake -> wakes again
   step([&]{sleep_again();awake_after_wake=0;});
   until([&]{return auto_run&&runs.size()==6&&run&&run->hellos>0;}); // A6 in flight
   step([&]{ // explicit actions while the background operation owns the worker
@@ -261,7 +274,7 @@ static void soc_wake_flow(TeslaVehicle &m,const std::string &mode) {
    ++request_id;soc_expect(!guided("prepare_poll").empty(),mode,"guided preparation accepted during automatic poll");
    auto &s=m.tesla->scan_command;s.get("vin")->updateString("5YJ3E1EA7KF000001");s.get("ev_index")->updateInt(0);s.get("ev_mac")->updateString("11:22:33:44:55:00");
    error.clear();api.commands.at("tesla_vehicle/scan")(0,error);soc_expect(error.length()>0,mode,"scan accepted during automatic poll");});
-  until(runs_done(6));                                 // A6: >= spacing after A4 -> wakes again
+  until(runs_done(6));                                 // A6: 60 s after A5's wake -> spaced, no wake
   step([&]{unplug();mark_frames=total_frames;});
   wait_ms(200000);
   step([&]{soc_expect(total_frames==mark_frames&&runs.size()==6,mode,"vehicle contact after unplug");
@@ -315,9 +328,9 @@ static void soc_wake_flow(TeslaVehicle &m,const std::string &mode) {
  } else if(mode=="soc-auto-charge-idle") { // plugged in, never charging: one plug-in request, then silence
   rtc.base_seconds.store(1790000000);rtc.synced.store(true);
   host_evse.set_charger_state(CHARGER_STATE_READY_TO_CHARGE);
-  p->get("poll_interval")->updateUint(30);p->get("wake_once")->updateBool(true);
-  soc_expect(save_profile(),mode,"interval/wake save rejected");
-  sleep_again();awake_after_wake=0;                    // asleep at plug-in, wake permitted
+  p->get("poll_interval")->updateUint(30);              // stored legacy wake_once stays false
+  soc_expect(save_profile(),mode,"interval save rejected");
+  sleep_again();awake_after_wake=0;                    // asleep at plug-in: the plug-in request may wake
   until(runs_done(1));                                 // P1: plug-in request (one permitted wake)
   step([&]{sleep_again();mark_frames=total_frames;scans_mark=scan_at.size();});
   wait_ms(300000);                                     // ten intervals while plugged in, not charging
@@ -473,6 +486,35 @@ static void soc_wake_flow(TeslaVehicle &m,const std::string &mode) {
    soc_expect(runs[12].committed-charge_at[4]>=15000&&runs[12].committed-charge_at[4]<=25000&&runs[12].outcome=="ok",mode,
     "G: replug while charging: the plug-in request");});
   quiet(200000,"G: replug: exactly one plug-in request");
+} else if(mode=="soc-wake-followup") { // manual wake, infotainment slower than one operation -> one no-wake follow-up
+ host_evse.set_charger_state(CHARGER_STATE_READY_TO_CHARGE); // plugged in, idle: no periodic requests
+ p->get("poll_interval")->updateUint(3600);
+ request([&]{sleep_again();awake_after_wake=1000;info_boot_ms=60000;}); // M1: woken, infotainment silent for 60 s
+ until(runs_done(2));                                 // F2: firmware follow-up without wake
+ step([&]{mark_frames=total_frames;scans_mark=scan_at.size();quiet_runs=runs.size();});
+ wait_ms(300000);
+ step([&]{soc_expect(total_frames==mark_frames&&scan_at.size()==scans_mark&&runs.size()==quiet_runs,mode,
+   "follow-up consumed once: no further request, scan or wake while idle");
+  soc_expect(m.tesla->state.get("auto_poll")->asString()=="not_charging",mode,"idle after the follow-up shown as not charging");});
+} else if(mode=="soc-auto-wake-followup") { // charging: woken periodic op -> follow-up; woken op then pause -> nothing
+ rtc.base_seconds.store(1790000000);rtc.synced.store(true);
+ p->get("poll_interval")->updateUint(600);soc_expect(save_profile(),mode,"interval save rejected"); // wake_once stays false
+ sleep_again();awake_after_wake=1000;info_boot_ms=30000; // longer than one operation's session budget, shorter than the follow-up delay
+ until(runs_done(1));                                 // W1 plug-in request while charging: wakes, infotainment silent
+ until(runs_done(2));                                 // W2 follow-up: no wake, infotainment ready
+ step([&]{mark_frames=total_frames;scans_mark=scan_at.size();quiet_runs=runs.size();});
+ wait_ms(100000);
+ step([&]{soc_expect(total_frames==mark_frames&&runs.size()==quiet_runs,mode,"no extra request after the follow-up");
+  host_evse.set_charger_state(CHARGER_STATE_WAITING_FOR_RELEASE);});
+ until([&]{return !m.tesla->auto_poll.charging&&m.tesla->auto_poll.phase==Phase::Idle;});
+ step([&]{sleep_again();info_boot_ms=60000;host_evse.set_charger_state(CHARGER_STATE_CHARGING);charge_at[0]=millis();});
+ until(runs_done(3));                                 // W3 at resume: wakes (spacing elapsed), infotainment silent
+ step([&]{host_evse.set_charger_state(CHARGER_STATE_WAITING_FOR_RELEASE);}); // PV pause right after the woken op
+ step([&]{mark_frames=total_frames;scans_mark=scan_at.size();quiet_runs=runs.size();});
+ wait_ms(300000);
+ step([&]{soc_expect(total_frames==mark_frames&&scan_at.size()==scans_mark&&runs.size()==quiet_runs,mode,
+   "pause: no follow-up, request, scan or wake after an automatic woken operation");
+  soc_expect(m.tesla->state.get("auto_poll")->asString()=="not_charging",mode,"pause shown as not charging");});
  } else if(mode=="soc-auto-initial-retry") {
   // Handled below without a worker: the vehicle is never found, so none starts.
  } else { assert(false && "unknown soc mode"); }
@@ -545,9 +587,16 @@ static void soc_wake_flow(TeslaVehicle &m,const std::string &mode) {
   expect_soc(runs[0],nullptr,"car awake 9 s after the wake must still deliver SoC within the unchanged 40 s request deadline");
   soc_expect(runs[0].finished-runs[0].committed<40000+5000,mode,"bounded by request deadline");
  } else if(mode=="soc-wake-never") {
-  soc_expect(runs.size()==3&&runs[0].wakes==1&&runs[0].charges==0&&runs[0].applied==0,mode,"R1 one wake, no SoC");
+  // R1's wake without SoC arms one firmware follow-up without wake (deterministic order in
+ // this simulation: it runs when R2's explicit scan result expires, before R3).
+ soc_expect(runs.size()==4&&runs[0].wakes==1&&runs[0].charges==0&&runs[0].applied==0,mode,"R1 one wake, no SoC");
+ soc_expect(runs[2].automatic&&runs[2].wakes==0&&runs[2].wake_partial==0&&runs[2].outcome=="asleep_wake_disabled"&&runs[2].error.empty(),mode,
+  "follow-up after an unconfirmed wake: never wakes, asleep reported without error banner");
+ expect_no_new_soc(runs[2],runs[1],"follow-up: no new SoC while asleep");
+ runs.erase(runs.begin()+2);
   soc_expect(runs[0].statuses_after_wake<=40,mode,"R1 bounded post-wake status polls");
-  soc_expect(runs[0].error==WAKE_NO_SOC&&runs[0].outcome=="woken_no_soc",mode,"R1 exposed wake without SoC needs a clear outcome");
+  // Never confirmed awake: honest "wake sent", never "woken".
+  soc_expect(runs[0].error==WAKE_NO_SOC&&runs[0].outcome=="wake_sent_no_soc",mode,"R1 exposed wake without awake evidence: 'wake sent' outcome");
   soc_expect(runs[0].finished-runs[0].committed>=39000&&runs[0].finished-runs[0].committed<=46000,mode,"R1 ends at the unchanged 40 s request deadline");
   soc_expect(runs[1].wakes==0&&runs[1].error==ASLEEP_LIMITED,mode,"R2 immediately after: no second wake, clear outcome");
   expect_no_new_soc(runs[1],runs[0],"R2 no new SoC");
@@ -559,12 +608,12 @@ static void soc_wake_flow(TeslaVehicle &m,const std::string &mode) {
   expect_soc(runs[1],&runs[0],"R2 SoC");
  } else if(mode=="soc-wake-tx-fail") {
   soc_expect(runs.size()==2&&runs[0].wake_partial==1&&runs[0].wakes==0&&runs[0].applied==0,mode,"R1 partial wake then link loss, no SoC");
-  soc_expect(runs[0].outcome=="woken_no_soc",mode,"R1 partial wake + link loss: visible exposed-wake outcome");
+  soc_expect(runs[0].outcome=="wake_sent_no_soc",mode,"R1 partial wake + link loss: visible exposed-wake outcome, no awake claim");
   soc_expect(runs[1].wakes==0&&runs[1].wake_partial==0,mode,"R2: partially sent wake counts as exposed; never resent within the spacing");
   soc_expect(runs[1].error==ASLEEP_LIMITED,mode,"R2 clear outcome");expect_no_new_soc(runs[1],runs[0],"R2 no new SoC");
  } else if(mode=="soc-wake-drop-waitwake") {
   soc_expect(runs.size()==2&&runs[0].wakes==1&&runs[0].applied==0,mode,"R1 one wake, no SoC");
-  soc_expect(runs[0].outcome=="woken_no_soc",mode,"R1 wake + link loss: visible exposed-wake outcome");
+  soc_expect(runs[0].outcome=="wake_sent_no_soc",mode,"R1 wake + link loss: visible exposed-wake outcome, no awake claim");
   soc_expect(runs[1].wakes==0,mode,"R2: exposed wake then link loss must not allow an immediate second wake");
   soc_expect(runs[1].error==ASLEEP_LIMITED,mode,"R2 clear outcome");
  } else if(mode=="soc-guided-timeout") {
@@ -580,16 +629,17 @@ static void soc_wake_flow(TeslaVehicle &m,const std::string &mode) {
   expect_soc(runs[0],nullptr,"A1 SoC");soc_expect(runs[0].wakes==0,mode,"A1 awake: no wake");
   soc_expect(runs[0].update_unix>=1790000000+runs[0].committed/1000&&runs[0].update_unix<=1790000000+runs[0].finished/1000,mode,"A1 receive time is the synchronized wall clock at reception");
   expect_soc(runs[1],&runs[0],"A2 SoC");soc_expect(runs[1].update_unix>runs[0].update_unix,mode,"A2 newer receive time");
-  soc_expect(runs[2].wakes==0&&runs[2].outcome=="asleep_wake_disabled"&&runs[2].error.empty(),mode,"A3 asleep, wake not permitted: no wake, no error banner");
-  expect_no_new_soc(runs[2],runs[1],"A3 old SoC not new");
   const auto &saved=api.written_configs.at("tesla_vehicle/profiles");
-  soc_expect(const_cast<Config&>(saved).get("entries")->get(size_t{0})->get("wake_once")->asBool()&&
-   const_cast<Config&>(saved).get("entries")->get(size_t{0})->get("poll_interval")->asUint()==60,mode,"interval/wake permission persisted");
-  soc_expect(runs[3].wakes==1,mode,"A4 permitted wake");expect_soc(runs[3],&runs[1],"A4 SoC after wake");
-  soc_expect(runs[4].wakes==0&&runs[4].outcome=="asleep_wake_limited"&&runs[4].error.empty(),mode,"A5 spaced: no wake");
-  expect_no_new_soc(runs[4],runs[3],"A5 old SoC not new");
-  soc_expect(runs[5].wakes==1,mode,"A6 repeated on-demand wake in the same plug-in session");
-  expect_soc(runs[5],&runs[3],"A6 SoC");
+  soc_expect(!const_cast<Config&>(saved).get("entries")->get(size_t{0})->get("wake_once")->asBool()&&
+   const_cast<Config&>(saved).get("entries")->get(size_t{0})->get("poll_interval")->asUint()==60,mode,"interval persisted, legacy wake_once left false (no rewrite)");
+  soc_expect(runs[2].wakes==1,mode,"A3 periodic request while charging wakes despite stored wake_once=false");
+  expect_soc(runs[2],&runs[1],"A3 SoC after wake");
+  soc_expect(runs[3].wakes==0&&runs[3].outcome=="asleep_wake_limited"&&runs[3].error.empty(),mode,"A4 spaced: no wake, no error banner");
+  expect_no_new_soc(runs[3],runs[2],"A4 old SoC not new");
+  soc_expect(runs[4].wakes==1,mode,"A5 repeated on-demand wake in the same plug-in session after the spacing");
+  expect_soc(runs[4],&runs[2],"A5 SoC");
+  soc_expect(runs[5].wakes==0&&runs[5].outcome=="asleep_wake_limited",mode,"A6 spaced: no wake");
+  expect_no_new_soc(runs[5],runs[4],"A6 old SoC not new");
   for(const auto &x:runs)soc_expect(x.wakes+x.wake_partial<=1,mode,"at most one wake per operation");
  } else if(mode=="soc-auto-stop") {
   soc_expect(runs.size()==2&&not_found_at!=0,mode,"not-found cycle, then two automatic operations");
@@ -626,7 +676,7 @@ static void soc_wake_flow(TeslaVehicle &m,const std::string &mode) {
  } else if(mode=="soc-auto-charge-idle") {
   soc_expect(runs.size()==3&&runs[0].automatic&&!runs[1].automatic&&!runs[2].automatic,mode,"one plug-in request, two manual requests");
   soc_expect(runs[0].committed-auto_t0>=15000&&runs[0].committed-auto_t0<=20000,mode,"plug-in request after the settle delay");
-  soc_expect(runs[0].wakes==1,mode,"plug-in request may wake once (permission on)");expect_soc(runs[0],nullptr,"P1 SoC");
+  soc_expect(runs[0].wakes==1,mode,"plug-in request may wake once (stored wake_once=false does not block it)");expect_soc(runs[0],nullptr,"P1 SoC");
   soc_expect(runs[1].wakes==1,mode,"M1 manual idle request wakes on demand");expect_soc(runs[1],&runs[0],"M1 SoC");
   soc_expect(runs[2].wakes==1,mode,"M2 repeated manual request after the spacing wakes again");expect_soc(runs[2],&runs[1],"M2 SoC");
   soc_expect(runs[1].update>runs[0].update&&runs[2].update_unix>runs[1].update_unix,mode,"manual results carry newer receive times");
@@ -649,7 +699,24 @@ static void soc_wake_flow(TeslaVehicle &m,const std::string &mode) {
   soc_expect(runs.size()==13,mode,"thirteen automatic operations");
   for(size_t i=0;i<runs.size();++i){soc_expect(runs[i].automatic&&runs[i].wakes==0,mode,"firmware-initiated, awake, no wake");
    if(i)soc_expect(runs[i].committed>=runs[i-1].finished,mode,"operations strictly sequential");}
- }
+  } else if(mode=="soc-wake-followup") {
+  soc_expect(runs.size()==2&&!runs[0].automatic&&runs[1].automatic,mode,"one manual request, one firmware follow-up");
+  soc_expect(runs[0].wakes==1&&runs[0].info_ignored>=1&&runs[0].charges==0&&runs[0].outcome=="woken_no_soc"&&runs[0].error==WOKEN_NO_SOC,mode,
+   "M1: confirmed awake (authenticated VCSEC), infotainment silent: 'woken, no SoC'");
+  soc_expect(runs[1].wakes==0&&runs[1].wake_partial==0,mode,"F2 follow-up never wakes");
+  expect_soc(runs[1],&runs[0],"F2 follow-up delivers the SoC");
+  const auto gap=runs[1].committed-runs[0].finished;std::printf("SOC_FOLLOWUP gap=%u\n",gap);
+  soc_expect(gap>=30000&&gap<=125000,mode,"F2 after the 30 s post-wake delay (and the existing foreign-scan guard), bounded");
+  } else if(mode=="soc-auto-wake-followup") {
+  soc_expect(runs.size()==3,mode,"plug-in request, one follow-up, resume request");
+  for(const auto &x:runs)soc_expect(x.automatic&&x.wakes+x.wake_partial<=1,mode,"automatic, at most one wake per operation");
+  soc_expect(runs[0].wakes==1&&runs[0].outcome=="woken_no_soc"&&runs[0].charges==0,mode,"W1 wakes while charging (stored wake_once=false), woken without SoC");
+  soc_expect(runs[1].wakes==0,mode,"W2 follow-up never wakes");expect_soc(runs[1],&runs[0],"W2 follow-up SoC");
+  const auto gap=runs[1].committed-runs[0].finished;std::printf("SOC_AUTO_FOLLOWUP gap=%u\n",gap);
+  soc_expect(gap>=30000&&gap<=30000+(TeslaBleDiscovery::SCAN_SECONDS+10)*1000,mode,"W2 after the post-wake delay");
+  soc_expect(runs[2].wakes==1&&runs[2].outcome=="woken_no_soc"&&runs[2].committed-charge_at[0]>=5000,mode,"W3 resume request wakes once");
+  expect_no_new_soc(runs[2],runs[1],"W3 keeps W2's SoC and receive time");
+  }
  std::printf("SOC_WAKE_PASS %s\n",mode.c_str());
 }
 static const uint8_t *awake_bytes(){return controller_fixture::awake;}

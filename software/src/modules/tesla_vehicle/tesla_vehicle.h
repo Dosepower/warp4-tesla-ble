@@ -75,8 +75,12 @@ private:
     };
     // Terminal outcome of one SoC operation (manual or automatic). Published
     // as tesla_vehicle/state poll_outcome; never carries identifiers.
+    // WokenNoSoc: a wake was exposed AND an authenticated VCSEC status then
+    // reported the vehicle awake; WakeSentNoSoc: a wake was (possibly) exposed
+    // without such evidence. AsleepWakeDisabled: asleep and this request was not
+    // allowed to wake (post-wake follow-up or legacy configuration).
     enum class PollOutcome : uint8_t {
-        None, Ok, AsleepWakeDisabled, AsleepWakeLimited, WokenNoSoc, Failed, Busy
+        None, Ok, AsleepWakeDisabled, AsleepWakeLimited, WokenNoSoc, Failed, Busy, WakeSentNoSoc
     };
     static void set_poll_outcome(Runtime *r, PollOutcome outcome, bool automatic);
 
@@ -305,6 +309,8 @@ private:
         bool deleting_profile = false; // Worker-only local erase scope.
 #endif
         uint32_t poll_interval_seconds = 300;
+        // Legacy "wake_once": consulted only by builds without the charge-aware
+        // scheduler (!TESLA_BLE_MANUAL_VEHICLE_UI); see request_soc().
         bool wake_once = false;
         std::atomic<bool> pair_requested{false};
         std::atomic<bool> poll_requested{false};
@@ -312,6 +318,10 @@ private:
         // manual_poll_pending as the single admission latch: never concurrent
         // with a manual poll, pairing, discovery or profile reload.
         std::atomic<bool> auto_poll_requested{false};
+        // Wake permission of the automatic request handed over next, chosen by
+        // the main-task scheduler per cycle (stored before auto_poll_requested):
+        // true only in its permitted contexts, false for a post-wake follow-up.
+        std::atomic<bool> auto_poll_wake{false};
         // Last finished SoC operation outcome, worker writer, main publisher.
         std::atomic<uint8_t> poll_outcome{0};
         std::atomic<bool> poll_outcome_automatic{false};
@@ -549,6 +559,14 @@ private:
             uint32_t cycle_edges = 0;     // charge_edges at cycle start / request hand-over
             bool last_operation_manual = false; // the last finished SoC operation was explicit
             uint32_t outcome_sequence0 = 0; // worker outcome sequence at commit
+            // Post-wake follow-up: after an operation exposed a wake but delivered no
+            // SoC, one later request WITHOUT wake (a just woken infotainment may need
+            // longer than one operation's session budget). At most one per such outcome.
+            bool post_wake_armed = false;   // outcome seen, not yet scheduled
+            bool post_wake = false;         // scheduled, not yet started
+            bool post_wake_manual = false;  // the waking operation was the user's explicit request
+            bool cycle_post_wake = false;   // the running cycle is the follow-up
+            bool cycle_post_wake_manual = false;
             // last_update at plug-in: a SoC consumed for this identity since then
             // (e.g. the user's manual request) satisfies the plug-in request.
             decltype(std::declval<const Config &>().asUptime()) soc_mark{};

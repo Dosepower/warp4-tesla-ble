@@ -38,6 +38,7 @@ void Vehicle::close(uint64_t generation)
     for(size_t i=0;i<count;++i) {
         VehicleResult result{retired[i].context,retired[i].generation,VehicleResultCode::Disconnected,0,SleepState::Unknown,false};
         result.wake_exposed=retired[i].wake_sent;
+        result.awake_after_wake=retired[i].awake_after_wake;
         retired[i].completion(result);
     }
 }
@@ -80,6 +81,7 @@ void Vehicle::finish(VehicleResultCode code,uint8_t battery,SleepState sleep,boo
     if(vcsec_.guard) { vcsec_.guard->cancel(); } if(info_.guard) { info_.guard->cancel(); }
     VehicleResult result{retired.context,retired.generation,code,battery,sleep,authenticated};
     result.wake_exposed=retired.wake_sent;
+    result.awake_after_wake=retired.awake_after_wake;
     retired.completion(result);
 }
 void Vehicle::retry(Stage stage,uint32_t now,uint32_t delay)
@@ -360,7 +362,12 @@ void Vehicle::frame(const Frame &incoming,uint32_t now)
         if(status.sleep==SleepState::Awake) { finish(VehicleResultCode::WakeConfirmed,0,status.sleep,true); }
         else { retry(Stage::Status,now,wake_status_interval_ms); } return;
     }
-    if(status.sleep==SleepState::Awake) { c.stage=Stage::InfoAuth; c.delayed=false; }
+    if(status.sleep==SleepState::Awake) {
+        // Authenticated awake status after this command's wake: evidence only
+        // (reporting); budgets, deadlines and session rules are unchanged.
+        if(c.wake_sent) { c.awake_after_wake=true; }
+        c.stage=Stage::InfoAuth; c.delayed=false;
+    }
     else if(c.policy==WakePolicy::NoWakeSkip) { finish(VehicleResultCode::SkippedAsleep,0,status.sleep,true); }
     else if(!c.wake_sent) { c.stage=Stage::Wake; c.delayed=false; }
     else { retry(Stage::Status,now,wake_status_interval_ms); }

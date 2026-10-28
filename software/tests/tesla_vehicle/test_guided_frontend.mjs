@@ -34,13 +34,18 @@ const page=new module.exports.TeslaVehicle();
 const event=t=>{for(const cb of f.listeners[t]??[])cb();};
 const walk=n=>!n||typeof n!=='object'?[]:[n,...[n.props?.children].flat(Infinity).flatMap(walk)];
 const nodes=()=>walk(page.render({},page.state));
-const findButton=k=>nodes().find(n=>n.type==='Button'&&(n.props.children===`tesla_vehicle.content.${k}` || k==='search'&&n.props.children==='tesla_vehicle.content.searching'));
+// Busy buttons render the spinner component with the step text as their label.
+const label=n=>typeof n.props.children==='string'?n.props.children:n.props.children?.props?.text;
+const findButton=k=>nodes().find(n=>n.type==='Button'&&(label(n)===`tesla_vehicle.content.${k}` || k==='search'&&label(n)==='tesla_vehicle.content.searching'));
+// Rare/destructive actions live in the collapsed Einstellungen section (clean main view).
+const openSettings=()=>{if(findButton('show_settings'))findButton('show_settings').props.onClick();};
 // Use the actual visible details/manage controls to reach a deliberate refresh.
-const button=k=>{if(k==='forget_key'&&!findButton(k)){f.values['tesla_vehicle/state']={profile_ev_index:0,key_presence:'present',key_present:true,paired:true};event('tesla_vehicle/state');}if(k==='search'&&!findButton(k)&&findButton('show_details'))findButton('show_details').props.onClick();if(k==='search'&&!findButton(k))page.state.edit_binding=true;return findButton(k);};
+const button=k=>{if(['forget_key','cleanup_key','edit_binding'].includes(k)&&!findButton(k))openSettings();if(k==='forget_key'&&!findButton(k)){f.values['tesla_vehicle/state']={profile_ev_index:0,key_presence:'present',key_present:true,paired:true};event('tesla_vehicle/state');}if(k==='search'&&!findButton(k)&&findButton('show_details'))findButton('show_details').props.onClick();if(k==='search'&&!findButton(k))page.state.edit_binding=true;return findButton(k);};
 // Existing Details control alone gets the approved destructive appearance.
 page.state.entries[0].ble_address='01:02:03:04:05:06';page.state.entries[0].discovery_revision=2;
-page.state.details_open=true;assert.equal(findButton('edit_binding').props.variant,'danger','Existing VIN/reset control must be solid red');
-page.state.entries[0].ble_address='';page.state.entries[0].discovery_revision=0;page.state.details_open=false;
+assert(!findButton('edit_binding'),'Rare reset action collapsed under Einstellungen by default');
+page.state.settings_open=true;assert(findButton('edit_binding'),'VIN/reset control available under expanded Einstellungen');assert.equal(findButton('edit_binding').props.variant,'danger','Existing VIN/reset control must be solid red');
+page.state.entries[0].ble_address='';page.state.entries[0].discovery_revision=0;page.state.settings_open=false;
 assert.equal(nodes().filter(n=>n.type==='Switch').length,0,'No per-vehicle permission switch');
 assert(!nodes().some(n=>n.type==='ConfigForm'),'No separate permission Save block');
 assert(!nodes().some(n=>n.type==='summary'||n.type==='details'),'Details must use standard WARP heading and fullwidth button');
@@ -163,9 +168,11 @@ f.call=async(t,p)=>{if(p.phase==='prepare_pair'){
 f.values['tesla_vehicle/guidance'].profiles[0]={ev_index:0,paired:true,key_presence:'present',binding_fresh:true};event('tesla_vehicle/guidance');
 assert(!findButton('pair'),'Paired view never invites re-pairing');
 assert.equal(button('read_soc').props.disabled,false);
-assert(findButton('forget_key'),'Unpair remains visible with Details collapsed');
+assert(!findButton('forget_key'),'Unpair is a rare action: collapsed under Einstellungen in the clean main view');
+openSettings();assert(findButton('forget_key'),'Unpair available under Einstellungen');
 assert.equal(findButton('forget_key').props.variant,'danger');
 assert.equal(findButton('forget_key').props.className,'w-100');
+findButton('hide_settings').props.onClick();
 f.call=async(t,p)=>{if(p.phase==='prepare_poll'){f.values['tesla_vehicle/guidance']={...f.values['tesla_vehicle/guidance'],ready:true,request:p.request};event('tesla_vehicle/guidance');}};
 await button('read_soc').props.onClick();assert.deepEqual(f.calls.slice(-2).map(c=>c.payload.phase),['prepare_poll','commit']);
 assert(!nodes().some(n=>String(n.props.value).includes('null %')));
@@ -178,16 +185,62 @@ assert(nodes().some(n=>n.props.value==='63.5 %'));assert(nodes().some(n=>n.props
  f.values['tesla_vehicle/state']={...f.values['tesla_vehicle/state'],last_update_unix:1790000000,poll_outcome:'asleep_wake_disabled',poll_outcome_automatic:true,auto_poll:'waiting'};event('tesla_vehicle/state');
  assert.match(timeValue(),/\d{2}:\d{2}:\d{2}$/);assert(!timeValue().includes('tesla_vehicle.status.soc_time_unsynced'));
  assert(timeValue().startsWith('21.09.2026')||timeValue().includes('2026'),'Older value shows an unambiguous date');
- assert(nodes().some(n=>n.type==='p'&&n.props.children==='tesla_vehicle.status.outcome_asleep_wake_disabled'),'Asleep outcome visible');
- assert(nodes().some(n=>n.type==='p'&&n.props.children==='tesla_vehicle.status.auto_poll_waiting'));
- const shownTime=timeValue();
+ // Clean main view: no grey permanent status lines; last outcome/background state under Diagnose.
+ const grey=()=>nodes().filter(n=>(n.type==='p'||n.type==='div')&&/text-muted|form-text/.test(n.props.class??'')&&String(n.props.children).startsWith('tesla_vehicle.status.'));
+ const diag=(label,value)=>{findButton('show_details').props.onClick();const ok=nodes().some(n=>n.type==='FormRow'&&n.props.label===label&&walk(n).some(c=>c.props?.value===value));findButton('hide_details').props.onClick();return ok;};
+ assert.equal(grey().length,0,'No grey routine status text');
+ assert(diag('tesla_vehicle.status.last_outcome','tesla_vehicle.status.outcome_asleep_wake_disabled'),'Asleep outcome under Diagnose');
+ assert(diag('tesla_vehicle.status.auto_poll','tesla_vehicle.status.auto_poll_waiting'),'Background state under Diagnose');
+ let shownTime=timeValue();
  f.values['tesla_vehicle/state']={...f.values['tesla_vehicle/state'],auto_poll:'not_charging'};event('tesla_vehicle/state');
  assert.equal(timeValue(),shownTime,'Paused: last receive time unchanged');
- assert(nodes().some(n=>n.type==='p'&&n.props.children==='tesla_vehicle.status.auto_poll_not_charging'),'Paused (not charging) background status visible');
+ assert(diag('tesla_vehicle.status.auto_poll','tesla_vehicle.status.auto_poll_not_charging')&&grey().length===0,'Paused state under Diagnose, not as grey main text');
  f.values['tesla_vehicle/state']={...f.values['tesla_vehicle/state'],auto_poll:'waiting'};event('tesla_vehicle/state');
  f.values['tesla_vehicle/state']={...f.values['tesla_vehicle/state'],poll_outcome:'ok',last_error:'Tesla asleep; wake skipped, last wake less than 2 min ago; SoC not updated'};event('tesla_vehicle/state');
  assert(!nodes().some(n=>n.type==='p'&&String(n.props.children).startsWith('tesla_vehicle.status.outcome_')),'ok outcome adds no status line');
  assert(walk(nodes().find(n=>n.type==='Alert'&&n.props.variant==='danger')).some(n=>n.props?.children==='tesla_vehicle.status.outcome_asleep_wake_limited'),'Specific asleep message instead of generic failure');
+ // Status priority: an older automatic not_found never overlays a newer success; error->success resets.
+ const danger=()=>walk(nodes().find(n=>n.type==='Alert'&&n.props.variant==='danger')).filter(n=>typeof n.props?.children==='string').map(n=>n.props.children);
+ f.values['tesla_vehicle/state']={...f.values['tesla_vehicle/state'],poll_outcome:'failed',auto_poll:'not_found',last_error:'Tesla authenticated SoC request failed'};event('tesla_vehicle/state');
+ assert.deepEqual(danger(),['tesla_vehicle.status.outcome_failed','tesla_vehicle.status.auto_poll_not_found'],'Current failures once each, red only');
+ assert.equal(timeValue(),shownTime,'Failure keeps the last value with its real receive time');assert(nodes().some(n=>n.props.value==='63.5 %'));
+ // Real firmware transitions (tesla_auto_poll.inc): a fresh SoC publishes poll_outcome ok, a new
+ // receive time and, while Idle, withdraws an older automatic not_found/failed (-> waiting).
+ // A later automatic scan publishes searching -> not_found/failed while poll_outcome stays the historical ok.
+ const busyText=()=>nodes().filter(n=>n.type==='Button'&&typeof n.props.children==='object'&&n.props.children?.props?.text).map(n=>n.props.children.props.text);
+ const socValue=()=>walk(nodes().find(n=>n.type==='FormRow'&&n.props.label==='tesla_vehicle.status.soc')).find(n=>n.type==='InputText').props.value;
+ const freshSuccess=(soc,unix)=>{f.values['ev/state'].soc=soc;f.values['tesla_vehicle/state']={...f.values['tesla_vehicle/state'],last_soc:soc,last_update:unix-1789990000,last_update_unix:unix,poll_outcome:'ok',poll_outcome_automatic:false,auto_poll:'waiting',last_error:''};event('ev/state');event('tesla_vehicle/state');};
+ freshSuccess(64,1790000600);
+ assert.deepEqual(danger(),[],'Old scan failure -> fresh success: no old automatic not_found and no old error');
+ assert.equal(socValue(),'64.0 %');assert.notEqual(timeValue(),shownTime,'Fresh success carries its own new receive time');shownTime=timeValue();
+ assert.equal(button('read_soc').props.disabled,false,'Button clickable again after error->success');
+ let unix=1790000600;
+ for(const [end,text] of [['not_found','tesla_vehicle.status.auto_poll_not_found'],['failed','tesla_vehicle.status.auto_poll_failed']]){
+  f.values['tesla_vehicle/state']={...f.values['tesla_vehicle/state'],auto_poll:'searching'};event('tesla_vehicle/state');
+  assert.deepEqual(busyText(),['tesla_vehicle.content.searching'],'Current automatic scan: spinner at the button only');
+  assert.deepEqual(danger(),[],'No failure shown while the new scan is still running');
+  f.values['tesla_vehicle/state']={...f.values['tesla_vehicle/state'],auto_poll:end};event('tesla_vehicle/state');
+  assert.equal(f.values['tesla_vehicle/state'].poll_outcome,'ok','Fixture: last request outcome is still the historical success');
+  assert.deepEqual(danger(),[text],'Success -> newer automatic '+end+': the new failure is visible, once');
+  assert.deepEqual(busyText(),[],'Spinner ends with the scan');assert.equal(button('read_soc').props.disabled,false,'Refresh available after the scan failure');
+  assert.equal(socValue(),'64.0 %','Last valid SoC kept, not cleared');assert.equal(timeValue(),shownTime,'No fabricated fresh receive time after a scan failure');
+  assert(diag('tesla_vehicle.status.auto_poll',text),'Diagnose: current automatic scan state is the new failure');
+  assert(diag('tesla_vehicle.status.last_outcome','tesla_vehicle.status.outcome_ok'),'Diagnose: last request separately attributed as the earlier success');
+  unix+=600;freshSuccess(64,unix);
+  assert.deepEqual(danger(),[],'The next fresh success withdraws the newer '+end+' again');assert.notEqual(timeValue(),shownTime);shownTime=timeValue();
+ }
+ // Wake honesty and pending post-wake follow-up: info line, never a red failure, no grey duplicate.
+ f.values['tesla_vehicle/state']={...f.values['tesla_vehicle/state'],poll_outcome:'wake_sent_no_soc',auto_poll:'after_wake',last_error:'Tesla wake sent but no SoC received in time; SoC not updated'};event('tesla_vehicle/state');
+ assert.deepEqual(danger(),[],'Pending follow-up: not presented as a final failure');
+ assert(nodes().some(n=>n.type==='div'&&n.props.children==='tesla_vehicle.status.after_wake_sent'),'Wake sent (no awake proof) -> "Weckversuch gesendet"');
+ assert(!nodes().some(n=>n.props?.children==='tesla_vehicle.status.after_wake_woken'||n.props?.children==='tesla_vehicle.status.outcome_woken_no_soc'),'Never claims woken without evidence');
+ f.values['tesla_vehicle/state']={...f.values['tesla_vehicle/state'],poll_outcome:'woken_no_soc',last_error:'Tesla woke up but no SoC received in time; SoC not updated'};event('tesla_vehicle/state');
+ assert(nodes().some(n=>n.type==='div'&&n.props.children==='tesla_vehicle.status.after_wake_woken'),'Woken only with backend awake evidence');
+ f.values['tesla_vehicle/state']={...f.values['tesla_vehicle/state'],auto_poll:'not_charging'};event('tesla_vehicle/state');
+ assert.deepEqual(danger(),['tesla_vehicle.status.outcome_woken_no_soc'],'Without a follow-up the woken failure is shown once');
+ f.values['tesla_vehicle/state']={...f.values['tesla_vehicle/state'],poll_outcome:'wake_sent_no_soc',last_error:'Tesla wake sent but no SoC received in time; SoC not updated'};event('tesla_vehicle/state');
+ assert.deepEqual(danger(),['tesla_vehicle.status.outcome_wake_sent_no_soc'],'Unconfirmed wake reported as wake sent');
+ assert.equal(timeValue(),shownTime,'Receive time never re-dated by failures');
  f.values['tesla_vehicle/state']={profile_ev_index:0,last_soc:63.5,last_update:12345,key_presence:'present',key_present:true,paired:true};delete f.values['ntp/config'];event('tesla_vehicle/state');
  console.log('GUIDED_SOC_TIME_OUTCOME_PASS');
 }
@@ -220,13 +273,14 @@ f.call=async(t,p)=>{if(t==='tesla_vehicle/profiles_update'){f.values['tesla_vehi
 await button('select_target').props.onClick();assert(page.state.adopted,'Own config ACK before HTTP response is not mistaken for a foreign update');normal();
 // New approved primary paired action and failed-pair recovery.
 normal();f.values['tesla_vehicle/state']={profile_ev_index:0,key_presence:'present',key_present:true,paired:true};event('tesla_vehicle/state');
-assert(!findButton('pair'));assert.equal(findButton('forget_key').props.variant,'danger','Paired primary is solid red');
+assert(!findButton('pair'));assert(!findButton('forget_key'),'Clean main view: unpair collapsed under Einstellungen');openSettings();
+assert.equal(findButton('forget_key').props.variant,'danger','Unpair is solid red');
 assert.equal(findButton('forget_key').props.className,'w-100');
-assert(nodes().some(n=>n.type==='FormRow'&&walk(n).some(c=>c.type==='Button'&&c.props.children==='tesla_vehicle.content.forget_key')),'Same primary FormRow position/width as pair');
-findButton('show_details').props.onClick();assert.equal(nodes().filter(n=>n.type==='Button'&&n.props.children==='tesla_vehicle.content.forget_key').length,1,'No duplicate unpair below Details');
-normal();assert(!findButton('forget_key'),'No unpair primary without authenticated pairing');
+assert(nodes().some(n=>n.type==='FormRow'&&walk(n).some(c=>c.type==='Button'&&c.props.children==='tesla_vehicle.content.forget_key')),'Full-width FormRow');
+findButton('show_details').props.onClick();assert.equal(nodes().filter(n=>n.type==='Button'&&n.props.children==='tesla_vehicle.content.forget_key').length,1,'No duplicate unpair below Diagnose');
+normal();openSettings();assert(!findButton('forget_key'),'No unpair without authenticated pairing');
 f.values['tesla_vehicle/state']={profile_ev_index:0,key_presence:'present',key_present:true,paired:false};event('tesla_vehicle/state');
-assert(findButton('pair'));assert(!findButton('forget_key'));findButton('show_details').props.onClick();assert(findButton('cleanup_key'),'Orphan credential has distinctly local explicit recovery in Details');assert(!findButton('forget_key'));
+assert(findButton('pair'));assert(!findButton('forget_key'));openSettings();assert((openSettings(),findButton('cleanup_key')),'Orphan credential has distinctly local explicit recovery under Einstellungen');assert(!findButton('forget_key'));
 normal();
 const configBeforeOff=f.values['tesla_vehicle/profiles'];delete f.values['tesla_vehicle/profiles'];assert(!nodes().some(n=>n.type==='Alert'&&n.props.variant==='info'),'Remove only permanent disabled blue alert');f.values['tesla_vehicle/profiles']=configBeforeOff;
 // Delete consent expires when selected credential evidence changes, even A->B->A.
@@ -241,22 +295,20 @@ const deletionText=walk(f.modals.at(-1).body()).flatMap(n=>[n.props?.children].f
 normal();f.values['tesla_vehicle/state']={profile_ev_index:0,key_presence:'present',key_present:true,paired:true};event('tesla_vehicle/state');
 // Paired profile: persisted per-profile background interval + explicit wake permission (user requirement).
 {
- const switches=nodes().filter(n=>n.type==='Switch');assert.equal(switches.length,1,'Exactly the wake permission switch');
- assert.equal(switches[0].props.checked,false,'Wake permission defaults off (persisted default unchanged)');
- assert.equal(switches[0].props.desc,'tesla_vehicle.content.auto_wake_desc');
+ assert.equal(nodes().filter(n=>n.type==='Switch').length,0,'No wake switch: automatic wake is coupled to the firmware request contexts');
  const interval=()=>nodes().find(n=>n.type==='InputSelect'&&n.props.items?.some(i=>i[0]==='3600'));
  assert(interval(),'Interval selector visible');assert.equal(interval().props.value,'300');
  assert.equal(JSON.stringify(interval().props.items.map(i=>i[0])),JSON.stringify(['30','60','120','300','600','900','1800','3600']));
  assert(interval().props.items.find(i=>i[0]==='300')[1]==='5 min'&&interval().props.items.find(i=>i[0]==='30')[1]==='30 s','Interval shown with unit');
  assert(!nodes().some(n=>n.type==='InputNumber'));
- assert(nodes().some(n=>n.type==='p'&&n.props.children==='tesla_vehicle.status.auto_poll_off'),'Background status visible');
+ findButton('show_details').props.onClick();assert(nodes().some(n=>n.props.label==='tesla_vehicle.status.auto_poll'&&walk(n).some(c=>c.props?.value==='tesla_vehicle.status.auto_poll_off')),'Background status under Diagnose');findButton('hide_details').props.onClick();
  const before=f.calls.length;
- interval().props.onValue('60');nodes().find(n=>n.type==='Switch').props.onClick();
+  interval().props.onValue('60');
  assert.equal(f.calls.length,before,'Changing settings alone sends nothing');
  assert(page.dirty,'Settings mark the form dirty until saved');
  await page.sendSave('tesla_vehicle/profiles',{entries:page.state.entries});
  const saved=f.calls.at(-1);assert.equal(saved.topic,'tesla_vehicle/profiles_update');
- const entry=saved.payload.entries.find(e=>e.ev_index===0);assert.equal(entry.poll_interval,60);assert.equal(entry.wake_once,true);
+ const entry=saved.payload.entries.find(e=>e.ev_index===0);assert.equal(entry.poll_interval,60);assert.equal(entry.wake_once,false,'Legacy wake_once carried unchanged, never rewritten by the UI');
  assert.equal(f.calls.length,before+1,'Exactly one persistent profile save, no radio action');
  page.state.entries=structuredClone(f.values['tesla_vehicle/profiles'].entries);page.setDirty(false);
  // Unlisted but firmware-valid value stays representable.
@@ -264,7 +316,7 @@ normal();f.values['tesla_vehicle/state']={profile_ev_index:0,key_presence:'prese
  page.state.entries=structuredClone(f.values['tesla_vehicle/profiles'].entries);
  console.log('GUIDED_POLL_SETTINGS_PASS');
 }
-assert(findButton('forget_key'));
+assert(button('forget_key'));
 assert(!walk(nodes().find(n=>n.props.id==='tesla_vehicle_config_form')).some(n=>n.props.children==='tesla_vehicle.content.forget_key'));
 for(const [change,key]of [[{pairing_pending:true,pair_request_sent:false},'sending'],[{pairing_pending:true,pair_request_sent:true},'pending'],[{paired:true},'paired']]){
  f.values['tesla_vehicle/state']={profile_ev_index:0,key_presence:'present',key_present:true,...change};event('tesla_vehicle/state');
@@ -308,7 +360,7 @@ count=f.calls.length;await button('pair').props.onClick();assert.deepEqual(f.cal
 normal();page.state.edit_binding=false;page.state.details_open=true;
 f.values['tesla_vehicle/guidance'].revision=12;
 f.values['tesla_vehicle/state']={profile_ev_index:0,key_presence:'absent',key_present:false,paired:false};event('tesla_vehicle/state');
-const resetHandler=findButton('edit_binding').props.onClick;
+const resetHandler=(openSettings(),findButton('edit_binding')).props.onClick;
 f.show=async()=>false;count=f.calls.length;await resetHandler();assert.equal(f.calls.length,count,'Reset cancel is inert');
 f.show=async()=>true;
 f.call=async(t,p)=>{if(p.phase==='reset'){
@@ -325,7 +377,7 @@ assert.equal(JSON.stringify(page.state.entries[1]),JSON.stringify(B));assert(fin
 // Paired and uncertain states block reset, including programmatically stale click.
 for(const presence of ['present','unknown','cleanup']){
  normal();page.state.details_open=true;f.values['tesla_vehicle/state']={profile_ev_index:0,key_presence:presence,key_present:presence==='present',paired:presence==='present'};event('tesla_vehicle/state');
- assert(findButton('edit_binding').props.disabled);count=f.calls.length;await findButton('edit_binding').props.onClick();assert.equal(f.calls.length,count);
+ assert((openSettings(),findButton('edit_binding')).props.disabled);count=f.calls.length;await (openSettings(),findButton('edit_binding')).props.onClick();assert.equal(f.calls.length,count);
  assert(nodes().some(n=>n.props.children===(presence==='present'?'tesla_vehicle.content.unpair_first':presence==='cleanup'?'tesla_vehicle.status.cleanup_required':'tesla_vehicle.status.key_unknown')));
  const before=page.profile().vin;page.setProfile({vin:'5YJ3E1EA7KF000009'});assert.equal(page.profile().vin,before);
 }
@@ -399,10 +451,10 @@ normal();let refuse;f.call=async(t,p)=>{if(p.phase==='prepare_pair')await new Pr
 const lateFailure=button('pair').props.onClick();await new Promise(setImmediate);page.selectProfile('1');refuse(Error('late A failure'));await lateFailure;assert.equal(page.state.command_error,false);normal();
 for(const key_presence of ['present','cleanup','absent','unknown'])for(const connected of [false,true]){
  f.values['tesla_vehicle/state']={profile_ev_index:0,key_presence,key_present:key_presence==='present',paired:false,connected};event('tesla_vehicle/state');page.state.details_open=true;
- assert(!findButton('forget_key'));assert.equal(!!findButton('cleanup_key'),key_presence==='present'||key_presence==='cleanup');
- if(findButton('cleanup_key')){
-  f.show=async()=>false;const before=f.calls.length;await findButton('cleanup_key').props.onClick();assert.equal(f.calls.length,before);assert.equal(f.modals.at(-1).title(),'tesla_vehicle.content.cleanup_title');
-  f.show=async()=>true;await findButton('cleanup_key').props.onClick();assert.equal(f.calls.at(-1).payload.phase,'cleanup');assert.equal(f.calls.at(-1).payload.profile.ev_index,0);
+ assert(!findButton('forget_key'));assert.equal(!!(openSettings(),findButton('cleanup_key')),key_presence==='present'||key_presence==='cleanup');
+ if((openSettings(),findButton('cleanup_key'))){
+  f.show=async()=>false;const before=f.calls.length;await (openSettings(),findButton('cleanup_key')).props.onClick();assert.equal(f.calls.length,before);assert.equal(f.modals.at(-1).title(),'tesla_vehicle.content.cleanup_title');
+  f.show=async()=>true;await (openSettings(),findButton('cleanup_key')).props.onClick();assert.equal(f.calls.at(-1).payload.phase,'cleanup');assert.equal(f.calls.at(-1).payload.profile.ev_index,0);
  }else{const before=f.calls.length;await page.command('cleanup');assert.equal(f.calls.length,before,'Unknown/absent stale handler fails closed');}
 }
 normal();page.state.command_error='stale failure';f.call=async(t,p)=>{if(p.phase==='prepare_pair'){f.values['tesla_vehicle/guidance'].ready=true;f.values['tesla_vehicle/guidance'].request=p.request;event('tesla_vehicle/guidance');}};await button('pair').props.onClick();assert.equal(page.state.command_error,false);assert(!page.profileStatus().paired,'HTTP acceptance is not pairing');
@@ -423,13 +475,38 @@ normal();
 normal();
 f.values['tesla_vehicle/state']={profile_ev_index:0,key_presence:'present',key_present:true,paired:false};event('tesla_vehicle/state');
 f.values['bluetooth/state']={supported:true,phase:'error',restart_required:true};event('bluetooth/state');
-const prerequisiteTexts=()=>nodes().filter(n=>n.type==='p'&&n.props.class==='text-muted'&&n.props.role==='status'&&['tesla_vehicle.content.bluetooth_blocked','tesla_vehicle.content.action_busy'].includes(n.props.children)).map(n=>n.props.children);
+const prerequisiteTexts=()=>nodes().filter(n=>n.type==='div'&&n.props.class==='form-text mb-2'&&n.props.role==='status'&&['tesla_vehicle.content.bluetooth_blocked','tesla_vehicle.content.action_busy'].includes(n.props.children)).map(n=>n.props.children);
 assert.deepEqual(prerequisiteTexts(),['tesla_vehicle.content.bluetooth_blocked']);
 page.state.edit_binding=true;
 assert.deepEqual(prerequisiteTexts(),['tesla_vehicle.content.bluetooth_blocked'],'Search and Poll share the same prerequisite');
 page.state.edit_binding=false;f.values['bluetooth/state']={supported:true,phase:'active'};event('bluetooth/state');f.values['tesla_vehicle/state'].action_busy=true;event('tesla_vehicle/state');
 assert.deepEqual(prerequisiteTexts(),['tesla_vehicle.content.action_busy']);
 normal();console.log('GUIDED_GREY_PREREQUISITE_DEDUP_PASS');
+{ // Busy feedback: spinner + step text while active, concrete reason otherwise, clickable again after a failure.
+ const busyText=()=>nodes().filter(n=>n.type==='Button'&&typeof n.props.children==='object'&&n.props.children?.props?.text).map(n=>[n.props.children.props.text,n.props.disabled]);
+ normal();const st=extra=>{f.values['tesla_vehicle/state']={profile_ev_index:0,key_presence:'present',key_present:true,paired:true,...extra};event('tesla_vehicle/state');};
+ st({action_busy:true});assert.deepEqual(busyText(),[['tesla_vehicle.content.refreshing',true]],'Running SoC operation: "Wird aktualisiert …", locked');
+ assert(!nodes().some(n=>n.type==='div'&&n.props.children==='tesla_vehicle.content.action_busy'),'Spinner replaces the generic busy reason at the same button');
+ st({auto_poll:'searching'});assert.deepEqual(busyText(),[['tesla_vehicle.content.searching',false]],'Automatic scan: "Fahrzeug wird gesucht …"');
+ st({auto_poll:'polling'});assert.deepEqual(busyText(),[['tesla_vehicle.content.refreshing',false]]);
+ st({});assert.equal(busyText().length,0);assert.equal(button('read_soc').props.disabled,false);
+ // Pairing: only the current step; the key-card instruction appears only after the request was transmitted.
+ normal();const pst=extra=>{f.values['tesla_vehicle/state']={profile_ev_index:0,key_presence:'present',key_present:true,paired:false,...extra};event('tesla_vehicle/state');};
+ pst({pairing_pending:true,pair_request_sent:false});
+ assert.deepEqual(busyText().map(x=>x[0]),['tesla_vehicle.content.pair_requesting']);assert(!nodes().some(n=>n.props?.children==='tesla_vehicle.status.pending'),'No key-card prompt before transmission');
+ pst({pairing_pending:true,pair_request_sent:true});
+ assert.deepEqual(busyText().map(x=>x[0]),['tesla_vehicle.content.pair_waiting']);assert(nodes().some(n=>n.props?.children==='tesla_vehicle.status.pending'),'Key-card prompt after the request was transmitted');
+ pst({pair_request_sent:true,pairing_pending:false,paired:false});assert(button('pair'),'Unconfirmed attempt: pairing button back, no success claim');
+ assert(!nodes().some(n=>n.props?.children==='tesla_vehicle.status.paired'),'Success only from authenticated paired status');
+ // A failed explicit action re-enables the button; while it runs a second click is ignored.
+ normal();st({});let release;f.call=async(t,p)=>{if(p.phase==='prepare_poll'){await new Promise(r=>release=r);throw new Error('synthetic rejection');}};
+ const n0=f.calls.length;const run=button('read_soc').props.onClick();await new Promise(setImmediate);
+ assert.deepEqual(busyText().map(x=>x[0]),['tesla_vehicle.content.refreshing'],'Own explicit request shows its spinner');
+ await nodes().find(n=>n.type==='Button'&&n.props.children?.props?.text==='tesla_vehicle.content.refreshing').props.onClick();
+ assert.equal(f.calls.filter(c=>c.payload?.phase==='prepare_poll').length,f.calls.slice(0,n0).filter(c=>c.payload?.phase==='prepare_poll').length+1,'No parallel second action');
+ release();await run;assert.equal(busyText().length,0);assert.equal(button('read_soc').props.disabled,false,'Clickable again after failure');
+ f.call=async()=>{};normal();console.log('GUIDED_BUSY_FEEDBACK_PASS');
+}
 let prepareResponse;f.call=async(t,p)=>{if(p.phase==='prepare_pair')await new Promise(r=>{prepareResponse=r;});};const pendingUnmount=button('pair').props.onClick();await new Promise(setImmediate);
 count=f.calls.length;page.componentWillUnmount();prepareResponse();await pendingUnmount;assert.equal(f.calls.length,count+1);assert.equal(f.calls.at(-1).payload.phase,'cancel');
 assert(f.calls.every(c=>['tesla_vehicle/scan','tesla_vehicle/profiles_update','tesla_vehicle/guided','tesla_vehicle/forget_key'].includes(c.topic)));
