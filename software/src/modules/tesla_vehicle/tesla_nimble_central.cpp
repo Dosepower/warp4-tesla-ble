@@ -216,7 +216,7 @@ int TeslaNimbleCentral::gap(ble_gap_event *e,void *arg){
 }
 bool TeslaNimbleCentral::scan_tick(uint32_t now){
  using D=TeslaBleDiscovery;auto a=discovery.step(now);if(a==D::Action::Retire){failed=true;return false;}
- if(a==D::Action::Params){for(auto &ad:advertisements)ad={};next_advertisement=0;discovery.event(D::Event::Params,ready());}
+ if(a==D::Action::Params){for(auto &ad:advertisements)ad={};next_advertisement=0;for(auto &ad:scannable)ad={};next_scannable=0;discovery.event(D::Event::Params,ready());}
  if(a==D::Action::Start){ble_gap_disc_params p{};p.itvl=0x50;p.window=0x30;p.passive=0;p.filter_duplicates=1;
   int rc=ble_gap_disc(own_type,D::SCAN_SECONDS*1000,&p,scan,this);discovery.submitted(a,rc==0);discovery.event(D::Event::Start,rc==0);}
  if(a==D::Action::Stop){int rc=ble_gap_disc_cancel();discovery.submitted(a,rc==0);discovery.event(D::Event::Stop,rc==0);}
@@ -231,9 +231,18 @@ int TeslaNimbleCentral::scan(ble_gap_event *e,void *arg){
   Advertisement *slot=nullptr;for(auto &a:c.advertisements)if(a.type==d.addr.type&&!memcmp(a.address,address,6)){slot=&a;break;}
   if(!slot)slot=&c.advertisements[c.next_advertisement++%8];memcpy(slot->address,address,6);slot->type=d.addr.type;slot->size=d.length_data;memcpy(slot->data,d.data,d.length_data);
   c.discovery.observe(d.data,d.length_data,0,address,d.addr.type,d.rssi,0);
+ }else if(d.event_type==BLE_HCI_ADV_RPT_EVTYPE_SCAN_IND){
+  // Not connectable: classified only (vehicle at its BLE connection limit), never adoptable.
+  Advertisement *slot=nullptr;for(auto &a:c.scannable)if(a.type==d.addr.type&&!memcmp(a.address,address,6)){slot=&a;break;}
+  if(!slot)slot=&c.scannable[c.next_scannable++%4];memcpy(slot->address,address,6);slot->type=d.addr.type;slot->size=d.length_data;memcpy(slot->data,d.data,d.length_data);
+  c.discovery.observe(d.data,d.length_data,0,address,d.addr.type,d.rssi,BLE_HCI_ADV_RPT_EVTYPE_SCAN_IND);
+ }else if(d.event_type==BLE_HCI_ADV_RPT_EVTYPE_NONCONN_IND){
+  c.discovery.observe(d.data,d.length_data,0,address,d.addr.type,d.rssi,BLE_HCI_ADV_RPT_EVTYPE_NONCONN_IND);
  }else if(d.event_type==BLE_HCI_ADV_RPT_EVTYPE_SCAN_RSP){
-  for(auto &a:c.advertisements)if(a.type==d.addr.type&&!memcmp(a.address,address,6)){
-   uint8_t combined[62];memcpy(combined,a.data,a.size);memcpy(combined+a.size,d.data,d.length_data);c.discovery.observe(combined,a.size,d.length_data,address,d.addr.type,d.rssi,0);break;}
+  const Advertisement *source=nullptr;unsigned event=0;
+  for(auto &a:c.advertisements)if(a.type==d.addr.type&&!memcmp(a.address,address,6)){source=&a;break;}
+  if(!source)for(auto &a:c.scannable)if(a.type==d.addr.type&&!memcmp(a.address,address,6)){source=&a;event=BLE_HCI_ADV_RPT_EVTYPE_SCAN_IND;break;}
+  if(source){uint8_t combined[62];memcpy(combined,source->data,source->size);memcpy(combined+source->size,d.data,d.length_data);c.discovery.observe(combined,source->size,d.length_data,address,d.addr.type,d.rssi,event);}
  }
  bluetooth_memory::sample(bluetooth_memory::Stage::GapCallback,true,1000);return 0;
 }

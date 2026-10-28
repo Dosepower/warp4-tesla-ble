@@ -244,6 +244,8 @@ bool TeslaVehicle::prepare_tesla()
     tesla->discovery_state=Config::Object({
         {"status",Config::Str("idle",0,9)}, {"busy",Config::Bool(false)},
         {"error",Config::Str("",0,16)}, {"truncated",Config::Bool(false)},
+        // VIN beacon seen, but only non-connectable: vehicle reports its BLE connection limit.
+        {"vin_not_connectable",Config::Bool(false)},
         {"revision",Config::Uint(0,0,UINT32_MAX)}, {"ev_index",Config::Int(-1,-1,EV_MAX_EVS-1)},
         {"result_age_ms",Config::Uint(TeslaBleDiscovery::RESULT_TTL_MS,0,UINT32_MAX)},
         {"result_ttl_ms",Config::Uint(TeslaBleDiscovery::RESULT_TTL_MS,0,UINT32_MAX)},
@@ -685,11 +687,12 @@ void TeslaVehicle::publish_discovery()
     }
     auto &state=tesla->discovery_state;
     auto rows=state.get("targets");rows->removeAll();
-    bool ok=true;
+    bool ok=true,vin_connectable=false,vin_not_connectable=false;
     if(s.status==TeslaBleDiscovery::Status::Complete) {
         ok=rows->setCount(s.count);
         for(unsigned i=0;ok && i<s.count;++i) {
             char address[18];const auto &t=s.targets[i];
+            if(!strcmp(t.name,s.scope.name)) { (t.connectable ? vin_connectable : vin_not_connectable)=true; }
             snprintf(address,sizeof(address),"%02X:%02X:%02X:%02X:%02X:%02X",t.address[0],t.address[1],t.address[2],t.address[3],t.address[4],t.address[5]);
             auto row=rows->get(i);
             ok=row->get("name")->updateStringChecked(t.name) && row->get("ble_address")->updateStringChecked(address);
@@ -701,6 +704,7 @@ void TeslaVehicle::publish_discovery()
     if(!ok) { rows->removeAll(); }
     state.get("busy")->updateBool(s.busy);
     state.get("truncated")->updateBool(s.truncated);
+    state.get("vin_not_connectable")->updateBool(ok && vin_not_connectable && !vin_connectable);
     state.get("revision")->updateUint(s.revision);
     state.get("ev_index")->updateInt(s.scope.index);
     char mac_text[18]{},generation[21]{};

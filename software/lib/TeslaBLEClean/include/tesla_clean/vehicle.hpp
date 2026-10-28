@@ -89,6 +89,7 @@ class Vehicle {
     bool pair_reply_pending_=false,pair_reply_terminal_=false;
     VcsecStatus pair_reply_;
     Channel &channel(Domain d) { return d==Domain::Vcsec?vcsec_:info_; }
+    static OperationTime operation_time(const Command &c) { return {c.authentication_context,c.generation,c.started,c.timing.total_ms,c.timing.response_ms}; }
     bool advance();
     bool enqueue(Kind kind,WakePolicy policy,uint64_t context,VehicleCompletion &&completion,VehicleTiming timing);
     void finish(VehicleResultCode code,uint8_t battery=0,SleepState sleep=SleepState::Unknown,bool authenticated=false);
@@ -96,6 +97,7 @@ class Vehicle {
     bool transmit(Bytes payload,Transmission &tx);
     void drain(Transmission &tx);
     static bool transmit_owns(void *,uint64_t);
+    static uint32_t transmit_clock(void *);
     static bool transmit_write(void *,Bytes,uint64_t);
     static bool transmit_challenge(void *,const ChallengeView &);
     static void emitted(void *,const Frame &);

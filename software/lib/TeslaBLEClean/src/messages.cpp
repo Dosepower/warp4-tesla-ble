@@ -55,10 +55,13 @@ bool OutgoingMessages::build(Bytes payload,const Route &route,uint32_t elapsed_m
     const uint64_t expires=uint64_t{session_.clock}+elapsed_ms/1000+ttl_seconds;
     if(expires>UINT32_MAX) { return false; }
     const uint32_t candidate=counter_+1;
+    // Official vehicle.go:22 DefaultFlags = 1<<FLAG_ENCRYPT_RESPONSE (universal_message.proto:75-78);
+    // protocol.md:596-691 KAT. Without bit 1 vehicles reply in plaintext (protocol.md:751-758).
+    constexpr uint32_t flags=1u<<1;
     Metadata meta; const uint8_t method=5,domain=static_cast<uint8_t>(route.domain); std::array<uint8_t,32> aad{};
     if(!meta.add(0,{&method,1}) || !meta.add(1,{&domain,1}) || !meta.add(2,{vin_.data(),vin_.size()}) ||
        !meta.add(3,{session_.epoch.data(),session_.epoch.size()}) || !meta.integer(4,static_cast<uint32_t>(expires)) ||
-       !meta.integer(5,candidate) || !meta.integer(7,1) || !meta.sha256({},aad)) { return false; }
+       !meta.integer(5,candidate) || !meta.integer(7,flags) || !meta.sha256({},aad)) { return false; }
     GcmPacket encrypted;
     if(!crypto_.encrypt(payload,{aad.data(),aad.size()},random,encrypted)) { return false; }
     ProtoWriter<24> to,from; ProtoWriter<72> identity; ProtoWriter<80> gcm; ProtoWriter<192> signature; ProtoWriter<1024> message;
@@ -67,7 +70,7 @@ bool OutgoingMessages::build(Bytes payload,const Route &route,uint32_t elapsed_m
        !gcm.fixed32(4,static_cast<uint32_t>(expires)) || !gcm.block(5,{encrypted.tag.data(),16}) ||
        !signature.block(1,identity.bytes()) || !signature.block(5,gcm.bytes()) || !message.block(6,to.bytes()) ||
        !message.block(7,from.bytes()) || !message.block(10,{encrypted.data.data(),encrypted.length}) || !message.block(13,signature.bytes()) ||
-       !message.block(51,{route.uuid.data(),16}) || !message.integer(52,1)) { return false; }
+       !message.block(51,{route.uuid.data(),16}) || !message.integer(52,flags)) { return false; }
     const Bytes wire=message.bytes();
     std::memcpy(output.bytes.data(),wire.data,wire.size); output.length=wire.size;
     output.identifier[0]=5; std::memcpy(output.identifier.data()+1,encrypted.tag.data(),16); output.identifier_length=17;
@@ -97,10 +100,13 @@ bool decode_encrypted_response(Bytes input,Bytes routing_address,Response &outpu
         if(target) { if(field.wire!=2) { return false; } *target=field.bytes; }
         else { if(field.wire!=0 || field.integer>UINT32_MAX) { return false; } flags=static_cast<uint32_t>(field.integer); }
     }
-    if(!reader.done() || (seen&55)!=55 || uuid.size!=16 || payload.size>1024) { return false; }
+    // request_uuid is mandatory except for VCSEC, which typically omits it
+    // (protocol.md:52-57; dispatcher.go:259-261 ignores it for VCSEC). If present it must match.
+    if(!reader.done() || (seen&23)!=23 || ((seen&32) && uuid.size!=16) || payload.size>1024) { return false; }
     Response candidate; uint32_t domain=0,unused=0;
     if(!destination(to,false,routing_address,unused) || !destination(from,true,{},domain)) { return false; }
-    candidate.domain=static_cast<Domain>(domain); candidate.flags=flags;
+    if(!(seen&32) && domain!=static_cast<uint32_t>(Domain::Vcsec)) { return false; }
+    candidate.domain=static_cast<Domain>(domain); candidate.flags=flags; candidate.has_uuid=(seen&32)!=0;
     if((seen&8) && (!scalar(status,2,candidate.fault) || !scalar(status,1,unused) || unused>2)) { return false; }
     // Only an AES-GCM response signature is admissible; reject another oneof member.
     ProtoReader sig_reader(signature);
@@ -108,7 +114,8 @@ bool decode_encrypted_response(Bytes input,Bytes routing_address,Response &outpu
     Bytes gcm,nonce,tag;
     if(!sig_reader.done() || !block(signature,9,gcm) || !block(gcm,1,nonce) || !block(gcm,3,tag) ||
        !scalar(gcm,2,candidate.counter) || nonce.size!=12 || tag.size!=16) { return false; }
-    std::memcpy(candidate.uuid.data(),uuid.data,16); std::memcpy(candidate.packet.nonce.data(),nonce.data,12);
+    if(candidate.has_uuid) { std::memcpy(candidate.uuid.data(),uuid.data,16); }
+    std::memcpy(candidate.packet.nonce.data(),nonce.data,12);
     std::memcpy(candidate.packet.tag.data(),tag.data,16);
     if(payload.size) { std::memcpy(candidate.packet.data.data(),payload.data,payload.size); }
     candidate.packet.length=payload.size; output=candidate; return true;

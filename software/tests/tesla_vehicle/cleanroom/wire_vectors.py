@@ -19,10 +19,10 @@ public=local.public_key().public_bytes(serialization.Encoding.X962,serialization
 key=hashlib.sha1(local.exchange(ec.ECDH(),remote.public_key())).digest()[:16]
 vin=b'5YJ3E1EA7KF000001'; epoch=bytes(range(16)); nonce=bytes(range(12)); uuid=bytes(range(16)); routing=bytes(range(16,32))
 query=block(2,block(1,block(2,b'')))
-metadata=tlv(0,b'\x05')+tlv(1,b'\x03')+tlv(2,vin)+tlv(3,epoch)+tlv(4,(1239).to_bytes(4,'big'))+tlv(5,(8).to_bytes(4,'big'))+tlv(7,(1).to_bytes(4,'big'))+b'\xff'
+metadata=tlv(0,b'\x05')+tlv(1,b'\x03')+tlv(2,vin)+tlv(3,epoch)+tlv(4,(1239).to_bytes(4,'big'))+tlv(5,(8).to_bytes(4,'big'))+tlv(7,(2).to_bytes(4,'big'))+b'\xff'
 aad=hashlib.sha256(metadata).digest(); sealed=AESGCM(key).encrypt(nonce,query,aad)
 signature=block(1,block(1,public))+block(5,block(1,epoch)+block(2,nonce)+integer(3,8)+fixed(4,1239)+block(5,sealed[-16:]))
-outgoing=block(6,integer(1,3))+block(7,block(2,routing))+block(10,sealed[:-16])+block(13,signature)+block(51,uuid)+integer(52,1)
+outgoing=block(6,integer(1,3))+block(7,block(2,routing))+block(10,sealed[:-16])+block(13,signature)+block(51,uuid)+integer(52,2) # 1<<FLAG_ENCRYPT_RESPONSE
 identifier=b'\x05'+sealed[-16:]
 charge=block(1,b'')+block(2,block(3,integer(114,72)))
 response_meta=tlv(0,b'\x09')+tlv(1,b'\x03')+tlv(2,vin)+tlv(5,(1).to_bytes(4,'big'))+tlv(7,(1).to_bytes(4,'big'))+tlv(8,identifier)+tlv(9,bytes(4))+b'\xff'

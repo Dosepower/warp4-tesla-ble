@@ -293,7 +293,7 @@ for(const mutate of [()=>{page.selectProfile('1');page.selectProfile('0');},()=>
 normal();page.state.details_open=true;f.call=async()=>{throw Error('reset refused');};count=f.calls.length;await page.resetBinding();assert.equal(f.calls.length,count+1);assert.equal(page.state.command_error,'reset refused');assert(page.profile().ble_address);
 // Every malformed/ambiguous/expired refresh fails closed with a useful error.
 let negativeRevision=100;
-for(const kind of ['none','ambiguous','truncated','expired','generation','scope','wrong-vin','bad-type','bad-address','error','timeout','foreign-save','dirty-save']){
+for(const kind of ['none','unconnectable','ambiguous','truncated','expired','generation','scope','wrong-vin','bad-type','bad-address','error','timeout','foreign-save','dirty-save']){
  normal();f.values['tesla_vehicle/guidance'].profiles[0].binding_fresh=false;event('tesla_vehicle/guidance');
  const startRevision=negativeRevision;negativeRevision+=2;
  f.values['tesla_vehicle/discovery']={status:'idle',busy:false,revision:startRevision,targets:[]};event('tesla_vehicle/discovery');
@@ -302,6 +302,7 @@ for(const kind of ['none','ambiguous','truncated','expired','generation','scope'
   if(t==='tesla_vehicle/scan'){
    let d={status:'complete',busy:false,ev_index:0,result_age_ms:0,result_ttl_ms:120000,searched_vin:page.profile().vin,ev_mac:page.profile().ev_mac,generation:'7',revision:startRevision+1,targets:[target]};
    if(kind==='none')d.targets=[];
+   if(kind==='unconnectable'){d.targets=[{...target,matches_vin:false}];d.vin_not_connectable=true;} // VIN beacon present, non-connectable (official max-connections)
    if(kind==='ambiguous')d.targets.push({...target,ble_address:'02:03:04:05:06:07'});
    if(kind==='truncated')d.truncated=true;
    if(kind==='expired')d.result_age_ms=120000;
@@ -326,7 +327,7 @@ for(const kind of ['none','ambiguous','truncated','expired','generation','scope'
  assert.equal(f.calls[before]?.topic,'tesla_vehicle/scan',kind+' exercises actual confirmed refresh');
  assert(!f.calls.slice(before).some(c=>c.payload.phase?.startsWith('prepare')||c.payload.phase==='commit'),kind+' cannot prepare/commit');
  assert(page.state.command_error,kind+' retains error');assert.equal(JSON.stringify(f.values['tesla_vehicle/profiles'].entries[1]),oldB,kind+' preserves B');
- const expected=kind==='none'||kind.startsWith('bad-')?'refresh_empty':['ambiguous','truncated'].includes(kind)?'refresh_ambiguous':['expired','generation','scope','wrong-vin'].includes(kind)?'result_expired':kind==='error'?'refresh_failed':kind==='timeout'?'refresh_timeout':'refresh_changed';
+ const expected=kind==='unconnectable'?'refresh_unconnectable':kind==='none'||kind.startsWith('bad-')?'refresh_empty':['ambiguous','truncated'].includes(kind)?'refresh_ambiguous':['expired','generation','scope','wrong-vin'].includes(kind)?'result_expired':kind==='error'?'refresh_failed':kind==='timeout'?'refresh_timeout':'refresh_changed';
  assert(String(page.state.command_error).includes('tesla_vehicle.content.'+expected),kind+' exact useful failure path, not a stale fixture');
 }
 // Cancel, local/profile/SLAC/config/guidance/Bluetooth ABA during the scan.

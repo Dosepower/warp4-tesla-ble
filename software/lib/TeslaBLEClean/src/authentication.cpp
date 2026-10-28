@@ -56,24 +56,74 @@ ChallengeResult DomainAuthentication::begin(IdentityStore &keys,const OperationT
     const bool accepted=transport.send(transport.context,view);
     if(serial_!=serial || !pending_.active || pending_.serial!=serial) { return ChallengeResult::Superseded; }
     if(!accepted) { pending_=std::move(previous); return ChallengeResult::Refused; }
+    return sent(now,transport,random);
+}
+bool DomainAuthentication::replayable(const OperationTime &owner,uint32_t now) const
+{
+    const uint32_t age=now-pending_.transmitted;
+    // Same owner/budget only: a replay can never restart or extend a deadline.
+    return valid_ && pending_.active && !pending_.sending && owner.context!=0 &&
+        pending_.owner.context==owner.context && pending_.owner.generation==owner.generation &&
+        pending_.owner.started==owner.started && pending_.owner.total_ms==owner.total_ms &&
+        pending_.owner.response_ms==owner.response_ms && now-owner.started<owner.total_ms &&
+        pending_.replays<session_info_max_replays && age<session_info_max_latency_ms &&
+        // A copy that cannot complete while still fresh is useless; renew instead.
+        session_info_max_latency_ms-age>pending_.transmit_elapsed;
+}
+ChallengeResult DomainAuthentication::replay(const OperationTime &owner,uint32_t now,Random random,ChallengeTransport transport)
+{
+    if(!transport.send || !replayable(owner,now)) { return ChallengeResult::Invalid; }
+    if(now-last_attempt_<100) { return ChallengeResult::Backoff; }
+    last_attempt_=now; ++pending_.replays;
+    const uint64_t serial=pending_.serial;
+    // Identical request: same UUID, routing, ephemeral identity public point.
+    const ChallengeView view=pending_.view;
+    pending_.sending=true;
+    const bool accepted=transport.send(transport.context,view);
+    if(serial_!=serial || !pending_.active || pending_.serial!=serial) { return ChallengeResult::Superseded; }
+    if(!accepted) {
+        // Earlier complete copies remain answerable; a reply captured during the
+        // refused copy is dropped rather than trusted.
+        pending_.sending=pending_.staged=false; return ChallengeResult::Refused;
+    }
+    return sent(now,transport,random);
+}
+ChallengeResult DomainAuthentication::sent(uint32_t tx_started,ChallengeTransport transport,Random random)
+{
     pending_.sending=false;
+    // Response budget starts when the complete framed copy was accepted (official
+    // dispatcher.go tryStartSession: RetryInterval after Send returned).
+    const uint32_t current=transport.now?transport.now(transport.context):tx_started;
+    const uint32_t elapsed=current-tx_started,since=current-pending_.transmitted;
+    pending_.transmit_elapsed=elapsed<=INT32_MAX?elapsed:0;
+    // Each completed identical copy opens its own response budget; never shrink.
+    if(since<=INT32_MAX) { pending_.answer_until=std::max(pending_.answer_until,since+pending_.owner.response_ms); }
     if(pending_.staged) {
         // Move staged bytes out before receive clears pending ownership.
         const uint32_t received_at=pending_.staged_at;
         auto bytes=pending_.encoded; auto tag=pending_.tag; const size_t length=pending_.length;
-        SessionReply reply{domain_,owner.generation,view.uuid,{bytes.data(),length},{tag.data(),tag.size()}};
+        SessionReply reply{domain_,pending_.owner.generation,pending_.view.uuid,{bytes.data(),length},{tag.data(),tag.size()}};
         pending_.staged=false;
-        const auto result=receive(reply,received_at,random);
+        // Recheck deadline/freshness at dispatch time: no late authentication.
+        const auto result=receive(reply,received_at,current,random);
         if(result==SessionAdmission::Established || result==SessionAdmission::Updated) { return ChallengeResult::Established; }
         if(result==SessionAdmission::KeyDenied) { return ChallengeResult::KeyDenied; }
     }
     return ChallengeResult::Sent;
 }
-SessionAdmission DomainAuthentication::receive(const SessionReply &reply,uint32_t now,Random random)
+SessionAdmission DomainAuthentication::receive(const SessionReply &reply,uint32_t now,uint32_t processed,Random random)
 {
+    // Three separate bounds, all checked: the response budget after the latest
+    // completed identical copy (capture time; while a copy is still sending the
+    // reply is only staged and rechecked after completion), the challenge's own
+    // freshness fixed at creation and the owner's total deadline (both at capture
+    // AND dispatch time). A renewed challenge has a new UUID, so predecessor
+    // replies cannot match.
     if(!valid_ || !pending_.active || reply.domain!=domain_ ||
        reply.generation!=pending_.owner.generation || reply.uuid!=pending_.view.uuid ||
-       now-pending_.owner.started>=pending_.owner.total_ms || now-pending_.transmitted>=pending_.owner.response_ms ||
+       now-pending_.owner.started>=pending_.owner.total_ms || now-pending_.transmitted>=session_info_max_latency_ms ||
+       processed-pending_.owner.started>=pending_.owner.total_ms || processed-pending_.transmitted>=session_info_max_latency_ms ||
+       (!pending_.sending && now-pending_.transmitted>=pending_.answer_until) ||
        !reply.encoded.valid() || reply.encoded.size==0 || reply.encoded.size>pending_.encoded.size() ||
        !reply.tag.valid() || reply.tag.size!=pending_.tag.size()) { return SessionAdmission::Rejected; }
     if(pending_.sending) {
@@ -142,8 +192,9 @@ SessionAdmission DomainAuthentication::receive_update(const SessionReply &reply,
     if(!valid_ || !ready_ || !session_ || pending_.active || request.context==0 ||
        reply.domain!=domain_ || reply.generation!=request.generation || reply.uuid!=request.uuid ||
        !request.total_ms || !request.response_ms || request.total_ms>INT32_MAX || request.response_ms>INT32_MAX ||
+       request.transmit_elapsed>INT32_MAX ||
        request.transmitted-request.started>=request.total_ms || now-request.started>=request.total_ms ||
-       now-request.transmitted>=request.response_ms || now-request.transmitted>=5000) { return SessionAdmission::Rejected; }
+       now-request.transmitted>=request.transmit_elapsed+request.response_ms || now-request.transmitted>=5000) { return SessionAdmission::Rejected; }
     SessionInfo candidate;
     if(!verify_update(reply,candidate) || !fresh_epoch(candidate) ||
        (candidate.epoch==info_.epoch && candidate.clock<info_.clock)) { return SessionAdmission::Rejected; }

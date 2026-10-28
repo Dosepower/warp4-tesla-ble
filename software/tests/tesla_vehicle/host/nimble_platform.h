@@ -23,7 +23,7 @@ constexpr int ESP_BT_CONTROLLER_STATUS_IDLE=0;
 constexpr int BLE_UUID_TYPE_128=128,BLE_UUID_TYPE_16=16;
 constexpr int BLE_GATT_CHR_PROP_WRITE=8,BLE_GATT_CHR_PROP_NOTIFY=16,BLE_GATT_CHR_PROP_INDICATE=32;
 constexpr int BLE_GAP_EVENT_CONNECT=1,BLE_GAP_EVENT_DISCONNECT=2,BLE_GAP_EVENT_NOTIFY_RX=3,BLE_GAP_EVENT_ENC_CHANGE=4,BLE_GAP_EVENT_PASSKEY_ACTION=5,BLE_GAP_EVENT_REPEAT_PAIRING=6,BLE_GAP_EVENT_DISC=7,BLE_GAP_EVENT_DISC_COMPLETE=8;
-constexpr int BLE_HCI_ADV_RPT_EVTYPE_ADV_IND=0,BLE_HCI_ADV_RPT_EVTYPE_DIR_IND=1,BLE_HCI_ADV_RPT_EVTYPE_SCAN_RSP=4;
+constexpr int BLE_HCI_ADV_RPT_EVTYPE_ADV_IND=0,BLE_HCI_ADV_RPT_EVTYPE_DIR_IND=1,BLE_HCI_ADV_RPT_EVTYPE_SCAN_IND=2,BLE_HCI_ADV_RPT_EVTYPE_NONCONN_IND=3,BLE_HCI_ADV_RPT_EVTYPE_SCAN_RSP=4; // pinned SDK hci_common.h values
 struct ble_uuid_t{uint8_t type;};struct ble_uuid128_t{ble_uuid_t u{};uint8_t value[16]{};};struct ble_uuid_any_t{ble_uuid_t u{};uint8_t value[16]{};};
 inline int ble_uuid_cmp(const ble_uuid_t *a,const ble_uuid_t *b){return a->type==b->type?memcmp(reinterpret_cast<const ble_uuid128_t *>(a)->value,reinterpret_cast<const ble_uuid128_t *>(b)->value,a->type==128?16:2):1;}
 inline uint16_t ble_uuid_u16(const ble_uuid_t *a){return a->type==16?reinterpret_cast<const ble_uuid128_t *>(a)->value[0]|reinterpret_cast<const ble_uuid128_t *>(a)->value[1]<<8:0;}

@@ -31,7 +31,7 @@ ResponseGuard::ResponseGuard(const SessionCrypto &crypto, Domain domain, Bytes v
 bool ResponseGuard::arm(const Request &request)
 {
     if (!valid_ || active_ || request.context == 0 || request.total_ms == 0 || request.response_ms == 0 ||
-        request.total_ms > INT32_MAX || request.response_ms > INT32_MAX ||
+        request.total_ms > INT32_MAX || request.response_ms > INT32_MAX || request.transmit_elapsed > INT32_MAX ||
         request.transmitted - request.started >= request.total_ms ||
         !known_identifier(domain_, {request.identifier.data(),request.identifier_length})) { return false; }
     if (request.uuid != request_.uuid || request.identifier_length != request_.identifier_length ||
@@ -47,8 +47,12 @@ bool ResponseGuard::accept(const Response &response, uint32_t now, uint64_t gene
                            bool (*validate_payload)(Bytes,void *), void *validation_context)
 {
     plaintext.fill(0); reply = {};
-    if (!active_ || generation != request_.generation || response.domain != domain_ || response.uuid != request_.uuid ||
-        now - request_.started >= request_.total_ms || now - request_.transmitted >= request_.response_ms) { return false; }
+    // A missing request_uuid is admissible only for VCSEC; correlation then rests on the
+    // routing address, this single armed request and the request hash in the GCM AAD.
+    if (!active_ || generation != request_.generation || response.domain != domain_ ||
+        (response.has_uuid ? response.uuid != request_.uuid : domain_ != Domain::Vcsec) ||
+        now - request_.started >= request_.total_ms ||
+        now - request_.transmitted >= request_.transmit_elapsed + request_.response_ms) { return false; }
     std::array<uint8_t,32> aad{};
     size_t length = 0;
     if (!response_aad(domain_, {vin_.data(),vin_.size()}, {request_.identifier.data(),request_.identifier_length},

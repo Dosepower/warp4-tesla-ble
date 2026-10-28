@@ -86,6 +86,7 @@ export interface discovery {
     busy: boolean;
     error: string;
     truncated: boolean;
+    vin_not_connectable?: boolean;
     revision: number;
     ev_index: number;
     targets: {name: string; ble_address: string; ble_address_type: number; matches_vin: boolean; rssi: number}[];

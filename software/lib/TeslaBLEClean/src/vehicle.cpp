@@ -90,12 +90,21 @@ bool Vehicle::transmit_owns(void *p,uint64_t generation)
     auto &tx=*static_cast<Transmission *>(p); auto &v=*tx.vehicle;
     if(v.exhausted() || !v.connected_ || v.generation_!=generation || tx.generation!=generation || v.serial_!=tx.serial ||
        v.transmission_!=tx.serial || v.deferred_overflow_) { return false; }
+    // The operation's total deadline gates only starting a frame (tick/begin)
+    // and response acceptance. Once the first block is out, abandoning the
+    // length-prefixed frame desynchronizes the peer and forces link retirement
+    // (official ble.go Connection.Send always writes the whole frame). A started
+    // frame stays bounded by its own transmit budget and link ownership.
     const uint32_t now=tx.ports.now(tx.ports.context);
-    return now-tx.started<tx.timing.transmit_ms && now-tx.operation_started<tx.timing.total_ms && tx.ports.owns(tx.ports.context,generation);
+    return now-tx.started<tx.timing.transmit_ms && tx.ports.owns(tx.ports.context,generation);
 }
 bool Vehicle::transmit_write(void *p,Bytes bytes,uint64_t generation)
 {
     auto &tx=*static_cast<Transmission *>(p); return tx.ports.write(tx.ports.context,bytes,generation);
+}
+uint32_t Vehicle::transmit_clock(void *p)
+{
+    auto &tx=*static_cast<Transmission *>(p); return tx.ports.now(tx.ports.context);
 }
 bool Vehicle::transmit(Bytes payload,Transmission &tx)
 {
@@ -133,9 +142,16 @@ bool Vehicle::authenticate(Domain domain,Stage waiting,Stage next,uint32_t now)
     if(!advance()) { finish(VehicleResultCode::Failed); return false; }
     ++c.attempts; c.transmitted=now; c.stage=waiting;
     Transmission tx{this,ports_,serial_,generation_,now,c.started,c.timing};
-    const OperationTime time{c.authentication_context,c.generation,c.started,c.timing.total_ms,c.timing.response_ms};
-    const auto result=ch.authentication.begin(keys_,time,now,ports_.random,{transmit_challenge,&tx});
+    const OperationTime time=operation_time(c);
+    const ChallengeTransport transport{transmit_challenge,&tx,transmit_clock};
+    // An unanswered, still-fresh challenge is resent unchanged so a delayed reply
+    // to any copy stays admissible; otherwise a new challenge (new UUID) is made.
+    const auto result=ch.authentication.replayable(time,now)?ch.authentication.replay(time,now,ports_.random,transport):
+        ch.authentication.begin(keys_,time,now,ports_.random,transport);
     if(serial_!=tx.serial) { return false; }
+    // Response wait counts from full ATT-acknowledged TX completion, never from
+    // before a multi-write request (official dispatcher.go tryStartSession).
+    if(result==ChallengeResult::Sent) { c.transmitted=ports_.now(ports_.context); }
     if(result==ChallengeResult::Sent || result==ChallengeResult::Established) { drain(tx); }
     else if(result==ChallengeResult::KeyDenied) { finish(VehicleResultCode::KeyDenied); }
     else if(result==ChallengeResult::Expired) { finish(VehicleResultCode::Expired); }
@@ -173,9 +189,13 @@ void Vehicle::encrypted(Domain domain,Bytes payload,Stage waiting,uint32_t now)
     std::copy_n(encoded.identifier.data(),encoded.identifier_length,request.identifier.data());
     request.context=c.context; request.generation=c.generation; request.started=c.started; request.transmitted=now;
     request.total_ms=c.timing.total_ms; request.response_ms=c.timing.response_ms;
+    {
+        const uint32_t elapsed=ports_.now(ports_.context)-now; // transmit_owns bounded this by transmit_ms
+        request.transmit_elapsed=elapsed<=INT32_MAX?elapsed:0;
+    }
     ch.guard->cancel();
     if(!ch.guard->arm(request)) { finish(VehicleResultCode::Failed); return; }
-    c.stage=c.published=waiting; c.has_request=true; c.transmitted=now; c.delayed=false;
+    c.stage=c.published=waiting; c.has_request=true; c.transmitted=now+request.transmit_elapsed; c.delayed=false;
     if(waiting==Stage::WaitWake) { c.wake_sent=true; }
     drain(tx);
 }
@@ -191,8 +211,14 @@ void Vehicle::tick()
         if(c.stage==Stage::WaitVcsecAuth) { next=Stage::VcsecAuth; }
         if(c.stage==Stage::WaitInfoAuth) { next=Stage::InfoAuth; }
         if(c.stage==Stage::WaitCharge) { next=Stage::Charge; }
+        // Response budget after the full framed TX is spent. A still-fresh
+        // challenge is replayed at once (no gap in which a reply to it could be
+        // dropped by stage); everything else keeps the ordinary retry backoff.
+        const bool replay=(next==Stage::VcsecAuth || next==Stage::InfoAuth) &&
+            channel(next==Stage::VcsecAuth?Domain::Vcsec:Domain::Infotainment).authentication.replayable(operation_time(c),now);
         // A wake is sent once only; after its timeout ask for status, never send another wake.
-        retry(next,now); return;
+        if(!replay) { retry(next,now); return; }
+        c.stage=next; c.delayed=false;
     }
     if(c.attempts>=8) { finish(VehicleResultCode::Failed); return; }
     for(unsigned transitions=0;transitions<3 && count_;++transitions) {
@@ -263,7 +289,11 @@ void Vehicle::frame(const Frame &incoming,uint32_t now)
         return;
     }
     if(!count_) { return; }
-    auto &c=commands_[0]; if(now-c.started>=c.timing.total_ms) { return; }
+    // Deferred frames are dispatched after a (possibly deadline-straddling) TX
+    // completed. Check the capture time and the dispatch time: a started frame is
+    // finished, but nothing authenticates or is accepted after the total deadline.
+    const uint32_t current=ports_.now(ports_.context);
+    auto &c=commands_[0]; if(now-c.started>=c.timing.total_ms || current-c.started>=c.timing.total_ms) { return; }
     SessionWireReply hello;
     if(decode_session_reply({incoming.data.data(),incoming.length},{address_.data(),16},hello)) {
         if(session_replies_seen_!=UINT32_MAX) { ++session_replies_seen_; }
@@ -275,9 +305,8 @@ void Vehicle::frame(const Frame &incoming,uint32_t now)
             // The active guard was published only after full framed TX acceptance.
             // Recheck current time as well as the captured RX time: deferred RX
             // cannot synchronize state after a write callback has spent the budget.
-            const uint32_t current=ports_.now(ports_.context);
             if(!c.has_request || hello.domain!=(charge?Domain::Infotainment:Domain::Vcsec) || !ch.guard ||
-               !ch.guard->pending_request(request) || now-request.transmitted>=request.response_ms ||
+               !ch.guard->pending_request(request) || now-request.transmitted>=request.transmit_elapsed+request.response_ms ||
                now-request.started>=request.total_ms) { return; }
             const auto result=ch.authentication.receive_update(hello.view(generation_),request,current);
             if(result==SessionAdmission::Rejected) { return; }
@@ -292,7 +321,7 @@ void Vehicle::frame(const Frame &incoming,uint32_t now)
         }
         const bool clock_update=decode_session_info({hello.encoded.data(),hello.length},decoded) &&
             (!ch.authentication.ready() || decoded.epoch!=ch.authentication.info().epoch || decoded.clock>=ch.authentication.info().clock);
-        const auto result=ch.authentication.receive(hello.view(generation_),now,ports_.random);
+        const auto result=ch.authentication.receive(hello.view(generation_),now,current,ports_.random);
         if(result==SessionAdmission::KeyDenied) { finish(VehicleResultCode::KeyDenied); return; }
         if(result!=SessionAdmission::Established && result!=SessionAdmission::Updated) { return; }
         if(clock_update) { ch.clock_anchor=now; }

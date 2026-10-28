@@ -207,24 +207,40 @@ struct TeslaBleModuleTest {
   bool submitted=false,complete=false,finished=false,missing=false;uint32_t pair_at=0,ack_at=0;unsigned main_ticks=0,frames=0;std::vector<uint8_t> wire;
   WriteFn delayed_ack=nullptr;void*delayed_arg=nullptr;uint16_t delayed_handle=0;bool late_received=false;
   const bool quarantine=mode=="flow-missing-terminal"||mode=="flow-blocked-submit"||mode=="flow-late-ack-no-main";
+  const uint32_t slow_ack=mode.rfind("flow-slow-acks-",0)==0?uint32_t(std::stoul(mode.substr(15))):0;
+  const bool slow_approve=slow_ack&&mode.find("-approve")!=std::string::npos;
+  // Slow verification writes: a started frame may finish after the 60 s local
+  // deadline, bounded by its 10 s transmit budget (never abandoned mid-frame).
+  const bool long_tx=slow_ack||mode=="flow-delayed-acks";
   std::vector<Frame> replies;std::vector<uint8_t> pending_reply;size_t reply_at=0;bool invalid_seen=false;uint32_t status_counter=0;
   on_gatt_bytes=[&](const uint8_t*p,size_t count){
    wire.insert(wire.end(),p,p+count);
    if(wire.size()<2||wire.size()!=size_t(wire[0])*256+wire[1]+2)return;
    ++frames;Frame f;f.length=wire.size()-2;memcpy(f.data.data(),wire.data()+2,f.length);wire.clear();
-   if(((mode=="flow-approval-50s"||mode=="flow-approval-59s"||mode=="flow-aged-approval-59s")||mode=="flow-denied-50s")&&complete&&millis()-pair_at>=(mode.find("59s")!=std::string::npos?59000U:50000U)){
+   if((((mode=="flow-approval-50s"||mode=="flow-approval-59s"||mode=="flow-aged-approval-59s")||mode=="flow-denied-50s")&&complete&&millis()-pair_at>=(mode.find("59s")!=std::string::npos?59000U:50000U))||
+      (slow_approve&&complete&&millis()-pair_at>=20000U)){
     peer.address=r->routing_address;const auto sent=decode(f);
     if(sent.hello)replies.push_back(peer.hello(sent,mode=="flow-denied-50s"));
     else if(!sent.pair){replies.push_back(peer.response(sent,{awake,sizeof(awake)},++status_counter,0,true));replies.push_back(peer.response(sent,{awake,sizeof(awake)},status_counter));}
    }
   };
   test_submit=[&](int stage){
+   // Extending completion time must not permit a NEW verification frame after
+   // local approval expiry. Check at the actual first ATT submission.
+   if(stage==5 && test_handle!=21 && complete && long_tx && wire.empty())
+    assert(millis()-pair_at<60000U);
    if(stage==6 && (mode=="flow-missing-terminal"||mode=="flow-late-ack-no-main"))return;
    if(stage==5 && test_handle!=21 && complete && mode=="flow-late-ack-no-main"){
     delayed_ack=test_written;delayed_arg=test_proc_arg;delayed_handle=test_handle;ack_at=millis()+7500;return;
    }
    if(stage==5 && test_handle!=21 && complete && mode=="flow-blocked-submit"){
     clock_ms.fetch_add(10010);m.loop();assert(m.tesla->runtime_owner.get()==r && !r->worker_stopped.load() && !r->task_handle->deleted);return;
+   }
+   // Field incident 2.13.5+6ae10f8c: verification writes with realistic,
+   // bounded ATT write-with-response latency (deterministic, not an RF
+   // recording); the PRESENT_KEY frame itself is acknowledged normally.
+   if(stage==5 && test_handle!=21 && complete && slow_ack){
+    on_gatt_bytes(test_write.data(),test_write.size());delayed_ack=test_written;delayed_arg=test_proc_arg;delayed_handle=test_handle;ack_at=millis()+slow_ack;return;
    }
    if(stage==5 && test_handle!=21 && mode=="flow-delayed-acks"){
     on_gatt_bytes(test_write.data(),test_write.size());delayed_ack=test_written;delayed_arg=test_proc_arg;delayed_handle=test_handle;ack_at=millis()+1200;return;
@@ -271,6 +287,15 @@ struct TeslaBleModuleTest {
     std::printf("APPROVAL_FLOW premature_stop after_pair_ms=%u missing_ack=%d frames=%u main_ticks=%u error=%s\n",millis()-pair_at,missing,frames,main_ticks,m.tesla->state.get("last_error")->asString().c_str());std::fflush(stdout);
     assert(!r->stop_requested.load() && "normal no-approval/nonresponsive peer must drain link, not permanently quarantine Bluetooth");
    }
+   if(slow_approve&&r->authorized.load()){
+    // Slow-ACK link: authenticated approval after the first (straddled) polls
+    // still completes on the SAME link; the unauthenticated copy never counts.
+    assert(invalid_seen&&millis()-pair_at>=20000&&millis()-pair_at<60000);
+    m.loop();assert(m.tesla->state.get("paired")->asBool()&&ev.applied==0&&!m.tesla->runtime_owner.restart_required());
+    assert(m.tesla->state.get("pair_loss_cause")->asString()=="none"&&LittleFS.files.at("/config/tesla_p00_112233445500_private_key")==retained);
+    std::printf("SLOW_ACKS_APPROVE ack=%u approved_after=%u polls=%u\n",slow_ack,millis()-pair_at,unsigned(m.tesla->state.get("pair_verify_polls")->asUint()));
+    finished=true;r->stop_requested=true;return;
+   }
    if((mode=="flow-approval-50s"||mode=="flow-approval-59s"||mode=="flow-aged-approval-59s")&&r->authorized.load()){
     assert(invalid_seen&&millis()-pair_at>=50000&&millis()-pair_at<60000);
     m.loop();assert(m.tesla->state.get("paired")->asBool()&&ev.applied==0&&!m.tesla->runtime_owner.restart_required());
@@ -280,12 +305,23 @@ struct TeslaBleModuleTest {
    if(!r->pair_verifying && !r->pair_sending && !r->pair_status_active && !m.tesla->state.get("pairing_pending")->asBool()){
     if((mode=="flow-approval-50s"||mode=="flow-approval-59s"||mode=="flow-aged-approval-59s"))std::fprintf(stderr,"AUTH_FLOW frames=%u status=%u invalid=%d replies=%zu elapsed=%u error=%s\n",frames,status_counter,invalid_seen,replies.size(),millis()-pair_at,m.tesla->state.get("last_error")->asString().c_str());
     assert(!(mode=="flow-approval-50s"||mode=="flow-approval-59s"||mode=="flow-aged-approval-59s") && "valid late authenticated response must complete pairing");
-    assert(millis()-pair_at<=61000 && !r->authorized.load() && !m.tesla->state.get("paired")->asBool());assert(!r->operation.retired() && !m.tesla->runtime_owner.restart_required() && m.bluetooth.active());
+    assert(millis()-pair_at<=(long_tx?71000U:61000U) && !r->authorized.load() && !m.tesla->state.get("paired")->asBool());assert(!r->operation.retired() && !m.tesla->runtime_owner.restart_required() && m.bluetooth.active());
     assert(LittleFS.files.at("/config/tesla_p00_112233445500_private_key")==retained && !LittleFS.files.count("/config/tesla_p00_112233445500_authorized") && ev.applied==0);
     if(mode=="flow-no-approval")assert(millis()-pair_at>=60000 && frames>3);
+    if(long_tx){
+     // A started verification frame must never be abandoned mid-stream by the
+     // poll's operation deadline (official ble.go Send writes whole frames).
+     m.loop();auto &st=m.tesla->state;
+     const std::string outcome=st.get("pair_outcome")->asString().c_str(),cause=st.get("pair_loss_cause")->asString().c_str();
+     std::printf("SLOW_ACKS ack=%u outcome=%s cause=%s/%s/%d t=%u disc=%d polls=%u frames=%u elapsed=%u\n",slow_ack,outcome.c_str(),cause.c_str(),
+      st.get("pair_loss_stage")->asString().c_str(),int(st.get("pair_loss_detail")->asInt()),unsigned(st.get("pair_loss_elapsed_ms")->asUint()),
+      int(st.get("pair_disconnect_reason")->asInt()),unsigned(st.get("pair_verify_polls")->asUint()),frames,millis()-pair_at);std::fflush(stdout);
+     if(cause=="frame_refused"||outcome!="local_expiry"){std::puts("RED: verification poll deadline abandoned a started frame -> frame_refused/-1 link loss");std::fflush(stdout);std::_Exit(1);}
+     assert(millis()-pair_at>=60000 && st.get("pair_verify_polls")->asUint()>=2 && wire.empty());
+    }
     finished=true;r->stop_requested=true;
    }
-   assert(millis()-pair_at<62000);
+   assert(millis()-pair_at<(long_tx?72000U:62000U)); // slow: + one in-flight frame (transmit budget 10 s)
   };
   run_task(r->task_handle);on_delay={};on_task_delay={};test_submit=nimble_auto_submit;on_gatt_bytes={};assert(submitted&&complete&&finished&&main_ticks>40);
   // Quarantine was asserted while ownership was unresolved. Only now deliver
@@ -302,6 +338,7 @@ struct TeslaBleModuleTest {
 #include "host/binding_persistence_contracts.inc"
 #include "host/pair_trace_contracts.inc"
 #include "host/card_confirm_contracts.inc"
+#include "host/discovery_connectable_contracts.inc"
  static void run(const std::string &mode) {
   if(mode=="quiesce-error-delayed") {
    BluetoothLifecycle bt;controller_status=test_status=0;async_bluetooth=true;std::thread host;
@@ -424,6 +461,7 @@ struct TeslaBleModuleTest {
    std::puts("IDLE_ENABLED PASS active Bluetooth with two stored Tesla profiles: no Tesla runtime/worker/queues/protocol, no scan/connection/storage changes");return;
   }
   if(mode.rfind("connect-repeat",0)==0){connect_flow(m,mode);return;}
+  if(mode=="discovery-connectable"){discovery_connectable_flow(m,mode);return;}
   if(mode=="pair-response"){pair_response_flow(m);return;}
   if(mode.rfind("rx-",0)==0){rx_burst_flow(m,mode);return;}
   if(mode=="browser-bridge"){browser_bridge(m);return;}

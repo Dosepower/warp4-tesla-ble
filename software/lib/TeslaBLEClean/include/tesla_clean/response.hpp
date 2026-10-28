@@ -10,10 +10,14 @@ struct Request {
     size_t identifier_length = 0;
     uint64_t context = 0, generation = 0;
     uint32_t started = 0, transmitted = 0, total_ms = 0, response_ms = 0;
+    // transmitted is taken before TX start; transmit_elapsed is the duration until
+    // the complete frame was accepted. response_ms counts from that completion.
+    uint32_t transmit_elapsed = 0;
 };
 struct Response {
     Domain domain = Domain::Vcsec;
     std::array<uint8_t,16> uuid{};
+    bool has_uuid = true; // false only for a VCSEC reply without request_uuid
     uint32_t counter = 0, flags = 0, fault = 0;
     GcmPacket packet;
 };

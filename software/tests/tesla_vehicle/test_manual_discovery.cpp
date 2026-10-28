@@ -25,6 +25,7 @@ static void observe(D &d, const char *name, unsigned address=1, uint8_t type=0, 
 int main() {
     D d;D::Snapshot s;
     static_assert(sizeof(D::Snapshot)<768,"Discovery result storage must stay bounded");
+    static_assert(sizeof(D::Target)==32,"connectable flag must reuse padding: no Snapshot/main-loop frame growth");
     D concurrent;std::atomic<unsigned> admissions{0};std::vector<std::thread> clients;
     for(unsigned i=0;i<8;++i) clients.emplace_back([&] { if(concurrent.request(1)) { ++admissions; } });
     for(auto &client:clients) { client.join(); }
@@ -34,9 +35,10 @@ int main() {
     start(d);assert(d.busy());
     observe(d,"headphones");observe(d,"Tesla");observe(d,"S0123456789abcdegC");
     observe(d,"S0123456789abcdefC",1,2);observe(d,"S0123456789abcdefC",1,0,3);
-    assert(d.snapshot(s) && s.count==0);
+    // Non-connectable (HCI 3) VIN-shaped beacon: recorded for classification only, never connectable.
+    assert(d.snapshot(s) && s.count==1 && !s.targets[0].connectable);
     observe(d,"S0123456789abcdefC");observe(d,"S0123456789abcdefC");
-    assert(d.snapshot(s) && s.count==1 && s.targets[0].rssi==-50);
+    assert(d.snapshot(s) && s.count==1 && s.targets[0].rssi==-50 && s.targets[0].connectable);
     // A malformed AD block, conflicting names, and invalid addresses are rejected.
     auto b=adv("S0123456789abcdefC"); b[0]=31;uint8_t a[6]={1,2,3,4,5,2};
     d.observe(b.data(),b.size(),0,a,0,-20,0);

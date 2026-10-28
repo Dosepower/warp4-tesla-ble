@@ -20,7 +20,11 @@ public:
     enum class Action { None, Params, Start, Stop, Retire };
     enum class Event { Params, Start, Done, Stop };
     struct Scope { int index=-1; uint64_t mac=0; char name[19]{}; uint64_t generation=0; char searched_vin[18]{}; };
-    struct Target { uint8_t address[6]{}; uint8_t address_type=0; int rssi=0; char name[19]{}; bool ambiguous=false; };
+    // connectable=false: VIN-shaped beacon seen only as ADV_SCAN_IND/ADV_NONCONN_IND. Official
+    // vehicle-command treats a non-connectable VIN beacon as "vehicle already connected to the
+    // maximum number of BLE devices". Such targets are reported, never matched/adopted/admitted.
+    // Field order keeps sizeof(Target)==32 (connectable uses former padding): no Snapshot/frame growth.
+    struct Target { uint8_t address[6]{}; uint8_t address_type=0; bool connectable=false; int rssi=0; char name[19]{}; bool ambiguous=false; };
     struct Snapshot {
         Status status=Status::Idle;
         const char *error="";
@@ -69,7 +73,8 @@ public:
         unsigned names=0;bool exact=false;
         for (unsigned i=0;i<view.count;++i) {
             const auto &t=view.targets[i];
-            if (!std::strcmp(t.name,scope.name)) {
+            // Only connectable advertisers participate (unchanged admission set).
+            if (t.connectable && !std::strcmp(t.name,scope.name)) {
                 ++names;
                 exact=!t.ambiguous && t.address_type==type && !std::memcmp(t.address,address,6);
             }
@@ -126,8 +131,10 @@ public:
     }
     void observe(const uint8_t *data,size_t adv,size_t rsp,const uint8_t *address,uint8_t type,int rssi,unsigned event) {
         // Bluedroid supplies ADV || SCAN_RSP with the original ADV event type.
-        // Only public/random connectable ADV and exact Tesla VCSEC name shape.
-        if(!data || !address || adv>31 || rsp>31 || type>1 || event>1 || rssi>20 || rssi< -127) { return; }
+        // Public/random address and exact Tesla VCSEC name shape. HCI event types:
+        // 0 ADV_IND, 1 DIR_IND (connectable); 2 SCAN_IND, 3 NONCONN_IND (not connectable).
+        if(!data || !address || adv>31 || rsp>31 || type>1 || event>3 || rssi>20 || rssi< -127) { return; }
+        const bool connectable=event<=1;
         bool nonzero=false, nonff=false;for(unsigned i=0;i<6;++i) { nonzero|=address[i]!=0;nonff|=address[i]!=255; }
         if(!nonzero || !nonff) { return; }
         char name[19]{};
@@ -164,6 +171,7 @@ public:
             if(view.count==LIMIT) { view.truncated=true;return; }
             target=&view.targets[view.count++];std::memcpy(target->address,address,6);target->address_type=type;std::memcpy(target->name,name,19);
         }
+        target->connectable=target->connectable || connectable;
         target->rssi=rssi;
     }
 private:

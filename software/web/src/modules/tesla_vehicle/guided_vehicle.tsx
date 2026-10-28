@@ -434,7 +434,7 @@ export class TeslaVehicle extends ConfigComponent<"tesla_vehicle/profiles", {}, 
                         target = matches[0];
                         if (!target || !/^(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$/.test(target.ble_address) ||
                             /^(00:){5}00$|^(FF:){5}FF$/i.test(target.ble_address) || (target.ble_address_type !== 0 && target.ble_address_type !== 1))
-                            throw new Error(__("tesla_vehicle.content.refresh_empty"));
+                            throw new Error(__(d.vin_not_connectable ? "tesla_vehicle.content.refresh_unconnectable" : "tesla_vehicle.content.refresh_empty"));
                         const cfg = JSON.parse(saved) as TeslaConfig;
                         const at = cfg.entries.findIndex(e => e.ev_index === index);
                         cfg.entries[at] = {...p, ble_address: target.ble_address, ble_address_type: target.ble_address_type, discovery_revision: d.revision};
@@ -618,7 +618,7 @@ export class TeslaVehicle extends ConfigComponent<"tesla_vehicle/profiles", {}, 
                     <p class="mt-3 mb-0">{__("tesla_vehicle.content.adopt_help")}</p>
                     {state.discovery.result_ttl_ms === 120000 ? <p class="small mt-2 mb-0">{__("tesla_vehicle.content.result_lifetime")}</p> : undefined}
                 </Alert>
-                : <Alert variant="info">{!this.discoveryFresh() || state.discovery?.status !== 'complete' ? __("tesla_vehicle.content.result_expired") : __("tesla_vehicle.content.search_empty")}</Alert> : undefined}
+                : <Alert variant="info">{!this.discoveryFresh() || state.discovery?.status !== 'complete' ? __("tesla_vehicle.content.result_expired") : state.discovery?.vin_not_connectable ? __("tesla_vehicle.content.search_unconnectable") : __("tesla_vehicle.content.search_empty")}</Alert> : undefined}
         </Fragment> : undefined;
         const commonSoc = state.ev_state?.soc;
         const currentSoc = state.ev_state?.active_ev_index === p.ev_index && state.ev_state?.mac === p.ev_mac &&

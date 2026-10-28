@@ -83,4 +83,7 @@ private:
  std::atomic<int> connect_submit_rc{-1},connect_cancel_rc{-1},connect_status{-1};
  struct Advertisement{uint8_t address[6]{},type=255,data[31]{};uint8_t size=0;};
  Advertisement advertisements[8]{};unsigned next_advertisement=0;
+ // Separate ring for scannable non-connectable ADV_SCAN_IND (their SCAN_RSP may carry the name),
+ // so they can never evict a connectable ADV awaiting its SCAN_RSP.
+ Advertisement scannable[4]{};unsigned next_scannable=0;
 };
