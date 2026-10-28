@@ -11,6 +11,12 @@ interface TeslaProfile {
     wake_once: boolean;
 }
 export interface profiles { entries: TeslaProfile[]; }
+// Structured classification of the last finished SoC operation (firmware poll_failure).
+// Helper type, deliberately not exported: pio_hooks.py turns every exported type/interface
+// in api.ts into an API topic ('tesla_vehicle/PollFailure' does not exist).
+type PollFailure = 'none' | 'deadline' | 'attempt_cap' | 'wake_poll_cap' | 'challenge_cap' | 'challenge_invalid' | 'key_denied' | 'disconnected' |
+    'vehicle_fault' | 'status_unusable' | 'charge_unusable' | 'internal' | 'connect' | 'not_bound' | 'refused' | 'not_admitted';
+
 export interface state {
     profile_ev_index: number;
     active_ev_index: number;
@@ -65,6 +71,19 @@ export interface state {
     last_update_unix: number;
     poll_outcome: 'none' | 'ok' | 'asleep_wake_disabled' | 'asleep_wake_limited' | 'woken_no_soc' | 'failed' | 'busy' | 'wake_sent_no_soc';
     poll_outcome_automatic: boolean;
+    // Structured classification of the last finished SoC operation (diagnostics).
+    poll_failure?: PollFailure;
+    poll_stage?: string;
+    poll_elapsed_ms?: number;
+    poll_attempts?: number;
+    poll_timeouts?: number;
+    poll_frames?: number;
+    poll_rejected?: number;
+    poll_fault?: number;
+    poll_session_reused?: boolean;
+    poll_vcsec_answered?: boolean;
+    poll_info_answered?: boolean;
+    action_kind?: 'none' | 'soc' | 'pair' | 'other';
     // Firmware background scheduler (works without an open browser).
     auto_poll: 'off' | 'initial' | 'waiting' | 'not_charging' | 'not_paired' | 'searching' | 'polling' | 'not_found' | 'failed' | 'after_wake';
     last_error: string;

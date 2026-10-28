@@ -111,6 +111,25 @@ void TeslaVehicle::auto_poll()
             if (sequence != 0 && value < sizeof(names) / sizeof(names[0])) {
                 tesla->state.get("poll_outcome")->updateString(names[value]);
                 tesla->state.get("poll_outcome_automatic")->updateBool(r->poll_outcome_automatic.load());
+                // Structured classification of the same operation (diagnostics only).
+                static const char *const failures[] = {"none", "deadline", "attempt_cap", "wake_poll_cap", "challenge_cap",
+                    "challenge_invalid", "key_denied", "disconnected", "vehicle_fault", "status_unusable", "charge_unusable",
+                    "internal", "connect", "not_bound", "refused", "not_admitted"};
+                const auto failure = r->poll_failure.load();
+                const auto stage = r->poll_stage.load();
+                const auto counts = r->poll_counts.load();
+                const auto flags = r->poll_flags.load();
+                tesla->state.get("poll_failure")->updateString(failure < sizeof(failures) / sizeof(failures[0]) ? failures[failure] : "internal");
+                tesla->state.get("poll_stage")->updateString(stage ? tesla_clean::vehicle_stage_name(static_cast<tesla_clean::VehicleStage>(stage - 1)) : "");
+                tesla->state.get("poll_elapsed_ms")->updateUint(r->poll_elapsed_ms.load());
+                tesla->state.get("poll_attempts")->updateUint(counts & 0xff);
+                tesla->state.get("poll_timeouts")->updateUint((counts >> 8) & 0xff);
+                tesla->state.get("poll_frames")->updateUint((counts >> 16) & 0xff);
+                tesla->state.get("poll_rejected")->updateUint(counts >> 24);
+                tesla->state.get("poll_fault")->updateUint(r->poll_fault.load());
+                tesla->state.get("poll_session_reused")->updateBool((flags & 3) != 0);
+                tesla->state.get("poll_vcsec_answered")->updateBool((flags & 4) != 0);
+                tesla->state.get("poll_info_answered")->updateBool((flags & 8) != 0);
                 a.last_operation_ms = now; a.operation_seen = true;
                 a.last_operation_manual = !r->poll_outcome_automatic.load();
                 const auto outcome = static_cast<PollOutcome>(value);
@@ -119,7 +138,9 @@ void TeslaVehicle::auto_poll()
                     // A fresh SoC (e.g. the user's manual request) supersedes an older
                     // automatic failure; never leave it shown as the current state.
                     const auto &shown = tesla->state.get("auto_poll")->asString();
-                    if (a.phase == Tesla::AutoPoll::Phase::Idle && (shown == "not_found" || shown == "failed" || shown == "after_wake")) {
+                    // An authenticated SoC also proves the key is paired: a plug-in-time
+                    // "not_paired" denial is no longer the current state.
+                    if (a.phase == Tesla::AutoPoll::Phase::Idle && (shown == "not_found" || shown == "failed" || shown == "after_wake" || shown == "not_paired")) {
                         auto_poll_publish(a.initial_done && !auto_poll_actively_charging() ? "not_charging" : "waiting");
                     }
                 } else if (outcome == PollOutcome::WokenNoSoc || outcome == PollOutcome::WakeSentNoSoc) {
@@ -137,6 +158,8 @@ void TeslaVehicle::auto_poll()
         ev.get_active_ev_index() == live.index && ev.get_active_ev_mac() == live.mac;
     if (!configured || !auto_poll_same_identity(a.identity, id)) {
         a = {};
+        // Approvals before this scheduler instance (reload/start/other identity) never trigger a request.
+        a.pair_edges_seen = tesla->pair_approved_edges;
         if (!configured) { auto_poll_publish("off"); return; }
         a.identity = id; a.next_ms = now + AUTO_POLL_FIRST_DELAY_MS; // the one plug-in request
         a.soc_mark = tesla->state.get("last_update")->asUptime();
@@ -145,6 +168,16 @@ void TeslaVehicle::auto_poll()
     }
     const uint32_t interval_ms = p->get("poll_interval")->asUint() * 1000U;
     const bool charging = auto_poll_actively_charging();
+    if (a.pair_edges_seen != tesla->pair_approved_edges) {
+        // Newly confirmed pairing (authenticated approval, worker released):
+        // one SoC request for this identity, coalesced if several edges arrive.
+        a.pair_edges_seen = tesla->pair_approved_edges;
+        if (auto_poll_same_identity(tesla->pair_approved_identity, id)) {
+            a.post_pair = true; a.post_pair_mark = tesla->state.get("last_update")->asUptime();
+            if (a.phase == Tesla::AutoPoll::Phase::Idle) { a.next_ms = now; a.interval_scheduled = false; }
+            if (tesla->state.get("auto_poll")->asString() == "not_paired") { auto_poll_publish("waiting"); }
+        }
+    }
     // Charge start/resume request: short settle delay, but never sooner than
     // the minimum gap after any finished SoC operation.
     auto charge_start_due = [&] {
@@ -168,7 +201,7 @@ void TeslaVehicle::auto_poll()
     // retryable: an unsuccessful plug-in request may be retried (bounded).
     auto end_cycle = [&](const char *state, bool retryable = true) {
         a.phase = Tesla::AutoPoll::Phase::Idle;
-        a.cycle_post_wake = a.cycle_post_wake_manual = false;
+        a.cycle_post_wake = a.cycle_post_wake_manual = a.cycle_post_pair = false;
         // The demand is served (once, even by a failure) only if no edge arrived
         // after this cycle's request hand-over (or start, without hand-over).
         if (a.cycle_edges == a.charge_edges) { a.charge_start = false; }
@@ -198,7 +231,7 @@ void TeslaVehicle::auto_poll()
     auto retry_later = [&] { a.next_ms = now + AUTO_POLL_RETRY_MS; a.interval_scheduled = false; };
     // A charge cycle whose charging ended before vehicle contact: no request
     // (a follow-up of the user's explicit request is not a charge cycle).
-    const bool charge_cycle_obsolete = !a.cycle_initial && !a.cycle_post_wake_manual && !charging;
+    const bool charge_cycle_obsolete = !a.cycle_initial && !a.cycle_post_wake_manual && !a.cycle_post_pair && !charging;
     char vin[18]{}, address[18]{};
     strlcpy(vin, p->get("vin")->asString().c_str(), sizeof(vin));
     strlcpy(address, p->get("ble_address")->asString().c_str(), sizeof(address));
@@ -220,7 +253,10 @@ void TeslaVehicle::auto_poll()
             // Automatic origin whose context ended (pause/end): no new request.
             a.post_wake = false;
         }
-        if (a.initial_done && !charging && !a.post_wake) {
+        if (a.post_pair && tesla->state.get("last_update")->asUptime() != a.post_pair_mark) {
+            a.post_pair = false; // a SoC already arrived after the approval (e.g. manual): demand satisfied
+        }
+        if (a.initial_done && !charging && !a.post_wake && !a.post_pair) {
             // Charge pause/end (or never charging after the plug-in request):
             // no automatic request, scan or wake until charging really starts.
             const auto &shown = tesla->state.get("auto_poll")->asString();
@@ -240,7 +276,7 @@ void TeslaVehicle::auto_poll()
         // and a retry of the own plug-in request wait AUTO_POLL_MIN_GAP_MS; after
         // an explicit (manual) request the plug-in request and periodic requests
         // wait one interval, so they never crowd the user's own requests.
-        const bool short_gap = a.charge_start || a.post_wake || (!a.initial_done && !a.last_operation_manual);
+        const bool short_gap = a.charge_start || a.post_wake || a.post_pair || (!a.initial_done && !a.last_operation_manual);
         if (a.operation_seen && now - a.last_operation_ms < (short_gap ? AUTO_POLL_MIN_GAP_MS : interval_ms)) { return; }
         // Never interleave with an explicit user flow or any busy worker state.
         TeslaBleDiscovery::Snapshot s{};
@@ -253,6 +289,8 @@ void TeslaVehicle::auto_poll()
         a.cycle_initial = !a.initial_done; a.cycle_edges = a.charge_edges;
         // The follow-up is consumed by starting its cycle: at most one attempt.
         a.cycle_post_wake = a.post_wake; a.cycle_post_wake_manual = a.post_wake && a.post_wake_manual; a.post_wake = false;
+        // The post-pairing request is consumed by starting its cycle: at most one attempt.
+        a.cycle_post_pair = a.post_pair; a.post_pair = false;
         // Read-only probe under the same idle gate as publish_guidance().
         TeslaBleStorageAdapter store;
         if (!store.select_profile(live.index, live.mac) ||
@@ -266,6 +304,7 @@ void TeslaVehicle::auto_poll()
         if (!tesla_ble_vehicle_name(vin, scope.name) || !bluetooth.request_discovery(scope)) {
             // Not started: no radio contact, the follow-up (if any) stays pending.
             a.cycle_initial = false; a.post_wake = a.cycle_post_wake; a.cycle_post_wake = a.cycle_post_wake_manual = false;
+            a.post_pair = a.cycle_post_pair; a.cycle_post_pair = false;
             retry_later(); return;
         }
         a.scan_baseline = s.revision; a.config_revision = tesla->config_revision;

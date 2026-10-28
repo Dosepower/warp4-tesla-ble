@@ -326,6 +326,19 @@ private:
         std::atomic<uint8_t> poll_outcome{0};
         std::atomic<bool> poll_outcome_automatic{false};
         std::atomic<uint32_t> poll_outcome_sequence{0};
+        // Nonsecret classification of the same finished operation, written by
+        // the worker before poll_outcome_sequence advances (diagnostics only):
+        // failure code (TeslaPollFailure), last stage (tesla_clean::VehicleStage
+        // + 1, 0 = none), elapsed ms, fault, packed per-operation counts
+        // (attempts | timeouts << 8 | frames << 16 | rejected << 24) and flags
+        // (1 = VCSEC reused, 2 = Infotainment reused, 4 = VCSEC answered, 8 = Infotainment answered,
+        // 16 = ignored encrypted responses seen).
+        std::atomic<uint8_t> poll_failure{0};
+        std::atomic<uint8_t> poll_stage{0};
+        std::atomic<uint32_t> poll_elapsed_ms{0};
+        std::atomic<uint32_t> poll_fault{0};
+        std::atomic<uint32_t> poll_counts{0};
+        std::atomic<uint8_t> poll_flags{0};
         // HTTP acceptance through terminal worker outcome, not HTTP latency.
         std::atomic<bool> manual_poll_pending{false};
         std::atomic<bool> forget_requested{false};
@@ -511,6 +524,13 @@ private:
         bool legacy_blocked = false;
         int selected_index = -1; // Main's admitted profile, not a second EV registry.
         int published_index = -1;
+        // Identity (profile index, EV MAC, VIN) of the last profile publication and the one the
+        // retained BLE SoC was measured for. The value and its receive time are never shown
+        // under another identity; the current profile index is no historical origin.
+        struct SocOrigin {
+            bool valid = false; int index = -1; uint64_t mac = 0; char vin[18]{};
+            bool same(const SocOrigin &o) const { return valid && o.valid && index == o.index && mac == o.mac && strncmp(vin, o.vin, sizeof(vin)) == 0; }
+        } published_origin, soc_origin;
         Config discovery_target;
         ConfigRoot discovery_state, scan_command;
         uint32_t discovery_revision=UINT32_MAX;
@@ -570,7 +590,19 @@ private:
             // last_update at plug-in: a SoC consumed for this identity since then
             // (e.g. the user's manual request) satisfies the plug-in request.
             decltype(std::declval<const Config &>().asUptime()) soc_mark{};
+            // Exactly one request after a NEW authenticated pairing approval of
+            // this identity (consumed edge count, never on reload/start, repeated
+            // paired state or failed pairing). Satisfied by any SoC received after
+            // the approval; dropped with the identity.
+            uint32_t pair_edges_seen = 0;
+            bool post_pair = false;        // pending, not yet started
+            bool cycle_post_pair = false;  // the running cycle serves it
+            decltype(std::declval<const Config &>().asUptime()) post_pair_mark{};
         } auto_poll;
+        // Main task only: authenticated pairing approvals published for the
+        // current SLAC identity after the pairing worker released the vehicle.
+        uint32_t pair_approved_edges = 0;
+        TeslaBleIdentity pair_approved_identity{UINT64_MAX, -1, 0};
         uint32_t poll_outcome_seen = 0;
         uint64_t poll_outcome_epoch = 0;
 #endif

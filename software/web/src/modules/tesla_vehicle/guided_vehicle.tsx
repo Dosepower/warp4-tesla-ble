@@ -452,7 +452,7 @@ export class TeslaVehicle extends ConfigComponent<"tesla_vehicle/profiles", {}, 
                         target = matches[0];
                         if (!target || !/^(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$/.test(target.ble_address) ||
                             /^(00:){5}00$|^(FF:){5}FF$/i.test(target.ble_address) || (target.ble_address_type !== 0 && target.ble_address_type !== 1))
-                            throw new Error(__(d.vin_not_connectable ? "tesla_vehicle.content.refresh_unconnectable" : "tesla_vehicle.content.refresh_empty"));
+                            throw new Error(d.vin_not_connectable ? __("tesla_vehicle.content.refresh_unconnectable") : __("tesla_vehicle.content.refresh_empty"));
                         const cfg = JSON.parse(saved) as TeslaConfig;
                         const at = cfg.entries.findIndex(e => e.ev_index === index);
                         cfg.entries[at] = {...p, ble_address: target.ble_address, ble_address_type: target.ble_address_type, discovery_revision: d.revision};
@@ -565,6 +565,17 @@ export class TeslaVehicle extends ConfigComponent<"tesla_vehicle/profiles", {}, 
         if (reason === this.errorText(status?.last_error || '')) {
             const structured = pairingOutcomeReason(status);
             if (structured) return structured;
+            // Classified SoC failure: localized from the structured field, never from the English text.
+            if (status?.poll_outcome === 'failed' && reason.startsWith('Tesla SoC request')) {
+                const code = status.poll_failure ?? 'none';
+                return code === 'deadline' || code === 'attempt_cap' || code === 'wake_poll_cap' ? __("tesla_vehicle.status.poll_no_answer") :
+                    code === 'challenge_cap' || code === 'challenge_invalid' ? __("tesla_vehicle.status.poll_session") :
+                    code === 'key_denied' ? __("tesla_vehicle.status.poll_key_denied") :
+                    code === 'disconnected' ? __("tesla_vehicle.status.poll_link") :
+                    code === 'vehicle_fault' ? __("tesla_vehicle.status.poll_vehicle_fault") :
+                    code === 'status_unusable' || code === 'charge_unusable' ? __("tesla_vehicle.status.poll_unusable") :
+                    __("tesla_vehicle.status.outcome_failed");
+            }
         }
         // Only this unambiguous backend outcome is an ordinary approval expiry.
         if (reason === 'Approval deadline expired; approval not authenticated') return __("tesla_vehicle.status.approval_expired");
@@ -652,10 +663,13 @@ export class TeslaVehicle extends ConfigComponent<"tesla_vehicle/profiles", {}, 
                 : <Alert variant="info">{!this.discoveryFresh() || state.discovery?.status !== 'complete' ? __("tesla_vehicle.content.result_expired") : state.discovery?.vin_not_connectable ? __("tesla_vehicle.content.search_unconnectable") : __("tesla_vehicle.content.search_empty")}</Alert> : undefined}
         </Fragment> : undefined;
         const commonSoc = state.ev_state?.soc;
-        // Last accepted value of this profile with its real receive time; a later failure
-        // never clears or re-dates it (backend keeps last_soc/last_update unchanged).
+        // Main Tesla value: the last BLE-measured SoC of this profile together with its real
+        // receive time; a later failure never clears or re-dates it. The shared WARP value
+        // (ev/state, may be estimated between measurements) is never paired with that time.
+        const bleSoc = state.tesla_state?.last_soc;
         const currentSoc = state.ev_state?.active_ev_index === p.ev_index && state.ev_state?.mac === p.ev_mac &&
-            state.tesla_state?.profile_ev_index === p.ev_index && Number.isFinite(commonSoc) && Number.isFinite(state.tesla_state?.last_soc) && state.tesla_state.last_update > 0;
+            state.tesla_state?.profile_ev_index === p.ev_index && Number.isFinite(commonSoc) && Number.isFinite(bleSoc) && state.tesla_state.last_update > 0;
+        const estimatedSoc = currentSoc && Number.isFinite(commonSoc) && Math.abs(commonSoc - bleSoc) >= 0.05 ? commonSoc : NaN;
         const ownState = state.tesla_state?.profile_ev_index === p.ev_index ? state.tesla_state : undefined;
         const autoPoll = ownState?.auto_poll ?? 'off';
         const outcomeCode = ownState?.poll_outcome as string ?? 'none';
@@ -688,14 +702,14 @@ export class TeslaVehicle extends ConfigComponent<"tesla_vehicle/profiles", {}, 
         const pairLabel = state.busy_action === 'pair' ? <Busy text={state.busy_step === 'searching' ? __("tesla_vehicle.content.searching") : __("tesla_vehicle.content.pair_preparing")} /> :
             status.pairing_pending ? <Busy text={status.pair_request_sent ? __("tesla_vehicle.content.pair_waiting") : __("tesla_vehicle.content.pair_requesting")} /> :
             __("tesla_vehicle.content.pair");
+        const pairBusy = state.busy_action === 'pair' || !!status.pairing_pending;
         const refreshing = state.busy_action === 'poll' ? state.busy_step === 'searching' ? 'searching' : 'refreshing' :
             autoPoll === 'searching' ? 'searching' : autoPoll === 'polling' ? 'refreshing' :
-            global_poll_busy(state.tesla_state) ? 'refreshing' : '';
+            !pairBusy && state.busy_action !== 'pair' && global_poll_busy(state.tesla_state) ? 'refreshing' : '';
         const pollLabel = refreshing ? <Busy text={refreshing === 'searching' ? __("tesla_vehicle.content.searching") : __("tesla_vehicle.content.refreshing")} /> : __("tesla_vehicle.content.read_soc");
         // A concrete reason directly at the disabled button; not while it shows its own spinner.
         const reasonAt = (reason: string, busy: boolean) => reason && !busy && [keyText, ...mainErrors].map(text => this.errorText(text)).indexOf(this.errorText(reason)) < 0 ?
             <div class="form-text mb-2" role="status">{reason}</div> : undefined;
-        const pairBusy = state.busy_action === 'pair' || !!status.pairing_pending;
         const keyPresent = status.key_present || status.paired;
         // One shared prerequisite is shown once (at the pairing button), not again at Refresh.
         const pairReasonShown = assigned && !status.paired && !pairBusy ? this.errorText(pairReason) : '';
@@ -713,11 +727,12 @@ export class TeslaVehicle extends ConfigComponent<"tesla_vehicle/profiles", {}, 
                 {reasonAt(pairReason, pairBusy)}
             </Fragment> : undefined}
             {keyPresent ? <Fragment>
-                <FormRow label={__("tesla_vehicle.status.soc")}><InputText readonly value={currentSoc ? util.toLocaleFixed(commonSoc, 1) + ' %' : '–'} /></FormRow>
+                <FormRow label={__("tesla_vehicle.status.soc")}><InputText readonly value={currentSoc ? util.toLocaleFixed(bleSoc, 1) + ' %' : '–'} /></FormRow>
                 {currentSoc ? <FormRow label={__("tesla_vehicle.status.soc_time")}><InputText readonly value={formatSocReceiveTime(state.tesla_state.last_update_unix ?? 0, API.get("ntp/config")?.timezone, Date.now(),
                     {unsynced: __("tesla_vehicle.status.soc_time_unsynced"), today: __("tesla_vehicle.status.soc_time_today")})} /></FormRow> : undefined}
+                {Number.isFinite(estimatedSoc) ? <FormRow label={__("tesla_vehicle.status.soc_estimated")}><InputText readonly value={util.toLocaleFixed(estimatedSoc, 1) + ' %'} /></FormRow> : undefined}
                 <FormRow><Button type="button" className="w-100" variant="primary" disabled={!!pollReason} onClick={() => this.command('poll')}>{pollLabel}</Button></FormRow>
-                {reasonAt(this.errorText(pollReason) === pairReasonShown ? '' : pollReason, !!refreshing)}
+                {reasonAt(this.errorText(pollReason) === pairReasonShown || (pairBusy && pollReason === __("tesla_vehicle.content.action_busy")) ? '' : pollReason, !!refreshing)}
                 <FormRow label={__("tesla_vehicle.content.poll_interval")} help={__("tesla_vehicle.content.poll_interval_help")}>
                     <InputSelect items={intervals} value={String(shownInterval)} disabled={settingsDisabled} onValue={value => this.setProfile({poll_interval: parseInt(value)})} />
                 </FormRow>
@@ -747,7 +762,9 @@ export class TeslaVehicle extends ConfigComponent<"tesla_vehicle/profiles", {}, 
                 <FormRow label={__("tesla_vehicle.status.ble")}><InputText readonly value={status.connected ? __("tesla_vehicle.status.connected") : __("tesla_vehicle.status.disconnected")} /></FormRow>
                 {keyPresent ? <FormRow label={__("tesla_vehicle.status.auto_poll")}><InputText readonly value={autoText} /></FormRow> : undefined}
                 {keyPresent ? <FormRow label={__("tesla_vehicle.status.last_outcome")}><InputText readonly value={outcomeCode === 'ok' ? __("tesla_vehicle.status.outcome_ok") : outcome || '–'} /></FormRow> : undefined}
-                {technicalErrors.map(message => <div key={message} class="text-break">{message}</div>)}
+                {technicalErrors.length ? <FormRow label={__("tesla_vehicle.content.technical_details")}>
+                    <div class="form-control-plaintext small text-muted">{technicalErrors.map(message => <div key={message} class="text-break">{message}</div>)}</div>
+                </FormRow> : undefined}
                 {status.pair_response_seen ? <div class="text-break">{__("tesla_vehicle.pair_response.unverified")}<br />
                     {'VCSEC: information=' + status.pair_response_code + ', outer=' + status.pair_response_outer + ', operation=' + status.pair_response_operation + ', whitelist=' + status.pair_response_whitelist}
                 </div> : undefined}
@@ -756,7 +773,8 @@ export class TeslaVehicle extends ConfigComponent<"tesla_vehicle/profiles", {}, 
     }
 }
 
-// Backend reports a running explicit SoC operation as action_busy without pairing.
+// Backend reports a running explicit SoC operation as action_busy with action_kind 'soc';
+// pairing (incl. its approval hand-back) and other busy work never imply a SoC request.
 function global_poll_busy(s: View['tesla_state']) {
-    return !!s?.action_busy && !s.pairing_pending;
+    return !!s?.action_busy && !s.pairing_pending && s.action_kind === 'soc';
 }

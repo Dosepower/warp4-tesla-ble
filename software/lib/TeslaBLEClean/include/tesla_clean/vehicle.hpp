@@ -7,6 +7,30 @@
 namespace tesla_clean {
 enum class WakePolicy { NoWakeSkip, WakeIfNeeded };
 enum class VehicleResultCode { Soc, Status, WakeConfirmed, PairRequestSent, SkippedAsleep, KeyDenied, Failed, Expired, Disconnected };
+// Nonsecret terminal classification of one command (diagnostics only, never
+// authority): which bound or reply ended it, at which stage.
+enum class VehicleFailure : uint8_t { None, Deadline, AttemptCap, WakePollCap, ChallengeCap, ChallengeInvalid, KeyDenied,
+    Disconnected, VehicleFault, StatusUnusable, ChargeUnusable, Internal };
+enum class VehicleStage : uint8_t { VcsecAuth, WaitVcsecAuth, Status, WaitStatus, Wake, WaitWake, InfoAuth, WaitInfoAuth, Charge, WaitCharge, Pair };
+const char *vehicle_failure_name(VehicleFailure failure);
+const char *vehicle_stage_name(VehicleStage stage);
+// Saturating per-command counts; no payload, key, VIN or address material.
+struct VehicleDiagnostics {
+    VehicleFailure failure=VehicleFailure::None;
+    VehicleStage stage=VehicleStage::VcsecAuth; // stage when the command ended
+    uint32_t elapsed_ms=0;      // command start to terminal result
+    uint32_t fault=0;           // last authenticated vehicle fault (0: none)
+    uint8_t attempts=0;         // generic session/command attempts (cap 8)
+    uint8_t challenges=0;       // session challenges begun (new UUID)
+    uint8_t response_timeouts=0;// response budgets spent without an admitted reply
+    uint8_t frames=0;           // complete frames dispatched to this command
+    uint8_t rejected_replies=0; // session replies for this command not admitted
+    uint8_t ignored_responses=0;// encrypted responses decoded but not accepted
+    // Domain session already established on this link when the command began.
+    bool vcsec_reused=false,info_reused=false;
+    // An authenticated reply (session established/updated or response accepted) per domain.
+    bool vcsec_answered=false,info_answered=false;
+};
 struct VehicleResult {
     uint64_t context=0,generation=0;
     VehicleResultCode code=VehicleResultCode::Failed;
@@ -21,6 +45,7 @@ struct VehicleResult {
     // vehicle status reported the vehicle awake. Evidence that the car actually
     // woke up (for honest reporting); never authority for anything else.
     bool awake_after_wake=false;
+    VehicleDiagnostics diagnostics;
 };
 using VehicleCompletion=CheckedCallback<void(const VehicleResult &)>;
 struct VehicleTiming { uint32_t total_ms=5000,response_ms=500,transmit_ms=500; };
@@ -39,7 +64,7 @@ struct VehiclePorts {
 // Callbacks may close/open/enqueue/tick, but must not destroy this object.
 class Vehicle {
     enum class Kind { Poll, Status, Wake, Pair };
-    enum class Stage { VcsecAuth, WaitVcsecAuth, Status, WaitStatus, Wake, WaitWake, InfoAuth, WaitInfoAuth, Charge, WaitCharge, Pair };
+    using Stage=VehicleStage;
     struct Command {
         Kind kind=Kind::Poll;
         Stage stage=Stage::VcsecAuth;
@@ -53,6 +78,9 @@ class Vehicle {
         unsigned wake_polls=0;
         uint32_t retry_delay=100;
         bool delayed=false,wake_sent=false,has_request=false,refresh=false,awake_after_wake=false;
+        // Authenticated reply (session establishment/update or accepted response) per domain.
+        bool vcsec_answered=false,info_answered=false;
+        VehicleDiagnostics diagnostics;
         VehicleCompletion completion;
     };
     struct Channel {
@@ -103,7 +131,9 @@ class Vehicle {
     static OperationTime operation_time(const Command &c) { return {c.authentication_context,c.generation,c.started,c.timing.total_ms,c.timing.response_ms}; }
     bool advance();
     bool enqueue(Kind kind,WakePolicy policy,uint64_t context,VehicleCompletion &&completion,VehicleTiming timing);
-    void finish(VehicleResultCode code,uint8_t battery=0,SleepState sleep=SleepState::Unknown,bool authenticated=false);
+    void finish(VehicleResultCode code,uint8_t battery=0,SleepState sleep=SleepState::Unknown,bool authenticated=false,
+        VehicleFailure failure=VehicleFailure::Internal);
+    void fail(VehicleFailure failure) { finish(VehicleResultCode::Failed,0,SleepState::Unknown,false,failure); }
     void retry(Stage stage,uint32_t now,uint32_t delay=100);
     bool transmit(Bytes payload,Transmission &tx);
     void drain(Transmission &tx);

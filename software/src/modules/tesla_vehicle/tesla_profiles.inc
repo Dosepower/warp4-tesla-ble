@@ -378,6 +378,20 @@ void TeslaVehicle::publish_profile()
     const int index = r->configured_ev_index.load();
     if (tesla->published_index == index) { return; }
     tesla->published_index = index;
+    Tesla::SocOrigin origin; origin.index = index;
+    if (Config *p = find_profile(index)) {
+        origin.valid = true; origin.mac = profile_mac_value(p->get("ev_mac")->asString().c_str());
+        strlcpy(origin.vin, p->get("vin")->asString().c_str(), sizeof(origin.vin));
+    }
+    tesla->published_origin = origin;
+    if (!tesla->soc_origin.same(origin)) {
+        // Identity change (other profile, MAC/VIN, index reuse): the retained BLE value and its
+        // receive time are withdrawn together. last_update stays the monotonic SoC-arrival mark
+        // of the auto-poll scheduler; the shared ev/state value is not touched.
+        tesla->soc_origin = {};
+        tesla->state.get("last_soc")->updateFloat(NAN);
+        tesla->state.get("last_update_unix")->updateUint(0);
+    }
     tesla->pairing_policy.on_key_removed();
     tesla->state.get("profile_ev_index")->updateInt(index);
     tesla->state.get("pair_outcome")->updateString("none");

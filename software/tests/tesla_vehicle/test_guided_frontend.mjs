@@ -513,7 +513,7 @@ normal();console.log('GUIDED_GREY_PREREQUISITE_DEDUP_PASS');
 { // Busy feedback: spinner + step text while active, concrete reason otherwise, clickable again after a failure.
  const busyText=()=>nodes().filter(n=>n.type==='Button'&&typeof n.props.children==='object'&&n.props.children?.props?.text).map(n=>[n.props.children.props.text,n.props.disabled]);
  normal();const st=extra=>{f.values['tesla_vehicle/state']={profile_ev_index:0,key_presence:'present',key_present:true,paired:true,...extra};event('tesla_vehicle/state');};
- st({action_busy:true});assert.deepEqual(busyText(),[['tesla_vehicle.content.refreshing',true]],'Running SoC operation: "Wird aktualisiert …", locked');
+ st({action_busy:true,action_kind:'soc'});assert.deepEqual(busyText(),[['tesla_vehicle.content.refreshing',true]],'Running SoC operation: "Wird aktualisiert …", locked');
  assert(!nodes().some(n=>n.type==='div'&&n.props.children==='tesla_vehicle.content.action_busy'),'Spinner replaces the generic busy reason at the same button');
  st({auto_poll:'searching'});assert.deepEqual(busyText(),[['tesla_vehicle.content.searching',false]],'Automatic scan: "Fahrzeug wird gesucht …"');
  st({auto_poll:'polling'});assert.deepEqual(busyText(),[['tesla_vehicle.content.refreshing',false]]);
@@ -534,6 +534,68 @@ normal();console.log('GUIDED_GREY_PREREQUISITE_DEDUP_PASS');
  assert.equal(f.calls.filter(c=>c.payload?.phase==='prepare_poll').length,f.calls.slice(0,n0).filter(c=>c.payload?.phase==='prepare_poll').length+1,'No parallel second action');
  release();await run;assert.equal(busyText().length,0);assert.equal(button('read_soc').props.disabled,false,'Clickable again after failure');
  f.call=async()=>{};normal();console.log('GUIDED_BUSY_FEEDBACK_PASS');
+}
+{ // Live findings 2.13.5+6ae25bce: BLE value/time vs estimate, pairing busy scoping, structured SoC failure text.
+ const busyText=()=>nodes().filter(n=>n.type==='Button'&&typeof n.props.children==='object'&&n.props.children?.props?.text).map(n=>[n.props.children.props.text,n.props.disabled]);
+ const rowValue=label=>{const row=nodes().find(n=>n.type==='FormRow'&&n.props.label===label);return row&&walk(row).find(n=>n.type==='InputText')?.props.value;};
+ const grey=()=>nodes().filter(n=>n.type==='div'&&n.props.class==='form-text mb-2'&&n.props.children==='tesla_vehicle.content.action_busy').length;
+ normal();const st=extra=>{f.values['tesla_vehicle/state']={profile_ev_index:0,key_presence:'present',key_present:true,paired:true,last_soc:94,last_update:12345,last_update_unix:1793223270,...extra};event('tesla_vehicle/state');};
+ // 1) Shared WARP value 95.7 (estimated) never shown as the Tesla measurement beside the BLE receive time.
+ f.values['ev/state']={active_ev_index:0,mac:'11:22:33:44:55:00',soc:95.7};event('ev/state');st({});
+ assert.equal(rowValue('tesla_vehicle.status.soc'),'94.0 %','Main Tesla value is the BLE measurement');
+ assert(rowValue('tesla_vehicle.status.soc_time'),'BLE receive time shown with the BLE value');
+ assert.equal(rowValue('tesla_vehicle.status.soc_estimated'),'95.7 %','Estimate shown separately and labeled');
+ f.values['ev/state'].soc=94;event('ev/state');assert.equal(rowValue('tesla_vehicle.status.soc_estimated'),undefined,'No estimate row when equal');
+ assert.equal(f.values['ev/state'].soc,94,'Shared WARP SoC untouched by the view');
+ // 3/4) Pairing in progress (incl. approval hand-back): no Refresh spinner, no duplicate grey busy text, button stays disabled.
+ for(const extra of [{paired:false,pairing_pending:true,pair_request_sent:true,action_busy:true,action_kind:'pair'},
+                     {paired:false,pairing_pending:false,action_busy:true,action_kind:'pair'},
+                     {paired:true,pairing_pending:false,action_busy:true,action_kind:'pair'}]){
+  st(extra);
+  assert(!busyText().some(x=>x[0]==='tesla_vehicle.content.refreshing'),'Pairing never shows the SoC spinner: '+JSON.stringify(extra));
+  assert.equal(button('read_soc').props.disabled,true,'Refresh gated while pairing is busy');
+  if(extra.pairing_pending)assert.equal(grey(),0,'No grey duplicate under Refresh while the pairing button shows progress');
+ }
+ st({action_busy:true,action_kind:'soc'});assert.deepEqual(busyText(),[['tesla_vehicle.content.refreshing',true]],'Real SoC action keeps its spinner');
+ st({action_busy:true,action_kind:'other'});assert.equal(busyText().length,0,'Other busy work: disabled, no SoC spinner');
+ // 5) Classified failure: localized main text from the structured field; raw English only under the labeled diagnostics.
+ const raw='Tesla SoC request: session setup unanswered (info_auth_wait)';
+ st({poll_outcome:'failed',poll_outcome_automatic:true,poll_failure:'challenge_cap',last_error:raw});
+ const alertText=JSON.stringify(walk(nodes().find(n=>n.type==='Alert'&&n.props.variant==='danger')));
+ assert(alertText.includes('tesla_vehicle.status.poll_session')&&!alertText.includes(raw),'Localized classified failure, no raw English in the main alert');
+ page.state.details_open=true;
+ const rawCount=nodes().filter(n=>n.type==='div'&&n.props.children===raw).length;
+ assert.equal(rawCount,1,'Raw detail exactly once');
+ assert(walk(nodes().find(n=>n.type==='FormRow'&&n.props.label==='tesla_vehicle.content.technical_details')).some(n=>n.props?.children===raw),'Raw detail only under the technical label');
+ page.state.details_open=false;
+ st({poll_outcome:'failed',poll_failure:'deadline',last_error:'Tesla SoC request: no vehicle answer (deadline, status_wait, 40000 ms)'});
+ assert(JSON.stringify(walk(nodes().find(n=>n.type==='Alert'))).includes('tesla_vehicle.status.poll_no_answer'));
+ f.values['ev/state']={active_ev_index:0,mac:'11:22:33:44:55:00',soc:null};event('ev/state');normal();console.log('GUIDED_LIVE_FINDINGS_PASS');
+}
+{ // Review BLOCK SoC provenance: A BLE 94 must never be shown under profile B (common 51, no B sample).
+ // Backend contract (tesla_profiles.inc publish_profile): on identity change last_soc=NaN (JSON null) and last_update_unix=0 together; last_update kept.
+ const rowValue=label=>{const row=nodes().find(n=>n.type==='FormRow'&&n.props.label===label);return row&&walk(row).find(n=>n.type==='InputText')?.props.value;};
+ const macB=f.values['ev/config'].evs[1].mac,macA=f.values['ev/config'].evs[0].mac;
+ const st=extra=>{f.values['tesla_vehicle/state']={key_presence:'present',key_present:true,paired:true,...extra};event('tesla_vehicle/state');};
+ const noA=(why)=>{assert(!nodes().some(n=>n.props?.value==='94.0 %'),'No A 94 under '+why);assert.equal(rowValue('tesla_vehicle.status.soc_time'),undefined,'No A receive time under '+why);
+  assert(!nodes().some(n=>typeof n.props?.value==='string'&&/\d{2}:\d{2}:\d{2}$/.test(n.props.value)),'No time-like value under '+why);};
+ normal();
+ // A measured via BLE: 94 with its own time.
+ f.values['ev/state']={active_ev_index:0,mac:macA,soc:94};event('ev/state');st({profile_ev_index:0,last_soc:94,last_update:12345,last_update_unix:1793223270});
+ assert.equal(rowValue('tesla_vehicle.status.soc'),'94.0 %');assert.match(String(rowValue('tesla_vehicle.status.soc_time')),/\d{2}:\d{2}:\d{2}$/);
+ // B active/selected, common SoC 51 from another source, no B sample; backend withdrew (NaN in-process, null over JSON).
+ for(const withdrawn of [NaN,null,undefined]){
+  page.selectProfile('1');f.values['ev/state']={active_ev_index:1,mac:macB,soc:51};event('ev/state');
+  st({profile_ev_index:1,last_soc:withdrawn,last_update:12345,last_update_unix:0});noA('B/common51 last_soc='+withdrawn);
+ }
+ // Real B sample: shown with its own time.
+ st({profile_ev_index:1,last_soc:51,last_update:12400,last_update_unix:1793223900});
+ assert.equal(rowValue('tesla_vehicle.status.soc'),'51.0 %','B BLE sample shown under B');assert.match(String(rowValue('tesla_vehicle.status.soc_time')),/\d{2}:\d{2}:\d{2}$/);
+ // A->B->A: back on A without a new A sample, nothing stale reappears as fresh (neither A 94 nor B 51/time).
+ page.selectProfile('0');f.values['ev/state']={active_ev_index:0,mac:macA,soc:94};event('ev/state');
+ st({profile_ev_index:0,last_soc:NaN,last_update:12400,last_update_unix:0});noA('A->B->A without new A sample');
+ assert(!nodes().some(n=>n.props?.value==='51.0 %'),'No B value reappears under A');
+ f.values['ev/state']={active_ev_index:0,mac:'11:22:33:44:55:00',soc:null};event('ev/state');normal();console.log('GUIDED_SOC_IDENTITY_ORIGIN_PASS');
 }
 let prepareResponse;f.call=async(t,p)=>{if(p.phase==='prepare_pair')await new Promise(r=>{prepareResponse=r;});};const pendingUnmount=button('pair').props.onClick();await new Promise(setImmediate);
 count=f.calls.length;page.componentWillUnmount();prepareResponse();await pendingUnmount;assert.equal(f.calls.length,count+1);assert.equal(f.calls.at(-1).payload.phase,'cancel');

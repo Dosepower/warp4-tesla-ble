@@ -241,6 +241,8 @@ bool TeslaVehicle::prepare_tesla()
         {"restart_required", Config::Bool(false)},
         {"last_soc", Config::Float(NAN)},
         {"action_busy", Config::Bool(false)},
+        // Class of the busy action (UI scoping only; action_busy stays the gate): none|soc|pair|other.
+        {"action_kind", Config::Str("none", 0, 8)},
         {"last_update", Config::Uptime()},
         // Unix seconds of the last consumed authenticated SoC; 0 = WARP clock unsynchronized.
         {"last_update_unix", Config::Uint(0, 0, UINT32_MAX)},
@@ -249,6 +251,21 @@ bool TeslaVehicle::prepare_tesla()
         {"poll_outcome_automatic", Config::Bool(false)},
         // Autonomous firmware scheduler: off|initial|waiting|not_charging|not_paired|searching|polling|not_found|failed.
         {"auto_poll", Config::Str("off", 0, 12)},
+        // Classification of the last finished SoC operation (no identifiers):
+        // none|deadline|attempt_cap|wake_poll_cap|challenge_cap|challenge_invalid|key_denied|
+        // disconnected|vehicle_fault|status_unusable|charge_unusable|internal|connect|not_bound|refused|not_admitted.
+        {"poll_failure", Config::Str("none", 0, 20)},
+        {"poll_stage", Config::Str("", 0, 16)},
+        {"poll_elapsed_ms", Config::Uint(0, 0, UINT32_MAX)},
+        {"poll_attempts", Config::Uint(0, 0, 255)},
+        {"poll_timeouts", Config::Uint(0, 0, 255)},
+        {"poll_frames", Config::Uint(0, 0, 255)},
+        {"poll_rejected", Config::Uint(0, 0, 255)},
+        {"poll_fault", Config::Uint(0, 0, UINT32_MAX)},
+        // Domain session reused from earlier on this link; authenticated reply per domain (VCSEC/Infotainment).
+        {"poll_session_reused", Config::Bool(false)},
+        {"poll_vcsec_answered", Config::Bool(false)},
+        {"poll_info_answered", Config::Bool(false)},
         {"last_error", Config::Str("", 0, 96)},
     });
 
@@ -1300,6 +1317,45 @@ void TeslaVehicle::process_commands()
     check_worker_exhaustion();
 }
 
+// Local (pre-vehicle) failure classes follow tesla_clean::VehicleFailure's values.
+enum : uint8_t { POLL_FAILURE_CONNECT = 12, POLL_FAILURE_NOT_BOUND = 13, POLL_FAILURE_REFUSED = 14, POLL_FAILURE_NOT_ADMITTED = 15 };
+
+template <typename RuntimeT>
+static void set_poll_diagnostics(RuntimeT *r, uint8_t failure, const tesla_clean::VehicleDiagnostics *d = nullptr)
+{
+    r->poll_failure.store(failure);
+    r->poll_stage.store(d ? static_cast<uint8_t>(static_cast<uint8_t>(d->stage) + 1) : 0);
+    r->poll_elapsed_ms.store(d ? d->elapsed_ms : 0);
+    r->poll_fault.store(d ? d->fault : 0);
+    r->poll_counts.store(d ? (uint32_t{d->attempts} | uint32_t{d->response_timeouts} << 8 | uint32_t{d->frames} << 16 |
+        uint32_t{d->rejected_replies} << 24) : 0);
+    r->poll_flags.store(d ? static_cast<uint8_t>((d->vcsec_reused ? 1 : 0) | (d->info_reused ? 2 : 0) | (d->vcsec_answered ? 4 : 0) |
+        (d->info_answered ? 8 : 0) | (d->ignored_responses ? 16 : 0)) : 0);
+}
+
+// Concise, identifier-free English diagnostic for the classified failure; the
+// UI localizes from the structured poll_failure field, never from this text.
+static void soc_failure_text(const tesla_clean::VehicleDiagnostics &d, char *out, size_t size)
+{
+    const char *stage = tesla_clean::vehicle_stage_name(d.stage);
+    switch (d.failure) {
+    case tesla_clean::VehicleFailure::KeyDenied: snprintf(out, size, "Tesla SoC request: key not accepted by vehicle"); break;
+    case tesla_clean::VehicleFailure::Disconnected: snprintf(out, size, "Tesla SoC request: BLE link lost (%s)", stage); break;
+    case tesla_clean::VehicleFailure::VehicleFault:
+        snprintf(out, size, "Tesla SoC request: vehicle fault %lu (%s)", static_cast<unsigned long>(d.fault), stage); break;
+    case tesla_clean::VehicleFailure::StatusUnusable:
+    case tesla_clean::VehicleFailure::ChargeUnusable: snprintf(out, size, "Tesla SoC request: unusable vehicle reply (%s)", stage); break;
+    case tesla_clean::VehicleFailure::ChallengeCap:
+    case tesla_clean::VehicleFailure::ChallengeInvalid: snprintf(out, size, "Tesla SoC request: session setup unanswered (%s)", stage); break;
+    case tesla_clean::VehicleFailure::Deadline:
+    case tesla_clean::VehicleFailure::AttemptCap:
+    case tesla_clean::VehicleFailure::WakePollCap:
+        snprintf(out, size, "Tesla SoC request: no vehicle answer (%s, %s, %lu ms)", tesla_clean::vehicle_failure_name(d.failure), stage,
+            static_cast<unsigned long>(d.elapsed_ms)); break;
+    default: snprintf(out, size, "Tesla SoC request failed (%s, %s)", tesla_clean::vehicle_failure_name(d.failure), stage); break;
+    }
+}
+
 void TeslaVehicle::set_poll_outcome(Runtime *r, PollOutcome outcome, bool automatic)
 {
     r->poll_outcome.store(static_cast<uint8_t>(outcome));
@@ -1336,6 +1392,7 @@ void TeslaVehicle::request_soc(bool manual)
     if (!active_identity_matches(*captured)) {
         r->manual_poll_pending.store(false);
         if (manual) { post_event(EventType::Error, "SLAC identity changed before SoC action"); }
+        set_poll_diagnostics(r, POLL_FAILURE_NOT_ADMITTED);
         outcome(PollOutcome::Failed, automatic); return;
     }
 #endif
@@ -1344,6 +1401,7 @@ void TeslaVehicle::request_soc(bool manual)
         if (manual) {
             post_event(EventType::Error, "Connected vehicle MAC is not bound to this Tesla key");
         }
+        set_poll_diagnostics(r, POLL_FAILURE_NOT_BOUND);
         outcome(PollOutcome::Failed, automatic);
         r->next_poll_ms = millis() + r->poll_interval_seconds * 1000U;
         r->manual_poll_pending.store(false);
@@ -1354,6 +1412,7 @@ void TeslaVehicle::request_soc(bool manual)
     if (r->in_flight.request == 0) {
         if (check_worker_exhaustion()) { return; }
         post_event(EventType::Error, "Could not connect to current Tesla over BLE");
+        set_poll_diagnostics(r, POLL_FAILURE_CONNECT);
         outcome(PollOutcome::Failed, automatic);
         r->next_poll_ms = millis() + r->poll_interval_seconds * 1000U;
         r->manual_poll_pending.store(false);
@@ -1381,6 +1440,7 @@ void TeslaVehicle::request_soc(bool manual)
         if (manual) {
             post_event(EventType::Error, "Configured EV profile is not currently connected");
         }
+        set_poll_diagnostics(r, POLL_FAILURE_NOT_ADMITTED);
         outcome(PollOutcome::Failed, automatic);
         r->next_poll_ms = millis() + r->poll_interval_seconds * 1000U;
         r->manual_poll_pending.store(false);
@@ -1397,6 +1457,7 @@ void TeslaVehicle::request_soc(bool manual)
         // any publication filter: a retired link/session does not undo a
         // possibly exposed wake, and an unused reservation is released.
         r->policy.settle_wake(decision, result.wake_exposed, millis());
+        set_poll_diagnostics(r, static_cast<uint8_t>(result.diagnostics.failure), &result.diagnostics);
         if (result.generation != r->connection_generation.load() ||
             r->stop_requested.load() || !r->session.matches(request)) {
             // Link/session/identity retired: never published as a result, but the
@@ -1421,11 +1482,15 @@ void TeslaVehicle::request_soc(bool manual)
                     woken ? PollOutcome::WokenNoSoc : wake_sent ? PollOutcome::WakeSentNoSoc : PollOutcome::Failed, automatic);
             // A sleeping vehicle without wake permission is a normal automatic
             // outcome (poll_outcome), not an error banner.
+            // Classified instead of one generic text: the real terminal bound/reply
+            // and stage are reported (poll_failure/poll_stage carry the structure).
+            char classified[96];
+            soc_failure_text(result.diagnostics, classified, sizeof(classified));
             const char *failure = asleep ?
                 (manual ? "Tesla asleep; wake skipped, last wake less than 2 min ago; SoC not updated" : nullptr) :
                 woken ? "Tesla woke up but no SoC received in time; SoC not updated" :
                 wake_sent ? "Tesla wake sent but no SoC received in time; SoC not updated" :
-                "Tesla authenticated SoC request failed";
+                classified;
             if (failure) { post_event(EventType::Error, failure); }
         }
         r->in_flight_started_ms = 0;
@@ -1441,6 +1506,7 @@ void TeslaVehicle::request_soc(bool manual)
         r->in_flight = {};
         r->in_flight_started_ms = 0;
         post_event(EventType::Error, "Tesla SoC command refused; no request is in flight");
+        set_poll_diagnostics(r, POLL_FAILURE_REFUSED);
         outcome(PollOutcome::Failed, automatic);
         r->manual_poll_pending.store(false);
     }
@@ -2076,6 +2142,10 @@ void TeslaVehicle::publish_bluetooth_state()
 #endif
              (!r->ble_ready.load() && !r->storage_only) || r->manual_poll_pending.load() || r->forget_requested.load() ||
              r->command_outcome.forward_state() != TeslaBleCommandOutcome::Forward::Available)));
+        // Pairing (incl. approval hand-back) before SoC: a pairing never implies a SoC request.
+        const bool pairing = tesla->state.get("pairing_pending")->asBool() || (r && (r->pair_requested.load() || r->pair_approval_waiting.load()));
+        tesla->state.get("action_kind")->updateString(!tesla->state.get("action_busy")->asBool() ? "none" : pairing ? "pair" :
+            r && r->manual_poll_pending.load() ? "soc" : "other");
     }
 }
 
@@ -2146,6 +2216,11 @@ void TeslaVehicle::process_module_events()
                     tesla->state.get("paired")->updateBool(tesla->pairing_policy.paired());
                     tesla->state.get("pairing_pending")->updateBool(tesla->pairing_policy.pairing_pending());
                 }
+#if TESLA_BLE_MANUAL_VEHICLE_UI
+                // Accepted for the current identity; attributable only to a completed publication of it.
+                tesla->soc_origin = !r->profile_pending.load(std::memory_order_acquire) && tesla->published_index == r->configured_ev_index.load() ?
+                    tesla->published_origin : Tesla::SocOrigin{};
+#endif
                 tesla->state.get("last_soc")->updateFloat(event.soc);
                 // Receive time captured by the worker at acceptance; never re-read here,
                 // so queue delay or a later NTP sync/step cannot alter it (0 stays 0).
@@ -2208,6 +2283,13 @@ void TeslaVehicle::process_module_events()
                 tesla->state.get("key_presence")->updateString("present");
                 tesla->state.get("paired")->updateBool(tesla->pairing_policy.paired());
                 tesla->state.get("pairing_pending")->updateBool(tesla->pairing_policy.pairing_pending());
+#if TESLA_BLE_MANUAL_VEHICLE_UI
+                // New authenticated approval edge for this identity; the scheduler
+                // turns it into exactly one SoC request once the worker is free.
+                const auto approved = current_ev_identity();
+                ++tesla->pair_approved_edges;
+                tesla->pair_approved_identity = approved;
+#endif
             }
             r->pair_approval_waiting.store(false);
             publish_pairing_state();

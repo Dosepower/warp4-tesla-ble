@@ -53,6 +53,10 @@ static void soc_wake_flow(TeslaVehicle &m,const std::string &mode) {
  bool car_awake=false,advertising=true;uint32_t wake_at=0,awake_after_wake=0;bool never_wakes=false;
  bool drop_on_status=false,drop_on_wake_fragment=false,drop_after_wake=false,next_is_wake=false,unplug_on_charge=false;
  unsigned wake_fragments=0;bool pending_drop=false;
+ // SYNTHETIC model for the classified-failure path (live finding: a periodic poll
+ // failed with a generic text; the real vehicle cause is unknown): the Infotainment
+ // domain ignores every session request while info_silent is set.
+ bool info_silent=false;
  // Synthetic waking infotainment (documented in TeslaBLE v6.2.0 include/vehicle.h:158-163; the
  // real duration is unknown): infotainment session requests are ignored for info_boot_ms after
  // the first one following a wake. 0 = answers at once (all pre-existing scenarios).
@@ -69,6 +73,7 @@ static void soc_wake_flow(TeslaVehicle &m,const std::string &mode) {
   const auto s=decode(f);peer.address=r->routing_address;
   ++total_frames;if(run)++run->frames;
   if(s.hello){if(run)++run->hellos;
+   if(s.domain==Domain::Infotainment&&info_silent){if(run)++run->info_ignored;return;} // synthetic silent infotainment session
    if(s.domain==Domain::Infotainment&&info_boot_ms&&wake_at){if(!info_first)info_first=millis();
     if(millis()-info_first<info_boot_ms){if(run)++run->info_ignored;return;}}
    replies.push_back(peer.hello(s));if(hold_on_hello&&run){hold_on_hello=false;hold_replies=true;}return;}
@@ -146,7 +151,7 @@ static void soc_wake_flow(TeslaVehicle &m,const std::string &mode) {
  };
  unsigned auto_settle=0;
  std::function<void()> before_main;
- size_t quiet_runs=0;uint32_t pulse_at=0;
+ size_t quiet_runs=0;uint32_t pulse_at=0;TeslaBleRequestIdentity approval{};
  int perturb=0;uint32_t perturb_seq0=0,recv_seen[4]{};uint32_t shorten_at=0,lengthen_at=0;size_t scans_mark=0;uint32_t charge_at[5]{};
  auto main_pass=[&]{auto*worker=running_task;running_task=nullptr;m.loop();running_task=worker;};
  auto track_auto=[&]{ // Observe firmware-initiated operations (phase Polling) without influencing them.
@@ -295,6 +300,29 @@ static void soc_wake_flow(TeslaVehicle &m,const std::string &mode) {
    soc_expect(total_frames==mark_frames&&(state=="off"||state=="not_paired"),mode,"foreign EV profile polled");
    ev.index=0;ev.mac=A;++ev.generation;});            // the Tesla is plugged in again
   until(runs_done(2));                                 // S2: normal SoC, clock unsynchronized
+ } else if(mode=="soc-auto-identity-origin") { // live review: retained BLE SoC/time bound to its identity, A -> B -> A
+  rtc.base_seconds.store(1790000000);rtc.synced.store(true);
+  p->get("poll_interval")->updateUint(300);soc_expect(save_profile(),mode,"interval save rejected");
+  car_awake=true;
+  until(runs_done(1));                                 // O1: A measured over BLE
+  step([&]{soc_expect(std::isfinite(m.tesla->state.get("last_soc")->asFloat())&&m.tesla->state.get("last_update_unix")->asUint()>0&&
+    m.tesla->state.get("profile_ev_index")->asInt()==0,mode,"A sample published with its receive time");
+   ev.index=1;ev.mac=B;++ev.generation;mark_frames=total_frames; // profile B active, no B sample (shared SoC from another source)
+   explicit_scan(m,1);String e;const bool selected=m.select_profile(1,false,e);if(!selected)std::printf("SOC_ORIGIN select error=%s\n",e.c_str());
+   soc_expect(selected,mode,"user selection of profile B rejected");});
+  wait_ms(150000);
+  step([&]{std::printf("SOC_ORIGIN B profile=%d last_soc=%f unix=%u frames=%u\n",m.tesla->state.get("profile_ev_index")->asInt(),
+    double(m.tesla->state.get("last_soc")->asFloat()),m.tesla->state.get("last_update_unix")->asUint(),total_frames-mark_frames);std::fflush(stdout);
+   soc_expect(m.tesla->state.get("profile_ev_index")->asInt()==1,mode,"profile B published");
+   soc_expect(std::isnan(m.tesla->state.get("last_soc")->asFloat())&&m.tesla->state.get("last_update_unix")->asUint()==0,mode,
+    "A BLE value/receive time still published under profile B");
+   soc_expect(m.tesla->state.get("last_update")->asUptime()==runs[0].update&&ev.applied==runs[0].applied&&total_frames==mark_frames,mode,
+    "identity change re-dated the arrival mark, touched the shared SoC or contacted a vehicle");
+   ev.index=0;ev.mac=A;++ev.generation;});             // back to A: published again, retained value not re-shown as fresh
+  until([&]{return m.tesla->state.get("profile_ev_index")->asInt()==0;});
+  step([&]{soc_expect(std::isnan(m.tesla->state.get("last_soc")->asFloat())&&m.tesla->state.get("last_update_unix")->asUint()==0,mode,
+    "A -> B -> A re-showed the withdrawn value");});
+  until(runs_done(2));                                 // O2: A's plug-in request still runs (mark not faked) and is shown again
  } else if(mode=="soc-auto-interval") {  // B1: a saved interval change applies to the pending wait
   // Periodic minimum 300 s: every API write below it is rejected through the production validator
   // and nothing is persisted; 300 s itself is accepted.
@@ -354,6 +382,57 @@ static void soc_wake_flow(TeslaVehicle &m,const std::string &mode) {
   until(runs_done(2));                                 // V2 unsynced at reception, synced at dispatch
   step([&,arm]{arm(3);});
   until(runs_done(3));                                 // V3 authenticated but stale generation
+ } else if(mode=="soc-info-silent") {     // classified failure through the real path, then recovery
+  request([&]{car_awake=true;});                      // S1 SoC
+  request([&]{info_silent=true;});                    // S2 Infotainment never answers its session request
+  step([&]{const std::string shown=m.tesla->state.get("last_error")->asString().c_str();
+   soc_expect(shown.rfind("Tesla SoC request: session setup unanswered (info_auth",0)==0,mode,
+    "S2 last_error names the actual terminal bound/stage, not the generic 'authenticated SoC request failed'");
+   soc_expect(m.tesla->state.has("poll_failure")&&m.tesla->state.has("poll_stage"),mode,"structured poll_failure/poll_stage state published");
+   soc_expect(m.tesla->state.get("poll_failure")->asString()=="challenge_cap"&&
+    std::string(m.tesla->state.get("poll_stage")->asString().c_str()).rfind("info_auth",0)==0&&m.tesla->state.get("poll_vcsec_answered")->asBool()&&
+    !m.tesla->state.get("poll_info_answered")->asBool()&&m.tesla->state.get("poll_elapsed_ms")->asUint()>0,mode,
+    "structured classification published with the failed outcome");
+   std::printf("SOC_CLASSIFIED failure=%s stage=%s elapsed=%u attempts=%u timeouts=%u frames=%u\n",m.tesla->state.get("poll_failure")->asString().c_str(),
+    m.tesla->state.get("poll_stage")->asString().c_str(),m.tesla->state.get("poll_elapsed_ms")->asUint(),m.tesla->state.get("poll_attempts")->asUint(),
+    m.tesla->state.get("poll_timeouts")->asUint(),m.tesla->state.get("poll_frames")->asUint());});
+  request([&]{info_silent=false;});                   // S3 recovers
+ } else if(mode=="soc-auto-post-pair") {  // one automatic request after a NEW authenticated pairing, idle
+  rtc.base_seconds.store(1790000000);rtc.synced.store(true);
+  host_evse.set_charger_state(CHARGER_STATE_READY_TO_CHARGE);
+  p->get("poll_interval")->updateUint(300);soc_expect(save_profile(),mode,"interval save rejected");
+  car_awake=true;
+  until(runs_done(1));                                 // P1 plug-in request
+  step([&]{mark_frames=total_frames;scans_mark=scan_at.size();
+   // White-box precondition: the plug-in-time scheduler denial seen live before pairing.
+   m.tesla->state.get("auto_poll")->updateString("not_paired");});
+  wait_ms(200000);
+  step([&]{soc_expect(runs.size()==1&&total_frames==mark_frames&&scan_at.size()==scans_mark,mode,"idle: nothing before the approval edge");
+   soc_expect(m.tesla->state.get("auto_poll")->asString()=="not_paired",mode,"precondition kept while idle");
+   // Authenticated approval as the pairing worker publishes it (TeslaBleCommandOutcome::publish_approval
+   // with a request armed on the current session); main consumes it in the real Kind::PairApproved branch.
+   approval=r->session.arm(r->epoch,TeslaBleIdentity{ev.generation,ev.index,ev.mac},ev.index);
+   soc_expect(approval.request!=0,mode,"precondition: approval request armed on the connected current session");
+   r->command_outcome.publish_approval(approval);pulse_at=millis();main_pass();
+   soc_expect(m.tesla->state.get("paired")->asBool(),mode,"approval consumed by the production branch");});
+  until([&]{if(runs_done(2)())return true;                // exactly one post-pairing request
+   soc_expect(millis()-pulse_at<(TeslaBleDiscovery::SCAN_SECONDS+60)*1000,mode,"no automatic SoC request after the new authenticated pairing approval");
+   return false;});
+  step([&]{soc_expect(runs[1].automatic&&runs[1].committed-pulse_at<=(TeslaBleDiscovery::SCAN_SECONDS+5)*1000,mode,"post-pairing request promptly after the edge");
+   mark_frames=total_frames;scans_mark=scan_at.size();});
+  wait_ms(700000);                                     // idle: no periodic polling afterwards
+  step([&]{soc_expect(runs.size()==2&&total_frames==mark_frames&&scan_at.size()==scans_mark,mode,"post-pairing request is one-shot; no idle polling");
+   soc_expect(m.tesla->state.get("auto_poll")->asString()=="not_charging",mode,"idle state after the post-pairing request");
+   // Replayed approval of the already consumed request (repeated paired state): never a request.
+   r->command_outcome.publish_approval(approval);main_pass();
+   // Foreign identity (approval armed for a replaced plug-in session): rejected by the session gate.
+   soc_expect(!r->session.arm(r->epoch,TeslaBleIdentity{ev.generation+1,ev.index,ev.mac},ev.index).request,mode,"foreign identity cannot arm");});
+  wait_ms(200000);
+  step([&]{soc_expect(runs.size()==2&&total_frames==mark_frames&&scan_at.size()==scans_mark,mode,"replayed approval must not poll");
+   // Plain repeated paired state without a new edge (reload): nothing.
+   m.tesla->state.get("auto_poll")->updateString("not_paired");});
+  request([&]{});                                      // M1 manual success supersedes a stale not_paired
+  step([&]{soc_expect(m.tesla->state.get("auto_poll")->asString()!="not_paired",mode,"authenticated SoC withdraws stale not_paired");});
  } else if(mode=="soc-auto-charge-idle") { // plugged in, never charging: one plug-in request, then silence
   rtc.base_seconds.store(1790000000);rtc.synced.store(true);
   host_evse.set_charger_state(CHARGER_STATE_READY_TO_CHARGE);
@@ -675,6 +754,11 @@ static void soc_wake_flow(TeslaVehicle &m,const std::string &mode) {
   soc_expect(runs[0].charges==1&&runs[0].applied==0&&runs[0].update==0&&runs[0].update_unix==0&&runs[0].outcome!="ok",mode,"S1 result after unplug never published as new");
   expect_soc(runs[1],nullptr,"S2 SoC after replug");
   soc_expect(runs[1].update>0&&runs[1].update_unix==0,mode,"S2 unsynchronized clock: no invented wall-clock time");
+ } else if(mode=="soc-auto-identity-origin") {
+  soc_expect(runs.size()==2,mode,"A, then A again after B");
+  expect_soc(runs[0],nullptr,"O1 SoC");expect_soc(runs[1],&runs[0],"O2 SoC after A -> B -> A");
+  soc_expect(std::isfinite(runs[1].soc)&&runs[1].update>runs[0].update&&runs[1].update_unix>=runs[0].update_unix&&runs[1].update_unix>0,mode,
+   "new A sample shown with its own receive time");
  } else if(mode=="soc-auto-interval") {
   soc_expect(runs.size()==3,mode,"three automatic operations");
   for(const auto &x:runs)soc_expect(x.automatic&&x.wakes==0,mode,"firmware-initiated, awake, no wake");
@@ -700,6 +784,18 @@ static void soc_wake_flow(TeslaVehicle &m,const std::string &mode) {
   soc_expect(runs[1].update_unix==0,mode,"V2 unsynchronized at reception stays 0 even if synced before dispatch");
   soc_expect(runs[2].charges==1&&runs[2].applied==runs[1].applied&&runs[2].update==runs[1].update&&runs[2].update_unix==runs[1].update_unix&&
    runs[2].soc==runs[1].soc,mode,"V3 authenticated stale-generation event must publish nothing");
+ } else if(mode=="soc-info-silent") {
+  soc_expect(runs.size()==3,mode,"three manual requests");
+  expect_soc(runs[0],nullptr,"S1 SoC");
+  std::printf("SOC_CLASSIFIED S2 error='%s' ms=%u\n",runs[1].error.c_str(),runs[1].finished-runs[1].committed);
+  soc_expect(runs[1].outcome=="failed"&&runs[1].charges==0&&runs[1].wakes==0&&runs[1].info_ignored>=1,mode,"S2 failed, no wake, no charge query");
+  expect_no_new_soc(runs[1],runs[0],"S2 keeps S1's value and receive time");
+  soc_expect(runs[1].error.rfind("Tesla SoC request: session setup unanswered (info_auth",0)==0,mode,
+   "S2 reports the actual terminal bound/stage instead of the generic 'authenticated SoC request failed'");
+  expect_soc(runs[2],&runs[0],"S3 recovers with a SoC");
+ } else if(mode=="soc-auto-post-pair") {
+  soc_expect(runs.size()==3&&runs[0].automatic&&runs[1].automatic&&!runs[2].automatic,mode,"plug-in, one post-pairing, one manual");
+  expect_soc(runs[0],nullptr,"P1 SoC");expect_soc(runs[1],&runs[0],"post-pairing SoC");expect_soc(runs[2],&runs[1],"M1 SoC");
  } else if(mode=="soc-auto-charge-idle") {
   soc_expect(runs.size()==3&&runs[0].automatic&&!runs[1].automatic&&!runs[2].automatic,mode,"one plug-in request, two manual requests");
   soc_expect(runs[0].committed-auto_t0>=15000&&runs[0].committed-auto_t0<=20000,mode,"plug-in request after the settle delay");
