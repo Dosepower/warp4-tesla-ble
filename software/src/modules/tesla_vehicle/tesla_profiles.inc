@@ -2,6 +2,8 @@
 #if TESLA_BLE_MANUAL_VEHICLE_UI
 #include "tesla_ble_identifier.h"
 static_assert(EV_MAX_EVS == TeslaBleStorageAdapter::MAX_PROFILES, "Review profile namespace bound when EV_MAX_EVS changes");
+// Lowest selectable periodic SoC request interval (5 min); see validate_profiles().
+static constexpr uint32_t TESLA_POLL_INTERVAL_MIN_S = 300;
 static uint64_t profile_mac_value(const char *text)
 {
     if (!tesla_ble_valid_address(text)) { return 0; }
@@ -14,6 +16,8 @@ static uint64_t profile_mac_value(const char *text)
 
 Config TeslaVehicle::make_profile()
 {
+    // poll_interval schema keeps the legacy lower bound (30 s) so saved legacy files still
+    // restore; validate_profiles() enforces the periodic minimum TESLA_POLL_INTERVAL_MIN_S.
     return Config::Object({
         {"ev_index", Config::Int(-1, -1, EV_MAX_EVS - 1)},
         {"ev_mac", Config::Str("", 0, 17)},
@@ -125,6 +129,14 @@ String TeslaVehicle::validate_profiles(Config &update, ConfigSource source)
         if ((vin.length() && !tesla_ble_valid_vin(vin.c_str())) ||
             (address.length() && !tesla_ble_valid_address(address.c_str()))) {
             return checked_error_string("Valid 17-character VIN and BLE address required when provided");
+        }
+        // Periodic request interval minimum: API writes below it are rejected; a legacy
+        // saved value below it is normalized on restore (only this field; the file itself
+        // is rewritten only by a later regular save). Not a delay for plug-in, resume,
+        // manual or post-wake requests.
+        if (p->get("poll_interval")->asUint() < TESLA_POLL_INTERVAL_MIN_S) {
+            if (source != ConfigSource::File) { return checked_error_string("Request interval must be at least 5 minutes"); }
+            p->get("poll_interval")->updateUint(TESLA_POLL_INTERVAL_MIN_S);
         }
         // Never silently replace a local identity when an index is reused or
         // the VIN changes. Even disabled mappings must retain their binding.

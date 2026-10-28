@@ -48,7 +48,9 @@ static constexpr uint32_t AUTO_POLL_SELECT_TIMEOUT_MS = 15000;
 // Real charge start/resume: request after a short settle delay, but never
 // sooner than this gap after any finished SoC operation (manual or automatic).
 static constexpr uint32_t AUTO_POLL_CHARGE_START_DELAY_MS = 5000;
-static constexpr uint32_t AUTO_POLL_MIN_GAP_MS = 30000; // = smallest configurable interval
+// Deliberately not the periodic interval minimum (TESLA_POLL_INTERVAL_MIN_S): plug-in,
+// resume and post-wake requests are not periodic and keep this short gap.
+static constexpr uint32_t AUTO_POLL_MIN_GAP_MS = 30000;
 // Post-wake follow-up: measured from the end of the waking operation; equal to the
 // minimum gap, so it never crowds any other request.
 static constexpr uint32_t AUTO_POLL_POST_WAKE_DELAY_MS = AUTO_POLL_MIN_GAP_MS;

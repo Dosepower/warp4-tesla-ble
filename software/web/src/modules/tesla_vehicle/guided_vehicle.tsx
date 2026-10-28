@@ -14,8 +14,10 @@ import { teslaKeyStatus, teslaVehicleReady, teslaBluetoothReady } from "./action
 import { pairingOutcomeReason } from "./pairing_outcome";
 import { formatSocReceiveTime } from "./soc_time";
 
-// Firmware-validated range 30..3600 s (tesla_vehicle/profiles poll_interval).
-const POLL_INTERVALS = [30, 60, 120, 300, 600, 900, 1800, 3600];
+// Firmware-validated periodic range 300..3600 s (tesla_vehicle/profiles poll_interval);
+// legacy saved values below 300 s are normalized by the firmware and never offered again.
+const POLL_INTERVAL_MIN = 300;
+const POLL_INTERVALS = [300, 600, 900, 1800, 3600];
 
 type TeslaConfig = API.getType["tesla_vehicle/profiles"];
 type Profile = TeslaConfig["entries"][number];
@@ -678,7 +680,8 @@ export class TeslaVehicle extends ConfigComponent<"tesla_vehicle/profiles", {}, 
         const mainErrors = Array.from(new Set([...visibleErrors.filter(reason => !(followUp && (reason === outcome || reason === __("tesla_vehicle.status.outcome_woken_no_soc") ||
                 reason === __("tesla_vehicle.status.outcome_wake_sent_no_soc")))),
             autoFailure ? autoText : ''].filter(Boolean)));
-        const intervals: [string, string][] = (POLL_INTERVALS.indexOf(p.poll_interval) < 0 ? [...POLL_INTERVALS, p.poll_interval] : POLL_INTERVALS)
+        const shownInterval = Math.max(p.poll_interval, POLL_INTERVAL_MIN);
+        const intervals: [string, string][] = (POLL_INTERVALS.indexOf(shownInterval) < 0 ? [...POLL_INTERVALS, shownInterval] : POLL_INTERVALS)
             .map((s): [string, string] => [String(s), s < 60 ? s + ' s' : s % 60 ? s + ' s' : (s / 60) + ' min']);
         const settingsDisabled = state.command_busy || this.saving || this.command_in_progress || this.searchBusy() || !!state.tesla_state?.action_busy;
         // Button labels while busy: explicit action step first, then backend/firmware activity.
@@ -716,7 +719,7 @@ export class TeslaVehicle extends ConfigComponent<"tesla_vehicle/profiles", {}, 
                 <FormRow><Button type="button" className="w-100" variant="primary" disabled={!!pollReason} onClick={() => this.command('poll')}>{pollLabel}</Button></FormRow>
                 {reasonAt(this.errorText(pollReason) === pairReasonShown ? '' : pollReason, !!refreshing)}
                 <FormRow label={__("tesla_vehicle.content.poll_interval")} help={__("tesla_vehicle.content.poll_interval_help")}>
-                    <InputSelect items={intervals} value={String(p.poll_interval)} disabled={settingsDisabled} onValue={value => this.setProfile({poll_interval: parseInt(value)})} />
+                    <InputSelect items={intervals} value={String(shownInterval)} disabled={settingsDisabled} onValue={value => this.setProfile({poll_interval: parseInt(value)})} />
                 </FormRow>
                 {followUp ? <div class="form-text mb-2" role="status">{outcomeCode === 'woken_no_soc' ? __("tesla_vehicle.status.after_wake_woken") : __("tesla_vehicle.status.after_wake_sent")}</div> : undefined}
             </Fragment> : undefined}
@@ -725,16 +728,17 @@ export class TeslaVehicle extends ConfigComponent<"tesla_vehicle/profiles", {}, 
             {mainErrors.length ? <Alert variant="danger">{mainErrors.map(message => <div key={message}>{message}</div>)}</Alert> : undefined}
 
             <h3 class="mt-3">{__("tesla_vehicle.content.settings")}</h3>
-            <FormRow labelColClasses="d-none" contentColClasses="col-12"><Button type="button" variant="primary" className="w-100" aria-expanded={state.settings_open} aria-controls="tesla_vehicle_settings" onClick={() => this.setState({settings_open: !state.settings_open})}>{state.settings_open ? __("tesla_vehicle.content.hide_settings") : __("tesla_vehicle.content.show_settings")}</Button></FormRow>
+            <FormRow><Button type="button" variant="primary" className="w-100" aria-expanded={state.settings_open} aria-controls="tesla_vehicle_settings" onClick={() => this.setState({settings_open: !state.settings_open})}>{state.settings_open ? __("tesla_vehicle.content.hide_settings") : __("tesla_vehicle.content.show_settings")}</Button></FormRow>
             {state.settings_open ? <div id="tesla_vehicle_settings">
                 {status.paired ? <FormRow><Button type="button" variant="danger" className="w-100" disabled={state.command_busy || !this.deleteAllowed('unpair')} onClick={() => this.command('unpair')}>{__("tesla_vehicle.content.forget_key")}</Button></FormRow> : undefined}
                 {assigned ? <FormRow><Button type="button" variant="danger" className="w-100" disabled={state.command_busy || !this.idle() || this.configurationDirty() || !!this.resetReason()} onClick={this.resetBinding}>{__("tesla_vehicle.content.edit_binding")}</Button></FormRow> : undefined}
-                {assigned && resetReason && shownReasons.indexOf(resetReason) < 0 && (!state.edit_binding || resetReason !== setupReason) ? <div class="form-text mb-2" role="status">{resetReason}</div> : undefined}
+                {/* Paired: the disabled button and its confirmation gate suffice; no permanent gray unpair_first text. */}
+                {assigned && resetReason && resetReason !== __("tesla_vehicle.content.unpair_first") && shownReasons.indexOf(resetReason) < 0 && (!state.edit_binding || resetReason !== setupReason) ? <div class="form-text mb-2" role="status">{resetReason}</div> : undefined}
                 {!status.paired && (status.key_presence === 'present' || status.key_presence === 'cleanup') ? <FormRow><Button type="button" variant="outline-danger" className="w-100" disabled={state.command_busy || !this.deleteAllowed('cleanup')} onClick={() => this.command('cleanup')}>{__("tesla_vehicle.content.cleanup_key")}</Button></FormRow> : undefined}
             </div> : undefined}
 
             <h3 class="mt-3">{__("tesla_vehicle.content.details")}</h3>
-            <FormRow labelColClasses="d-none" contentColClasses="col-12"><Button type="button" variant="primary" className="w-100" aria-expanded={state.details_open} aria-controls="tesla_vehicle_details" onClick={() => this.setState({details_open: !state.details_open})}>{state.details_open ? __("tesla_vehicle.content.hide_details") : __("tesla_vehicle.content.show_details")}</Button></FormRow>
+            <FormRow><Button type="button" variant="primary" className="w-100" aria-expanded={state.details_open} aria-controls="tesla_vehicle_details" onClick={() => this.setState({details_open: !state.details_open})}>{state.details_open ? __("tesla_vehicle.content.hide_details") : __("tesla_vehicle.content.show_details")}</Button></FormRow>
             {state.details_open ? <div id="tesla_vehicle_details">
                 <FormRow label={__("tesla_vehicle.content.vin")}><InputText readonly value={p.vin || '–'} /></FormRow>
                 <FormRow label={__("tesla_vehicle.content.ble_address")}><InputText readonly value={p.ble_address || '–'} /></FormRow>

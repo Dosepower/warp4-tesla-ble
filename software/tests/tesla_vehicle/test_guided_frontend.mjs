@@ -52,7 +52,7 @@ assert(!nodes().some(n=>n.type==='summary'||n.type==='details'),'Details must us
 assert(nodes().some(n=>n.type==='h3'&&n.props.children==='tesla_vehicle.content.details'));
 assert.equal(findButton('show_details').props.className,'w-100');
 assert.equal(findButton('show_details').props.variant,'primary');
-assert(nodes().some(n=>n.type==='FormRow'&&walk(n).some(c=>c.type==='Button'&&c.props.children==='tesla_vehicle.content.show_details')&&n.props.contentColClasses==='col-12'&&n.props.labelColClasses==='d-none'),'Details toggle spans the whole page, not the 8-column input area');
+assert(nodes().some(n=>n.type==='FormRow'&&walk(n).some(c=>c.type==='Button'&&c.props.children==='tesla_vehicle.content.show_details')&&n.props.contentColClasses===undefined&&n.props.labelColClasses===undefined),'Details toggle sits in the right form column (like the red actions), not full-width over the label column');
 assert(!nodes().some(n=>n.props.label==='tesla_vehicle.content.ble_address'),'Details default collapsed');
 findButton('show_details').props.onClick();
 assert(findButton('hide_details'));
@@ -298,23 +298,50 @@ normal();f.values['tesla_vehicle/state']={profile_ev_index:0,key_presence:'prese
  assert.equal(nodes().filter(n=>n.type==='Switch').length,0,'No wake switch: automatic wake is coupled to the firmware request contexts');
  const interval=()=>nodes().find(n=>n.type==='InputSelect'&&n.props.items?.some(i=>i[0]==='3600'));
  assert(interval(),'Interval selector visible');assert.equal(interval().props.value,'300');
- assert.equal(JSON.stringify(interval().props.items.map(i=>i[0])),JSON.stringify(['30','60','120','300','600','900','1800','3600']));
- assert(interval().props.items.find(i=>i[0]==='300')[1]==='5 min'&&interval().props.items.find(i=>i[0]==='30')[1]==='30 s','Interval shown with unit');
+ assert.equal(JSON.stringify(interval().props.items.map(i=>i[0])),JSON.stringify(['300','600','900','1800','3600']),'5 min is the lowest selectable interval; no 30 s/1 min/2 min');
+ assert.equal(JSON.stringify(interval().props.items.map(i=>i[1])),JSON.stringify(['5 min','10 min','15 min','30 min','60 min']),'Interval shown with unit');
  assert(!nodes().some(n=>n.type==='InputNumber'));
  findButton('show_details').props.onClick();assert(nodes().some(n=>n.props.label==='tesla_vehicle.status.auto_poll'&&walk(n).some(c=>c.props?.value==='tesla_vehicle.status.auto_poll_off')),'Background status under Diagnose');findButton('hide_details').props.onClick();
  const before=f.calls.length;
-  interval().props.onValue('60');
+  interval().props.onValue('600');
  assert.equal(f.calls.length,before,'Changing settings alone sends nothing');
  assert(page.dirty,'Settings mark the form dirty until saved');
  await page.sendSave('tesla_vehicle/profiles',{entries:page.state.entries});
  const saved=f.calls.at(-1);assert.equal(saved.topic,'tesla_vehicle/profiles_update');
- const entry=saved.payload.entries.find(e=>e.ev_index===0);assert.equal(entry.poll_interval,60);assert.equal(entry.wake_once,false,'Legacy wake_once carried unchanged, never rewritten by the UI');
+ const entry=saved.payload.entries.find(e=>e.ev_index===0);assert.equal(entry.poll_interval,600);assert.equal(entry.wake_once,false,'Legacy wake_once carried unchanged, never rewritten by the UI');
  assert.equal(f.calls.length,before+1,'Exactly one persistent profile save, no radio action');
  page.state.entries=structuredClone(f.values['tesla_vehicle/profiles'].entries);page.setDirty(false);
  // Unlisted but firmware-valid value stays representable.
  page.state.entries[0].poll_interval=301;assert(interval().props.items.some(i=>i[0]==='301'&&i[1]==='301 s'));
+ // Legacy positive values below 300 s are never offered again (firmware normalizes them to 300 s on restore).
+ for(const legacy of [30,60,120,299]){page.state.entries[0].poll_interval=legacy;
+  assert(!interval().props.items.some(i=>Number(i[0])<300),'legacy '+legacy+' s not selectable again');
+  assert.equal(interval().props.value,'300','legacy '+legacy+' s shown as the effective 5 min minimum');}
  page.state.entries=structuredClone(f.values['tesla_vehicle/profiles'].entries);
  console.log('GUIDED_POLL_SETTINGS_PASS');
+}
+// Approved layout (tesla-ui-buttonbreite-v2): blue Einstellungen/Diagnose toggles share the right form
+// column with the red Entkoppeln and VIN actions; colors stay primary/danger; no permanent gray unpair text.
+{
+ const rowOf=k=>nodes().find(n=>n.type==='FormRow'&&walk(n).some(c=>c.type==='Button'&&label(c)===`tesla_vehicle.content.${k}`));
+ page.state.entries[0].ble_address='01:02:03:04:05:06';page.state.entries[0].discovery_revision=2;
+ f.values['tesla_vehicle/state']={profile_ev_index:0,key_presence:'present',key_present:true,paired:true};event('tesla_vehicle/state');
+ page.state.settings_open=true;page.state.details_open=true;
+ for(const k of ['hide_settings','hide_details','forget_key','edit_binding']){
+  const row=rowOf(k);assert(row,k+' row rendered');
+  assert.equal(row.props.labelColClasses,undefined,k+': label column kept, no full-width over the label column');
+  assert.equal(row.props.contentColClasses,undefined,k+': same right form column as the red actions');
+  const b=walk(row).find(c=>c.type==='Button');assert.equal(b.props.className,'w-100',k+' fills exactly its form column');
+  assert(!String(b.props.variant).startsWith('outline'),k+': no outline variant');
+ }
+ assert.equal(findButton('hide_settings').props.variant,'primary');assert.equal(findButton('hide_details').props.variant,'primary');
+ assert.equal(findButton('forget_key').props.variant,'danger');assert.equal(findButton('edit_binding').props.variant,'danger');
+ assert(findButton('edit_binding').props.disabled,'paired: VIN reset stays disabled (greyed-out danger)');
+ assert(!nodes().some(n=>n.props?.children==='tesla_vehicle.content.unpair_first'),'no permanent gray unpair_first text under the VIN action');
+ const count=f.calls.length;await findButton('edit_binding').props.onClick();assert.equal(f.calls.length,count,'paired reset gate kept');
+ page.state.settings_open=false;page.state.details_open=false;
+ page.state.entries=structuredClone(f.values['tesla_vehicle/profiles'].entries);
+ console.log('GUIDED_BUTTON_COLUMN_PASS');
 }
 assert(button('forget_key'));
 assert(!walk(nodes().find(n=>n.props.id==='tesla_vehicle_config_form')).some(n=>n.props.children==='tesla_vehicle.content.forget_key'));
@@ -378,7 +405,8 @@ assert.equal(JSON.stringify(page.state.entries[1]),JSON.stringify(B));assert(fin
 for(const presence of ['present','unknown','cleanup']){
  normal();page.state.details_open=true;f.values['tesla_vehicle/state']={profile_ev_index:0,key_presence:presence,key_present:presence==='present',paired:presence==='present'};event('tesla_vehicle/state');
  assert((openSettings(),findButton('edit_binding')).props.disabled);count=f.calls.length;await (openSettings(),findButton('edit_binding')).props.onClick();assert.equal(f.calls.length,count);
- assert(nodes().some(n=>n.props.children===(presence==='present'?'tesla_vehicle.content.unpair_first':presence==='cleanup'?'tesla_vehicle.status.cleanup_required':'tesla_vehicle.status.key_unknown')));
+ if(presence==='present')assert(!nodes().some(n=>n.props.children==='tesla_vehicle.content.unpair_first'),'paired: gate kept, permanent gray unpair_first text removed');
+ else assert(nodes().some(n=>n.props.children===(presence==='cleanup'?'tesla_vehicle.status.cleanup_required':'tesla_vehicle.status.key_unknown')));
  const before=page.profile().vin;page.setProfile({vin:'5YJ3E1EA7KF000009'});assert.equal(page.profile().vin,before);
 }
 for(const mutate of [()=>{page.selectProfile('1');page.selectProfile('0');},()=>{f.values['tesla_vehicle/guidance'].revision++;event('tesla_vehicle/guidance');},()=>{f.values['tesla_vehicle/state'].paired=true;event('tesla_vehicle/state');}]){

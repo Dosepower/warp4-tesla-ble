@@ -253,7 +253,7 @@ static void soc_wake_flow(TeslaVehicle &m,const std::string &mode) {
   request([&]{car_awake=true;});
  } else if(mode=="soc-auto") {           // autonomous background polling, no browser/API
   rtc.base_seconds.store(1790000000);rtc.synced.store(true);
-  p->get("poll_interval")->updateUint(60);soc_expect(save_profile(),mode,"interval save rejected");
+  p->get("poll_interval")->updateUint(300);soc_expect(save_profile(),mode,"interval save rejected"); // lowest selectable interval
   car_awake=true;
   until(runs_done(2));                                 // A1, A2: awake, no wake
   step([&]{sleep_again();});
@@ -263,9 +263,9 @@ static void soc_wake_flow(TeslaVehicle &m,const std::string &mode) {
   until([&]{if(auto_run||m.tesla->auto_poll.phase!=Phase::Idle||r->manual_poll_pending.load())return false;
    return save_profile();});                           // unrelated profile save keeps wake_once=false untouched
   step([&]{sleep_again();});
-  until(runs_done(4));                                 // A4: asleep, 60 s after the wake -> spaced, no wake
+  until(runs_done(4));                                 // A4: asleep, 300 s after A3's wake (> spacing) -> wakes again
   step([&]{sleep_again();});
-  until(runs_done(5));                                 // A5: asleep, >= spacing after A3's wake -> wakes again
+  until(runs_done(5));                                 // A5: asleep, >= spacing after A4's wake -> wakes again
   step([&]{sleep_again();awake_after_wake=0;});
   until([&]{return auto_run&&runs.size()==6&&run&&run->hellos>0;}); // A6 in flight
   step([&]{ // explicit actions while the background operation owns the worker
@@ -274,13 +274,13 @@ static void soc_wake_flow(TeslaVehicle &m,const std::string &mode) {
    ++request_id;soc_expect(!guided("prepare_poll").empty(),mode,"guided preparation accepted during automatic poll");
    auto &s=m.tesla->scan_command;s.get("vin")->updateString("5YJ3E1EA7KF000001");s.get("ev_index")->updateInt(0);s.get("ev_mac")->updateString("11:22:33:44:55:00");
    error.clear();api.commands.at("tesla_vehicle/scan")(0,error);soc_expect(error.length()>0,mode,"scan accepted during automatic poll");});
-  until(runs_done(6));                                 // A6: 60 s after A5's wake -> spaced, no wake
+  until(runs_done(6));                                 // A6: 300 s after A5's wake -> wakes again (periodic never hits the spacing)
   step([&]{unplug();mark_frames=total_frames;});
   wait_ms(200000);
   step([&]{soc_expect(total_frames==mark_frames&&runs.size()==6,mode,"vehicle contact after unplug");
    soc_expect(m.tesla->state.get("auto_poll")->asString()=="off",mode,"scheduler not off after unplug");});
  } else if(mode=="soc-auto-stop") {      // not found, unplug mid-operation, profile switch, replug, unsynced clock
-  p->get("poll_interval")->updateUint(60);soc_expect(save_profile(),mode,"interval save rejected");
+  p->get("poll_interval")->updateUint(300);soc_expect(save_profile(),mode,"interval save rejected");
   car_awake=true;advertising=false;
   // The not-found cycle runs before any worker exists (see the pre-worker loop below).
   until(runs_done(1));                                 // S1: unplugged while the SoC answer is in flight
@@ -296,18 +296,47 @@ static void soc_wake_flow(TeslaVehicle &m,const std::string &mode) {
    ev.index=0;ev.mac=A;++ev.generation;});            // the Tesla is plugged in again
   until(runs_done(2));                                 // S2: normal SoC, clock unsynchronized
  } else if(mode=="soc-auto-interval") {  // B1: a saved interval change applies to the pending wait
+  // Periodic minimum 300 s: every API write below it is rejected through the production validator
+  // and nothing is persisted; 300 s itself is accepted.
+  {
+   const size_t writes=api.written_configs.count("tesla_vehicle/profiles");
+   for(const uint32_t below:{30u,60u,120u,299u}){p->get("poll_interval")->updateUint(below);
+    soc_expect(!save_profile(),mode,"API interval below 300 s accepted");
+    soc_expect(api.written_configs.count("tesla_vehicle/profiles")==writes,mode,"rejected interval persisted");}
+   p->get("poll_interval")->updateUint(300);soc_expect(save_profile(),mode,"300 s interval rejected");
+   // Legacy saved values below 300 s still restore (no legacy block, no data loss) and are
+   // normalized to the effective 300 s minimum; every other field stays unchanged.
+   // The host Config clone shares array-element children, so the probe runs the production
+   // File (restore) validation on the loaded store itself, as the multi-profile restore test does.
+   std::map<std::string,String> texts;std::map<std::string,uint32_t> nums;
+   for(const char *k:{"ev_mac","vin","ble_address"})texts[k]=p->get(k)->asString();
+   for(const char *k:{"ble_address_type","discovery_revision"})nums[k]=p->get(k)->asUint();
+   const int ev_index=p->get("ev_index")->asInt();const bool enabled=p->get("enable")->asBool(),wake_once=p->get("wake_once")->asBool();
+   for(const uint32_t legacy:{30u,60u,120u,299u,300u,301u,3600u}){
+    p->get("poll_interval")->updateUint(legacy);
+    p->get("wake_once")->updateBool(legacy==30u); // legacy flag carried unchanged
+    soc_expect(m.validate_profiles(m.tesla->profiles,ConfigSource::File).length()==0,mode,"legacy interval restore rejected");
+    soc_expect(p->get("poll_interval")->asUint()==(legacy<300u?300u:legacy),mode,"legacy interval not normalized to the 300 s minimum");
+    for(const char *k:{"ev_mac","vin","ble_address"})soc_expect(p->get(k)->asString()==texts[k],mode,"restore changed another field");
+    for(const char *k:{"ble_address_type","discovery_revision"})soc_expect(p->get(k)->asUint()==nums[k],mode,"restore changed another field");
+    soc_expect(p->get("ev_index")->asInt()==ev_index&&p->get("enable")->asBool()==enabled&&
+     p->get("wake_once")->asBool()==(legacy==30u),mode,"restore changed another field");
+    soc_expect(!m.tesla->legacy_blocked,mode,"legacy interval blocked the profile store");
+   }
+   p->get("wake_once")->updateBool(wake_once);p->get("poll_interval")->updateUint(300);
+  }
   p->get("poll_interval")->updateUint(3600);soc_expect(save_profile(),mode,"interval save rejected");
   car_awake=true;
   until(runs_done(1));                                 // I1 at the plug-in settle delay
-  step([&]{p->get("poll_interval")->updateUint(30);soc_expect(save_profile(),mode,"shortened interval rejected");shorten_at=millis();});
-  until(runs_done(2));                                 // I2 30 s after I1, not after the old 3600 s
+  step([&]{p->get("poll_interval")->updateUint(300);soc_expect(save_profile(),mode,"shortened interval rejected");shorten_at=millis();});
+  until(runs_done(2));                                 // I2 300 s after I1, not after the old 3600 s
   wait_ms(10000);
   step([&]{p->get("poll_interval")->updateUint(600);soc_expect(save_profile(),mode,"lengthened interval rejected");
    lengthen_at=millis();scans_mark=scan_at.size();});
-  until(runs_done(3));                                 // I3 600 s after I2, not after the old 30 s
+  until(runs_done(3));                                 // I3 600 s after I2, not after the old 300 s
  } else if(mode=="soc-auto-recvtime") {  // B2: receive time fixed by the worker, not at delayed dispatch
   rtc.base_seconds.store(1790000000);rtc.synced.store(true);
-  p->get("poll_interval")->updateUint(30);soc_expect(save_profile(),mode,"interval save rejected");
+  p->get("poll_interval")->updateUint(300);soc_expect(save_profile(),mode,"interval save rejected");
   car_awake=true;
   // Once the worker has posted its terminal outcome (accepted SoC event queued, not yet
   // dispatched): delay main dispatch by 2 s and change wall-clock/identity in between.
@@ -328,12 +357,12 @@ static void soc_wake_flow(TeslaVehicle &m,const std::string &mode) {
  } else if(mode=="soc-auto-charge-idle") { // plugged in, never charging: one plug-in request, then silence
   rtc.base_seconds.store(1790000000);rtc.synced.store(true);
   host_evse.set_charger_state(CHARGER_STATE_READY_TO_CHARGE);
-  p->get("poll_interval")->updateUint(30);              // stored legacy wake_once stays false
+  p->get("poll_interval")->updateUint(300);             // stored legacy wake_once stays false
   soc_expect(save_profile(),mode,"interval save rejected");
   sleep_again();awake_after_wake=0;                    // asleep at plug-in: the plug-in request may wake
   until(runs_done(1));                                 // P1: plug-in request (one permitted wake)
   step([&]{sleep_again();mark_frames=total_frames;scans_mark=scan_at.size();});
-  wait_ms(300000);                                     // ten intervals while plugged in, not charging
+  wait_ms(600000);                                     // two intervals while plugged in, not charging
   step([&]{soc_expect(total_frames==mark_frames&&scan_at.size()==scans_mark&&runs.size()==1,mode,
     "idle: no automatic request, scan or wake after the plug-in request");
    soc_expect(m.tesla->state.get("auto_poll")->asString()=="not_charging",mode,"idle shown as not charging");
@@ -348,7 +377,7 @@ static void soc_wake_flow(TeslaVehicle &m,const std::string &mode) {
  } else if(mode=="soc-auto-charge-cycle") { // charge start, periodic, PV pause, resume, end, replug
   rtc.base_seconds.store(1790000000);rtc.synced.store(true);
   host_evse.set_charger_state(CHARGER_STATE_READY_TO_CHARGE); // plugged in, vehicle not requesting
-  p->get("poll_interval")->updateUint(60);soc_expect(save_profile(),mode,"interval save rejected");
+  p->get("poll_interval")->updateUint(300);soc_expect(save_profile(),mode,"interval save rejected");
   car_awake=true;
   until(runs_done(1));                                 // C1 plug-in request
   wait_ms(200000);
@@ -520,7 +549,7 @@ static void soc_wake_flow(TeslaVehicle &m,const std::string &mode) {
  } else { assert(false && "unknown soc mode"); }
  if(mode=="soc-auto-initial-retry") { // bounded plug-in retries, then silence until charging starts
   host_evse.set_charger_state(CHARGER_STATE_READY_TO_CHARGE);advertising=false;
-  p->get("poll_interval")->updateUint(60);soc_expect(save_profile(),mode,"interval save rejected");
+  p->get("poll_interval")->updateUint(300);soc_expect(save_profile(),mode,"interval save rejected");
   auto_t0=millis();
   auto run_main=[&](uint32_t ms){const uint32_t end=millis()+ms;while(int32_t(millis()-end)<0){clock_ms.fetch_add(20);m.loop();serve_auto();}};
   run_main(900000);
@@ -531,9 +560,9 @@ static void soc_wake_flow(TeslaVehicle &m,const std::string &mode) {
   soc_expect(scan_at[1]-scan_at[0]>=30000&&scan_at[1]-scan_at[0]<=31000,mode,"first backoff 30 s");
   soc_expect(scan_at[2]-scan_at[1]>=120000&&scan_at[2]-scan_at[1]<=121000,mode,"second backoff 120 s");
   host_evse.set_charger_state(CHARGER_STATE_CHARGING);const uint32_t charge_on=millis();
-  run_main(100000);                                     // charge start + one interval
-  soc_expect(scan_at.size()==5&&scan_at[3]-charge_on>=5000&&scan_at[3]-charge_on<=6000&&scan_at[4]-scan_at[3]>=60000&&scan_at[4]-scan_at[3]<=61000,
-   mode,"charging: prompt request at charge start, then the configured interval");
+  run_main(310000);                                     // charge start + one interval
+  soc_expect(scan_at.size()==5&&scan_at[3]-charge_on>=5000&&scan_at[3]-charge_on<=6000&&scan_at[4]-scan_at[3]>=300000&&scan_at[4]-scan_at[3]<=301000,
+   mode,"charging: prompt request at charge start (not delayed by the 300 s minimum), then the configured interval");
   soc_expect(total_frames==0&&runs.empty()&&!m.tesla->runtime_owner.get(),mode,"not found: no vehicle contact, no worker");
   assert_charging_untouched();std::printf("SOC_WAKE_PASS %s\n",mode.c_str());return;
  }
@@ -625,21 +654,19 @@ static void soc_wake_flow(TeslaVehicle &m,const std::string &mode) {
   for(const auto &x:runs)soc_expect(x.automatic&&x.outcome_automatic,mode,"all operations firmware-initiated");
   soc_expect(runs[0].committed-auto_t0>=15000&&runs[0].committed-auto_t0<=15000+5000,mode,"first automatic poll after the plug-in settle delay");
   for(int i=1;i<6;++i){const auto gap=runs[i].committed-runs[i-1].finished;
-   soc_expect(gap>=60000&&gap<=60000+5000,mode,"configured 60 s profile interval between operations");}
+   soc_expect(gap>=300000&&gap<=300000+5000,mode,"configured 300 s profile interval between operations");}
   expect_soc(runs[0],nullptr,"A1 SoC");soc_expect(runs[0].wakes==0,mode,"A1 awake: no wake");
   soc_expect(runs[0].update_unix>=1790000000+runs[0].committed/1000&&runs[0].update_unix<=1790000000+runs[0].finished/1000,mode,"A1 receive time is the synchronized wall clock at reception");
   expect_soc(runs[1],&runs[0],"A2 SoC");soc_expect(runs[1].update_unix>runs[0].update_unix,mode,"A2 newer receive time");
   const auto &saved=api.written_configs.at("tesla_vehicle/profiles");
   soc_expect(!const_cast<Config&>(saved).get("entries")->get(size_t{0})->get("wake_once")->asBool()&&
-   const_cast<Config&>(saved).get("entries")->get(size_t{0})->get("poll_interval")->asUint()==60,mode,"interval persisted, legacy wake_once left false (no rewrite)");
+   const_cast<Config&>(saved).get("entries")->get(size_t{0})->get("poll_interval")->asUint()==300,mode,"interval persisted, legacy wake_once left false (no rewrite)");
   soc_expect(runs[2].wakes==1,mode,"A3 periodic request while charging wakes despite stored wake_once=false");
   expect_soc(runs[2],&runs[1],"A3 SoC after wake");
-  soc_expect(runs[3].wakes==0&&runs[3].outcome=="asleep_wake_limited"&&runs[3].error.empty(),mode,"A4 spaced: no wake, no error banner");
-  expect_no_new_soc(runs[3],runs[2],"A4 old SoC not new");
-  soc_expect(runs[4].wakes==1,mode,"A5 repeated on-demand wake in the same plug-in session after the spacing");
-  expect_soc(runs[4],&runs[2],"A5 SoC");
-  soc_expect(runs[5].wakes==0&&runs[5].outcome=="asleep_wake_limited",mode,"A6 spaced: no wake");
-  expect_no_new_soc(runs[5],runs[4],"A6 old SoC not new");
+  // The 300 s minimum exceeds the unchanged 120 s wake spacing: each periodic request while
+  // charging may wake once again (spacing itself is covered by the manual soc-* modes).
+  for(int i=3;i<6;++i){soc_expect(runs[i].wakes==1&&runs[i].error.empty(),mode,"A4-A6 periodic wake after the spacing, no error banner");
+   expect_soc(runs[i],&runs[i-1],"A4-A6 SoC after wake");}
   for(const auto &x:runs)soc_expect(x.wakes+x.wake_partial<=1,mode,"at most one wake per operation");
  } else if(mode=="soc-auto-stop") {
   soc_expect(runs.size()==2&&not_found_at!=0,mode,"not-found cycle, then two automatic operations");
@@ -655,8 +682,8 @@ static void soc_wake_flow(TeslaVehicle &m,const std::string &mode) {
   soc_expect(runs[0].committed-auto_t0>=15000&&runs[0].committed-auto_t0<=20000,mode,"first cycle keeps the plug-in settle delay");
   const auto gap1=runs[1].committed-runs[0].finished,gap2=runs[2].committed-runs[1].finished;
   std::printf("SOC_INTERVAL gap_after_shorten=%u gap_after_lengthen=%u scans=%zu\n",gap1,gap2,scan_at.size());
-  soc_expect(shorten_at>=runs[0].finished&&gap1>=30000&&gap1<=30000+5000,mode,"shortened 3600->30 s must apply without waiting for the old 3600 s");
-  soc_expect(lengthen_at>runs[1].finished&&gap2>=600000&&gap2<=600000+5000,mode,"lengthened 30->600 s must hold the new interval");
+  soc_expect(shorten_at>=runs[0].finished&&gap1>=300000&&gap1<=300000+5000,mode,"shortened 3600->300 s must apply without waiting for the old 3600 s");
+  soc_expect(lengthen_at>runs[1].finished&&gap2>=600000&&gap2<=600000+5000,mode,"lengthened 300->600 s must hold the new interval");
   for(size_t i=scans_mark;i<scan_at.size();++i)
    soc_expect(scan_at[i]>=runs[1].finished+600000-1000,mode,"no radio scan before the lengthened interval is due");
   soc_expect(scan_at.size()==3,mode,"exactly one scan per cycle, no extra radio contact");
@@ -689,11 +716,11 @@ static void soc_wake_flow(TeslaVehicle &m,const std::string &mode) {
   soc_expect(runs[0].committed-auto_t0>=15000&&runs[0].committed-auto_t0<=20000,mode,"C1 plug-in request after the settle delay");
   soc_expect(runs[1].committed-charge_at[0]>=5000&&runs[1].committed-charge_at[0]<=10000,mode,"C2 prompt at the real charge start");
   for(int i=2;i<4;++i){const auto gap=runs[i].committed-runs[i-1].finished;
-   soc_expect(gap>=60000&&gap<=65000,mode,"configured 60 s interval during active charging");}
+   soc_expect(gap>=300000&&gap<=305000,mode,"configured 300 s interval during active charging");}
   soc_expect(charge_at[1]>runs[3].committed&&charge_at[1]<runs[3].finished,mode,"C4 paused while in flight and drained");
   soc_expect(runs[4].committed-charge_at[2]>=5000&&runs[4].committed-charge_at[2]<=10000,mode,"C5 prompt at resume");
   const auto c6=runs[5].committed-runs[4].finished;
-  soc_expect(charge_at[3]>runs[4].finished&&c6>=30000&&c6<=35000,mode,"C6 resume before the 60 s interval, after the 30 s minimum gap");
+  soc_expect(charge_at[3]>runs[4].finished&&c6>=30000&&c6<=35000,mode,"C6 resume before the 300 s interval, after the unchanged 30 s minimum gap");
   soc_expect(runs[6].committed-charge_at[4]>=15000&&runs[6].committed-charge_at[4]<=20000,mode,"C7 replug: new plug-in request");
  } else if(mode=="soc-auto-charge-resume") {
   soc_expect(runs.size()==13,mode,"thirteen automatic operations");
