@@ -171,6 +171,21 @@ await button('read_soc').props.onClick();assert.deepEqual(f.calls.slice(-2).map(
 assert(!nodes().some(n=>String(n.props.value).includes('null %')));
 f.values['ev/state'].soc=63.5;f.values['tesla_vehicle/state']={profile_ev_index:0,last_soc:63.5,last_update:12345,key_presence:'present',key_present:true,paired:true};event('ev/state');event('tesla_vehicle/state');
 assert(nodes().some(n=>n.props.value==='63.5 %'));assert(nodes().some(n=>n.props.label==='tesla_vehicle.status.soc_time'));
+{ // Receive time is wall-clock from the WARP, never uptime; unsynchronized clock is stated, not invented.
+ const timeValue=()=>walk(nodes().find(n=>n.type==='FormRow'&&n.props.label==='tesla_vehicle.status.soc_time')).find(n=>n.type==='InputText').props.value;
+ assert.equal(timeValue(),'tesla_vehicle.status.soc_time_unsynced');assert(!String(timeValue()).includes('12345'));
+ f.values['ntp/config']={timezone:'Europe/Berlin'};
+ f.values['tesla_vehicle/state']={...f.values['tesla_vehicle/state'],last_update_unix:1790000000,poll_outcome:'asleep_wake_disabled',poll_outcome_automatic:true,auto_poll:'waiting'};event('tesla_vehicle/state');
+ assert.match(timeValue(),/\d{2}:\d{2}:\d{2}$/);assert(!timeValue().includes('tesla_vehicle.status.soc_time_unsynced'));
+ assert(timeValue().startsWith('21.09.2026')||timeValue().includes('2026'),'Older value shows an unambiguous date');
+ assert(nodes().some(n=>n.type==='p'&&n.props.children==='tesla_vehicle.status.outcome_asleep_wake_disabled'),'Asleep outcome visible');
+ assert(nodes().some(n=>n.type==='p'&&n.props.children==='tesla_vehicle.status.auto_poll_waiting'));
+ f.values['tesla_vehicle/state']={...f.values['tesla_vehicle/state'],poll_outcome:'ok',last_error:'Tesla asleep; wake skipped, last wake less than 2 min ago; SoC not updated'};event('tesla_vehicle/state');
+ assert(!nodes().some(n=>n.type==='p'&&String(n.props.children).startsWith('tesla_vehicle.status.outcome_')),'ok outcome adds no status line');
+ assert(walk(nodes().find(n=>n.type==='Alert'&&n.props.variant==='danger')).some(n=>n.props?.children==='tesla_vehicle.status.outcome_asleep_wake_limited'),'Specific asleep message instead of generic failure');
+ f.values['tesla_vehicle/state']={profile_ev_index:0,last_soc:63.5,last_update:12345,key_presence:'present',key_present:true,paired:true};delete f.values['ntp/config'];event('tesla_vehicle/state');
+ console.log('GUIDED_SOC_TIME_OUTCOME_PASS');
+}
 f.values['ev/state'].soc=null;event('ev/state');assert(!nodes().some(n=>n.props.value==='63.5 %'));normal();
 // Unique-only, TTL and unsaved/config scope protections for discovery adoption.
 await button('search').props.onClick();
@@ -219,8 +234,31 @@ f.show=async()=>false;await button('forget_key').props.onClick();assert.equal(f.
 const deletionText=walk(f.modals.at(-1).body()).flatMap(n=>[n.props?.children].flat(Infinity)).filter(s=>typeof s==='string').join(' ');assert(deletionText.includes('Synthetic 0'),'Dialog identifies selected profile');
 // Retain prior search/delete confirmation, submission refusal, and key-status coverage.
 normal();f.values['tesla_vehicle/state']={profile_ev_index:0,key_presence:'present',key_present:true,paired:true};event('tesla_vehicle/state');
-assert.equal(nodes().filter(n=>n.type==='Switch').length,0);
-assert(!nodes().some(n=>n.type==='InputNumber'));
+// Paired profile: persisted per-profile background interval + explicit wake permission (user requirement).
+{
+ const switches=nodes().filter(n=>n.type==='Switch');assert.equal(switches.length,1,'Exactly the wake permission switch');
+ assert.equal(switches[0].props.checked,false,'Wake permission defaults off (persisted default unchanged)');
+ assert.equal(switches[0].props.desc,'tesla_vehicle.content.auto_wake_desc');
+ const interval=()=>nodes().find(n=>n.type==='InputSelect'&&n.props.items?.some(i=>i[0]==='3600'));
+ assert(interval(),'Interval selector visible');assert.equal(interval().props.value,'300');
+ assert.equal(JSON.stringify(interval().props.items.map(i=>i[0])),JSON.stringify(['30','60','120','300','600','900','1800','3600']));
+ assert(interval().props.items.find(i=>i[0]==='300')[1]==='5 min'&&interval().props.items.find(i=>i[0]==='30')[1]==='30 s','Interval shown with unit');
+ assert(!nodes().some(n=>n.type==='InputNumber'));
+ assert(nodes().some(n=>n.type==='p'&&n.props.children==='tesla_vehicle.status.auto_poll_off'),'Background status visible');
+ const before=f.calls.length;
+ interval().props.onValue('60');nodes().find(n=>n.type==='Switch').props.onClick();
+ assert.equal(f.calls.length,before,'Changing settings alone sends nothing');
+ assert(page.dirty,'Settings mark the form dirty until saved');
+ await page.sendSave('tesla_vehicle/profiles',{entries:page.state.entries});
+ const saved=f.calls.at(-1);assert.equal(saved.topic,'tesla_vehicle/profiles_update');
+ const entry=saved.payload.entries.find(e=>e.ev_index===0);assert.equal(entry.poll_interval,60);assert.equal(entry.wake_once,true);
+ assert.equal(f.calls.length,before+1,'Exactly one persistent profile save, no radio action');
+ page.state.entries=structuredClone(f.values['tesla_vehicle/profiles'].entries);page.setDirty(false);
+ // Unlisted but firmware-valid value stays representable.
+ page.state.entries[0].poll_interval=301;assert(interval().props.items.some(i=>i[0]==='301'&&i[1]==='301 s'));
+ page.state.entries=structuredClone(f.values['tesla_vehicle/profiles'].entries);
+ console.log('GUIDED_POLL_SETTINGS_PASS');
+}
 assert(findButton('forget_key'));
 assert(!walk(nodes().find(n=>n.props.id==='tesla_vehicle_config_form')).some(n=>n.props.children==='tesla_vehicle.content.forget_key'));
 for(const [change,key]of [[{pairing_pending:true,pair_request_sent:false},'sending'],[{pairing_pending:true,pair_request_sent:true},'pending'],[{paired:true},'paired']]){

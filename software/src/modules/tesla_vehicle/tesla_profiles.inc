@@ -227,11 +227,13 @@ bool TeslaVehicle::live_profile(int index) const
         ev.get_active_ev_mac() != 0 && ev.get_active_ev_mac() == r->profile_mac && ev.get_profile_mac(index) == r->profile_mac;
 }
 
-bool TeslaVehicle::select_profile(int index, bool deleting, String &errmsg)
+bool TeslaVehicle::select_profile(int index, bool deleting, String &errmsg, uint32_t revision_override)
 {
     if (!discovery_allowed()) { errmsg = checked_error_string("Bluetooth inactive, restart pending, migration blocked or action busy"); return false; }
     auto *p = find_profile(index);
     if (!p) { errmsg = checked_error_string("No Tesla mapping for selected WARP profile"); return false; }
+    if (deleting && revision_override) { errmsg = checked_error_string("Invalid profile selection"); return false; }
+    const uint32_t revision = revision_override ? revision_override : p->get("discovery_revision")->asUint();
     const uint64_t mac = profile_mac_value(p->get("ev_mac")->asString().c_str());
     // Deletion may clean an orphan after an EV profile edit; its recorded
     // namespace, not the new EV MAC, is the exact deletion target.
@@ -259,7 +261,7 @@ bool TeslaVehicle::select_profile(int index, bool deleting, String &errmsg)
     }
     if (!deleting) {
         if (!fresh_binding(index,mac,p->get("vin")->asString().c_str(),p->get("ble_address")->asString().c_str(),
-                p->get("ble_address_type")->asUint(),p->get("discovery_revision")->asUint())) {
+                p->get("ble_address_type")->asUint(),revision)) {
             errmsg=checked_error_string("Search this VIN again and select its exact match before loading or pairing");return false;
         }
     }
@@ -275,7 +277,8 @@ bool TeslaVehicle::select_profile(int index, bool deleting, String &errmsg)
     }
     Runtime::ProfileRequest request;
     request.index = index; request.mac = mac; request.deleting = deleting;
-    request.discovery_revision=p->get("discovery_revision")->asUint();request.address_type=p->get("ble_address_type")->asUint();
+    request.discovery_revision=revision;request.address_type=p->get("ble_address_type")->asUint();
+    request.poll_interval=p->get("poll_interval")->asUint();request.wake=p->get("wake_once")->asBool();
     strlcpy(request.vin, p->get("vin")->asString().c_str(), sizeof(request.vin));
     strlcpy(request.address, p->get("ble_address")->asString().c_str(), sizeof(request.address));
     r->profile_ready.store(false);
@@ -304,6 +307,8 @@ void TeslaVehicle::apply_profile()
     r->bound_vehicle_mac.store(0); r->session.bind(0); r->authorized.store(false);
     r->vin.assign(request.vin); r->configured_ev_index.store(request.index); r->profile_mac = request.mac;
     r->binding_revision=request.discovery_revision;r->remote_address_type=request.address_type;
+    r->poll_interval_seconds=request.poll_interval;r->wake_once=request.wake;
+    r->auto_poll_requested.store(false);
     // The old adapter has no file/identity leases: only worker touches it.
     if (!r->storage_adapter.select_profile(request.index, request.mac)) {
         post_event(EventType::Error, "Could not select profile storage"); r->stop_requested.store(true); return;

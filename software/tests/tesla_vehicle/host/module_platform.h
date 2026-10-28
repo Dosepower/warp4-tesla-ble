@@ -2,6 +2,7 @@
 // Only OS/config/SDK boundaries are substituted. TeslaVehicle and its Runtime,
 // worker, main, queues ownership, adapters and protocol remain production code.
 #include <algorithm>
+#include <sys/time.h>
 #include <atomic>
 #include <cassert>
 #include <cmath>
@@ -77,13 +78,16 @@ public:
         text = v; return true;
     }
     void updateFloat(float v) { floating = v; }
-    void updateUptime(uint64_t) {}
+    void updateUptime(uint64_t v) { uptime = v; }
+    float asFloat() const { return floating; }      // test-only readback
+    uint64_t asUptime() const { return uptime; }    // test-only readback
     void updateInt(int v) { integer = v; }
 private:
     std::map<std::string, std::shared_ptr<Config>> children;
     bool boolean = false;
     int integer = 0;
     float floating = NAN;
+    uint64_t uptime = 0;
     String text;
     const Config *prototype=nullptr;
     unsigned array_max=0;
@@ -212,6 +216,16 @@ inline HostMasterSerial Serial;
 inline std::atomic<uint32_t> clock_ms{1};
 inline uint32_t millis() { return clock_ms.load(); }
 inline uint64_t now_us() { return uint64_t{millis()} * 1000; }
+// Host RTC: unsynchronized unless a test sets a wall-clock base (seconds at millis()==0).
+struct HostRtc {
+    std::atomic<bool> synced{false};
+    std::atomic<int64_t> base_seconds{0};
+    bool clock_synced(struct timeval *out) {
+        if (!synced.load()) { return false; }
+        out->tv_sec = static_cast<time_t>(base_seconds.load() + millis() / 1000); out->tv_usec = 0; return true;
+    }
+};
+inline HostRtc rtc;
 // Deterministic pair-trace interleaving (production macro is empty in firmware).
 inline std::function<void(int)> host_pair_trace_point;
 #define TESLA_PAIR_TRACE_POINT(point) do { if (host_pair_trace_point) { host_pair_trace_point(point); } } while (0)

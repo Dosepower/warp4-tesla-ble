@@ -339,6 +339,7 @@ struct TeslaBleModuleTest {
 #include "host/pair_trace_contracts.inc"
 #include "host/card_confirm_contracts.inc"
 #include "host/discovery_connectable_contracts.inc"
+#include "host/soc_wake_contracts.inc"
  static void run(const std::string &mode) {
   if(mode=="quiesce-error-delayed") {
    BluetoothLifecycle bt;controller_status=test_status=0;async_bluetooth=true;std::thread host;
@@ -475,6 +476,7 @@ struct TeslaBleModuleTest {
 #endif
   if(mode.rfind("trace-",0)==0){trace_flow(m,mode);return;}
   if(mode.rfind("card-",0)==0){card_flow(m,mode);return;}
+  if(mode.rfind("soc-",0)==0){soc_wake_flow(m,mode);return;}
   if(mode.rfind("flow-",0)==0){approval_flow(m,mode);return;}
   if(mode=="pairing"||mode=="generate"||mode=="notify-only"||mode=="indicate-and-notify"||mode=="delayed-pair"||mode=="connect-timeout"||mode=="no-card"||mode=="decline"||mode=="link-drop"||mode=="profile-switch"||mode=="partial-pair"||mode=="late-response"){
     host_rx_properties=mode=="notify-only"?16:mode=="indicate-and-notify"?48:32;pairing(m,mode=="generate",mode=="delayed-pair",mode);return;

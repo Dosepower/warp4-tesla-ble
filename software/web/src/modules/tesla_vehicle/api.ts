@@ -60,6 +60,12 @@ export interface state {
     restart_required: boolean;
     last_soc: number;
     last_update: number;
+    // Unix seconds of the last consumed authenticated SoC; 0 = WARP clock not synchronized.
+    last_update_unix: number;
+    poll_outcome: 'none' | 'ok' | 'asleep_wake_disabled' | 'asleep_wake_limited' | 'woken_no_soc' | 'failed' | 'busy';
+    poll_outcome_automatic: boolean;
+    // Firmware background scheduler (works without an open browser).
+    auto_poll: 'off' | 'waiting' | 'not_paired' | 'searching' | 'polling' | 'not_found' | 'failed';
     last_error: string;
 }
 export interface guidance {

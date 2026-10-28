@@ -72,6 +72,12 @@ private:
         KeyPresence,
         KeyRemoved
     };
+    // Terminal outcome of one SoC operation (manual or automatic). Published
+    // as tesla_vehicle/state poll_outcome; never carries identifiers.
+    enum class PollOutcome : uint8_t {
+        None, Ok, AsleepWakeDisabled, AsleepWakeLimited, WokenNoSoc, Failed, Busy
+    };
+    static void set_poll_outcome(Runtime *r, PollOutcome outcome, bool automatic);
 
     struct ModuleEvent {
         EventType type = EventType::Error;
@@ -81,8 +87,14 @@ private:
         bool authenticated = false;
         bool correlated = false;
         float soc = NAN;
+        // Soc only: captured by the worker when it accepted the authenticated
+        // result, not at (possibly delayed) main-task publication.
+        decltype(now_us()) received_uptime{};
+        uint32_t received_unix = 0; // 0: wall clock unsynchronized at reception
         char message[96] = {};
     };
+    // Copied by value through a FreeRTOS queue.
+    static_assert(std::is_trivially_copyable<ModuleEvent>::value, "ModuleEvent must stay trivially copyable");
 
     // RX transport queue element: one fixed chunk of a notification byte stream.
     // Framing is stream based (FrameReceiver), so splitting a notification into
@@ -190,7 +202,12 @@ private:
     Config make_profile();
     String validate_profiles(Config &update, ConfigSource source);
     Config *find_profile(int index) const;
-    bool select_profile(int index, bool deleting, String &errmsg);
+    // revision_override: firmware-internal autonomous poll only. It replaces the
+    // persisted discovery_revision by a fresh own scan revision that already
+    // passed the identical fresh_binding() check; never persisted, never API input.
+    bool select_profile(int index, bool deleting, String &errmsg, uint32_t revision_override = 0);
+    void auto_poll();
+    void auto_poll_publish(const char *state);
     bool live_profile(int index) const;
     void apply_profile(); // Worker only, no connection or generation of keys.
     void publish_profile(); // Main only, consumes worker acknowledgement.
@@ -272,6 +289,9 @@ private:
             uint32_t discovery_revision = 0;
             uint8_t address_type = 0;
             bool deleting = false;
+            // Per-profile settings, applied by the worker with the profile.
+            uint32_t poll_interval = 300;
+            bool wake = false; // Persisted as "wake_once": automatic polls may wake when needed.
         } profile_request;
         std::atomic<bool> profile_pending{false}, profile_ready{false};
         std::atomic<bool> authorized{false};
@@ -287,6 +307,14 @@ private:
         bool wake_once = false;
         std::atomic<bool> pair_requested{false};
         std::atomic<bool> poll_requested{false};
+        // Firmware-scheduled background SoC operation (no browser). Shares
+        // manual_poll_pending as the single admission latch: never concurrent
+        // with a manual poll, pairing, discovery or profile reload.
+        std::atomic<bool> auto_poll_requested{false};
+        // Last finished SoC operation outcome, worker writer, main publisher.
+        std::atomic<uint8_t> poll_outcome{0};
+        std::atomic<bool> poll_outcome_automatic{false};
+        std::atomic<uint32_t> poll_outcome_sequence{0};
         // HTTP acceptance through terminal worker outcome, not HTTP latency.
         std::atomic<bool> manual_poll_pending{false};
         std::atomic<bool> forget_requested{false};
@@ -490,6 +518,24 @@ private:
         bool guidance_refresh = true;
         uint64_t guidance_macs[TeslaBleStorageAdapter::MAX_PROFILES]{};
         int guidance_key_signature = -1;
+        // Main-task-only autonomous SoC scheduler (TESLA_BLE_MANUAL_VEHICLE_UI).
+        // One cycle: own VIN-scoped scan -> exact stored-address fresh_binding ->
+        // profile reload with that scan revision -> one bounded SoC operation.
+        struct AutoPoll {
+            enum class Phase : uint8_t { Idle, Scanning, Selecting, Polling } phase = Phase::Idle;
+            TeslaBleIdentity identity{UINT64_MAX, -1, 0};
+            uint32_t next_ms = 0, phase_ms = 0;
+            uint32_t scan_baseline = 0, own_revision = 0, config_revision = 0;
+            uint64_t runtime_epoch = 0;
+            uint32_t last_operation_ms = 0; // any finished SoC operation (manual or automatic)
+            bool operation_seen = false;
+            // Interval-based schedule (end of the last cycle): a changed profile
+            // interval re-derives next_ms from this base once, not every loop.
+            uint32_t interval_base_ms = 0, interval_applied_ms = 0;
+            bool interval_scheduled = false;
+        } auto_poll;
+        uint32_t poll_outcome_seen = 0;
+        uint64_t poll_outcome_epoch = 0;
 #endif
         TeslaBleRuntimeOwner<Runtime> runtime_owner;
         TeslaBlePairingPolicy pairing_policy;

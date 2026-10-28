@@ -37,6 +37,7 @@ void Vehicle::close(uint64_t generation)
     std::array<Command,4> retired=std::move(commands_); const size_t count=count_; count_=0; commands_={};
     for(size_t i=0;i<count;++i) {
         VehicleResult result{retired[i].context,retired[i].generation,VehicleResultCode::Disconnected,0,SleepState::Unknown,false};
+        result.wake_exposed=retired[i].wake_sent;
         retired[i].completion(result);
     }
 }
@@ -78,12 +79,13 @@ void Vehicle::finish(VehicleResultCode code,uint8_t battery,SleepState sleep,boo
     commands_[--count_]=Command{}; advance(); transmission_=0; deferred_count_=0;
     if(vcsec_.guard) { vcsec_.guard->cancel(); } if(info_.guard) { info_.guard->cancel(); }
     VehicleResult result{retired.context,retired.generation,code,battery,sleep,authenticated};
+    result.wake_exposed=retired.wake_sent;
     retired.completion(result);
 }
-void Vehicle::retry(Stage stage,uint32_t now)
+void Vehicle::retry(Stage stage,uint32_t now,uint32_t delay)
 {
     if(!count_) { return; }
-    auto &c=commands_[0]; c.stage=stage; c.retry_at=now; c.delayed=true;
+    auto &c=commands_[0]; c.stage=stage; c.retry_at=now; c.retry_delay=delay; c.delayed=true;
 }
 bool Vehicle::transmit_owns(void *p,uint64_t generation)
 {
@@ -163,7 +165,8 @@ void Vehicle::encrypted(Domain domain,Bytes payload,Stage waiting,uint32_t now)
 {
     auto &c=commands_[0]; auto &ch=channel(domain);
     if(!ch.authentication.ready() || !ch.guard || !advance()) { finish(VehicleResultCode::Failed); return; }
-    ++c.attempts;
+    // A paced status probe after a (possibly) exposed wake has its own bound.
+    if(c.wake_sent && waiting==Stage::WaitStatus) { ++c.wake_polls; } else { ++c.attempts; }
     SessionInfo session=ch.authentication.info(); session.counter=std::max(session.counter,ch.high_water);
     IdentityLease identity; std::array<uint8_t,65> point{}; Route route; route.domain=domain; route.address=address_;
     EncodedRequest encoded;
@@ -204,7 +207,7 @@ void Vehicle::tick()
     if(exhausted() || !connected_ || !count_ || transmission_) { return; }
     const uint32_t now=ports_.now(ports_.context); auto &c=commands_[0];
     if(now-c.started>=c.timing.total_ms) { finish(VehicleResultCode::Expired); return; }
-    if(c.delayed) { if(now-c.retry_at<100) { return; } c.delayed=false; }
+    if(c.delayed) { if(now-c.retry_at<c.retry_delay) { return; } c.delayed=false; }
     if(c.stage==Stage::WaitVcsecAuth || c.stage==Stage::WaitInfoAuth || c.stage==Stage::WaitStatus || c.stage==Stage::WaitCharge || c.stage==Stage::WaitWake) {
         if(now-c.transmitted<c.timing.response_ms) { return; }
         Stage next=Stage::Status;
@@ -220,7 +223,7 @@ void Vehicle::tick()
         if(!replay) { retry(next,now); return; }
         c.stage=next; c.delayed=false;
     }
-    if(c.attempts>=8) { finish(VehicleResultCode::Failed); return; }
+    if(c.attempts>=8 || c.wake_polls>=max_wake_status_polls) { finish(VehicleResultCode::Failed); return; }
     for(unsigned transitions=0;transitions<3 && count_;++transitions) {
         switch(c.stage) {
         case Stage::VcsecAuth:
@@ -355,11 +358,11 @@ void Vehicle::frame(const Frame &incoming,uint32_t now)
     if(c.kind==Kind::Status) { finish(VehicleResultCode::Status,0,status.sleep,true); return; }
     if(c.kind==Kind::Wake) {
         if(status.sleep==SleepState::Awake) { finish(VehicleResultCode::WakeConfirmed,0,status.sleep,true); }
-        else { retry(Stage::Status,now); } return;
+        else { retry(Stage::Status,now,wake_status_interval_ms); } return;
     }
     if(status.sleep==SleepState::Awake) { c.stage=Stage::InfoAuth; c.delayed=false; }
     else if(c.policy==WakePolicy::NoWakeSkip) { finish(VehicleResultCode::SkippedAsleep,0,status.sleep,true); }
     else if(!c.wake_sent) { c.stage=Stage::Wake; c.delayed=false; }
-    else { retry(Stage::Status,now); }
+    else { retry(Stage::Status,now,wake_status_interval_ms); }
 }
 }

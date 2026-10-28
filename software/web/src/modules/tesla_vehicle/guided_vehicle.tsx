@@ -9,9 +9,14 @@ import { FormRow } from "../../ts/components/form_row";
 import { FormSeparator } from "../../ts/components/form_separator";
 import { InputSelect } from "../../ts/components/input_select";
 import { InputText } from "../../ts/components/input_text";
+import { Switch } from "../../ts/components/switch";
 
 import { teslaKeyStatus, teslaVehicleReady, teslaBluetoothReady } from "./action_policy";
 import { pairingOutcomeReason } from "./pairing_outcome";
+import { formatSocReceiveTime } from "./soc_time";
+
+// Firmware-validated range 30..3600 s (tesla_vehicle/profiles poll_interval).
+const POLL_INTERVALS = [30, 60, 120, 300, 600, 900, 1800, 3600];
 
 type TeslaConfig = API.getType["tesla_vehicle/profiles"];
 type Profile = TeslaConfig["entries"][number];
@@ -549,6 +554,18 @@ export class TeslaVehicle extends ConfigComponent<"tesla_vehicle/profiles", {}, 
         }
         // Only this unambiguous backend outcome is an ordinary approval expiry.
         if (reason === 'Approval deadline expired; approval not authenticated') return __("tesla_vehicle.status.approval_expired");
+        // SoC operation outcomes (exact backend texts, no identifiers).
+        if (reason === 'Tesla asleep; wake skipped, last wake less than 2 min ago; SoC not updated') return __("tesla_vehicle.status.outcome_asleep_wake_limited");
+        if (reason === 'Tesla wake sent but no SoC received in time; SoC not updated') return __("tesla_vehicle.status.outcome_woken_no_soc");
+        if (reason === 'Tesla authenticated SoC request failed' || reason === 'Tesla SoC request timed out') return __("tesla_vehicle.status.outcome_failed");
+        // Already localized local preparation/refresh failures stay specific.
+        for (const localized of [__("tesla_vehicle.content.refresh_failed"), __("tesla_vehicle.content.result_expired"), __("tesla_vehicle.content.refresh_ambiguous"),
+                                 __("tesla_vehicle.content.refresh_unconnectable"), __("tesla_vehicle.content.refresh_empty"), __("tesla_vehicle.content.refresh_changed"),
+                                 __("tesla_vehicle.content.refresh_timeout"), __("tesla_vehicle.content.preparation_failed"), __("tesla_vehicle.content.preparation_timeout"),
+                                 __("tesla_vehicle.content.search_failed")]) {
+            const text = this.errorText(localized);
+            if (reason === text || reason.startsWith(text + ':')) return reason;
+        }
         if (/link\/session lost|transport disconnected|connection lost/i.test(reason)) return __("tesla_vehicle.status.link_lost");
         if (/storage|persist|key.*uncertain|unknown key state/i.test(reason)) return __("tesla_vehicle.status.key_unknown");
         return __("tesla_vehicle.status.action_failed");
@@ -623,6 +640,19 @@ export class TeslaVehicle extends ConfigComponent<"tesla_vehicle/profiles", {}, 
         const commonSoc = state.ev_state?.soc;
         const currentSoc = state.ev_state?.active_ev_index === p.ev_index && state.ev_state?.mac === p.ev_mac &&
             state.tesla_state?.profile_ev_index === p.ev_index && Number.isFinite(commonSoc) && Number.isFinite(state.tesla_state?.last_soc) && state.tesla_state.last_update > 0;
+        const ownState = state.tesla_state?.profile_ev_index === p.ev_index ? state.tesla_state : undefined;
+        const outcome = {
+            asleep_wake_disabled: __("tesla_vehicle.status.outcome_asleep_wake_disabled"), asleep_wake_limited: __("tesla_vehicle.status.outcome_asleep_wake_limited"),
+            woken_no_soc: __("tesla_vehicle.status.outcome_woken_no_soc"), failed: __("tesla_vehicle.status.outcome_failed"), busy: __("tesla_vehicle.status.outcome_busy"),
+        }[ownState?.poll_outcome as string] ?? '';
+        const autoText = {
+            off: __("tesla_vehicle.status.auto_poll_off"), waiting: __("tesla_vehicle.status.auto_poll_waiting"), not_paired: __("tesla_vehicle.status.auto_poll_not_paired"),
+            searching: __("tesla_vehicle.status.auto_poll_searching"), polling: __("tesla_vehicle.status.auto_poll_polling"),
+            not_found: __("tesla_vehicle.status.auto_poll_not_found"), failed: __("tesla_vehicle.status.auto_poll_failed"),
+        }[ownState?.auto_poll ?? 'off'] ?? __("tesla_vehicle.status.auto_poll_off");
+        const intervals: [string, string][] = (POLL_INTERVALS.indexOf(p.poll_interval) < 0 ? [...POLL_INTERVALS, p.poll_interval] : POLL_INTERVALS)
+            .map((s): [string, string] => [String(s), s < 60 ? s + ' s' : s % 60 ? s + ' s' : (s / 60) + ' min']);
+        const settingsDisabled = state.command_busy || this.saving || this.command_in_progress || this.searchBusy() || !!state.tesla_state?.action_busy;
         return <Fragment>
             <FormSeparator /><h2>{__("tesla_vehicle.bluetooth.tesla_title")}</h2>
             <FormRow label={__("tesla_vehicle.content.vehicle_profile")} help={__("tesla_vehicle.content.vehicle_profile_help")}>
@@ -643,9 +673,18 @@ export class TeslaVehicle extends ConfigComponent<"tesla_vehicle/profiles", {}, 
             <FormRow help={__("tesla_vehicle.content.manual_wake_help")}>
                 <Button type="button" className="w-100" variant="primary" disabled={!!pollReason} onClick={() => this.command('poll')}>{__("tesla_vehicle.content.read_soc")}</Button>
             </FormRow>
+            <FormRow label={__("tesla_vehicle.content.poll_interval")} help={__("tesla_vehicle.content.poll_interval_help")}>
+                <InputSelect items={intervals} value={String(p.poll_interval)} disabled={settingsDisabled} onValue={value => this.setProfile({poll_interval: parseInt(value)})} />
+            </FormRow>
+            <FormRow label={__("tesla_vehicle.content.auto_wake")} help={__("tesla_vehicle.content.auto_wake_help")}>
+                <Switch checked={p.wake_once} disabled={settingsDisabled} onClick={() => this.setProfile({wake_once: !p.wake_once})} desc={__("tesla_vehicle.content.auto_wake_desc")} />
+            </FormRow>
+            <p role="status" class="text-muted">{autoText}</p>
 
             {currentSoc ? <FormRow label={__("tesla_vehicle.status.soc")}><InputText readonly value={util.toLocaleFixed(commonSoc, 1) + ' %'} /></FormRow> : <p role="status" class="text-muted">{__("tesla_vehicle.content.soc_unavailable")}</p>}
-            {currentSoc ? <FormRow label={__("tesla_vehicle.status.soc_time")}><InputText readonly value={util.format_timespan_ms(state.tesla_state.last_update)} /></FormRow> : undefined}
+            {currentSoc ? <FormRow label={__("tesla_vehicle.status.soc_time")}><InputText readonly value={formatSocReceiveTime(state.tesla_state.last_update_unix ?? 0, API.get("ntp/config")?.timezone, Date.now(),
+                {unsynced: __("tesla_vehicle.status.soc_time_unsynced"), today: __("tesla_vehicle.status.soc_time_today")})} /></FormRow> : undefined}
+            {outcome ? <p role="status" class="text-muted">{outcome}</p> : undefined}
             </Fragment> : undefined}
             {prerequisiteReasons.map(reason => <p key={reason} role="status" class="text-muted">{reason}</p>)}
             {visibleErrors.length ? <Alert variant="danger">{visibleErrors.map(message => <div key={message}>{message}</div>)}</Alert> : undefined}
