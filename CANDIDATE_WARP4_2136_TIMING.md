@@ -1,6 +1,6 @@
 # WARP4 2.13.6 Tesla timing candidate
 
-Offline-qualified custom firmware candidate 2.13.6+6ae39075. Not yet installed or hardware accepted. Based on official warp4-2.13.6 source afa5c782176f2397ead9020ddc346b3d163fd840.
+Offline-qualified custom firmware 2.13.6+6ae39075, subsequently installed and automatically boot-validated on the test device. Existing vehicle/MQTT configuration and Tesla pairing retained. Full vehicle wake/charge/resume acceptance remains pending. Based on official warp4-2.13.6 source afa5c782176f2397ead9020ddc346b3d163fd840.
 
 - Tesla SoC: bounded 25-second authentication/wake phases, fresh 1-second session replays with 4-second challenge lifetime, 90-second absolute limit, bounded exponential response retries.
 - Existing single-phase pairing timings and authenticated late-approval proofs retained. Wake exposure spacing remains 120 seconds, periodic minimum 5 minutes.

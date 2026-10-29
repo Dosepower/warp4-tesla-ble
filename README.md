@@ -4,7 +4,11 @@ Tesla-BLE-Integration für WARP4 auf Basis der Tinkerforge-Firmware.
 
 ## Aktueller Stand
 
-**Release-Kandidat · Firmware `2.13.5+6ae25bce`**
+**Installierter Teststand · Firmware `2.13.6+6ae39075`**
+
+Basis: offizieller Quellstand WARP4 2.13.6 (`afa5c782`). Eigenes SDK auf ESP-IDF 5.5.6 / Arduino 3.3.12 neu gebaut und geprüft; keine Behauptung identischer offizieller Binärdateien. Installation und automatische Boot-Validierung am Testgerät bestätigt, bestehende Tesla-Kopplung erhalten.
+
+Tesla-SoC nutzt jetzt begrenzte 25-Sekunden-Phasen, Session-Wiederholungen im 1-Sekunden-Takt mit 4-Sekunden-Challenge-Frische, exponentiellen Fehler-Backoff und eine absolute 90-Sekunden-Grenze. Bestehendes Kopplungs-Timing bleibt getrennt erhalten. Ob dies die zuvor beobachteten sporadischen Abruffehler am Fahrzeug behebt, muss der anschließende Live-Test zeigen.
 
 Der Kandidat ist auf dem Testgerät gestartet. Host-/Frontend-Tests einschließlich Sanitizern, TypeScript-Prüfung, vollständiger Firmware-/Web-Build und OTA-Artefaktprüfungen wurden erfolgreich durchgeführt. Vollständige reale Schlaf-/Wake-/Ladezyklus-Abnahme bleibt offen; dies ist keine allgemeine Stable-Freigabe.
 
