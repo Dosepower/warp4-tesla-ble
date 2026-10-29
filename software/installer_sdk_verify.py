@@ -12,12 +12,20 @@ import stat
 from installer_safeio import read_bytes
 
 PINS = {
-    "builder": ["https://github.com/espressif/esp32-arduino-lib-builder.git", "27f49ef07016649a7de23fb91f3392961b3b4098"],
-    "esp-idf-secure": ["https://github.com/espressif/esp-idf.git", "d2a01b4ca9b8589272fb0d69791d8c02ee524ad3"],
+    "builder": ["https://github.com/espressif/esp32-arduino-lib-builder.git", "ce4c80a2f6cbf8c55ba246ffa2000fcdb33d9e6c"],
+    "esp-idf-secure": ["https://github.com/espressif/esp-idf.git", "3ea97e7591b6a83f5d6f8e0cc7f1b16f27b2b855"],
     "builder/components/arduino": ["https://github.com/Tinkerforge/arduino-esp32.git", "0ca24d74b6ec582e2780a9fdc9aadead8e272739"],
 }
+# Official WARP 2.13.6 reference: Tinkerforge/esp32-arduino-libs tf-esp-secure-20261022
+# d80bc8e05ab1012010f5acd87ca974206a64f4ee. Its versions.txt revisions are local git-am
+# commits that do not exist publicly; they remain unresolved gaps, never pins.
 GAPS = [{"component": k, "revision": v} for k, v in
-        (("builder", "d5a56a1"), ("esp-idf", "d2a6bf5f2b4"), ("arduino", "fa903c6b9"))]
+        (("builder", "b63070e"), ("esp-idf", "a3afb692749"), ("arduino", "b280564c6"))]
+# Unresolved gaps of the superseded tf-esp-secure-20260922 reference stay recorded.
+PREVIOUS_GAPS = [{"component": k, "revision": v} for k, v in
+                 (("builder", "d5a56a1"), ("esp-idf", "d2a6bf5f2b4"), ("arduino", "fa903c6b9"))]
+# sha256 of esp32/sdkconfig in the official tf-esp-secure-20261022 package.
+OFFICIAL_SDKCONFIG_SHA256 = "680cb3155cb96c8c88ba866d274fbc115cba7903d2fb2068cd18f32f7e8c68ed"
 # These are full inventories, NOT version strings or git HEAD-only assertions.
 # sources includes recursive gitlinks/blobs and patched end trees; tools includes
 # compiler/distribution bytes; recipe includes builder/export/transform scripts.
@@ -90,12 +98,27 @@ def inventory(root):
 
 
 def recipe_inputs(project):
+    # Same closed set as lib-builder/tesla_sdk.py inputs(): every policy defconfig
+    # and the singleton NimBLE source policy bound to its sdk.patch.
     project = Path(project)
     paths = [project / "lib-builder/tesla_sdk.py",
              project / "lib-builder/defconfig.esp32secure",
              project / "lib-builder/defconfig.warp4-tesla-ble",
              project / "lib-builder/defconfig.warp4-tesla-psram-first",
-             project / "lib-builder/defconfig.warp4-protected-resolved"]
+             project / "lib-builder/defconfig.warp4-protected-resolved",
+             project / "lib-builder/defconfig.warp4-tesla-single-link",
+             project / "lib-builder/defconfig.warp4-tesla-nimble",
+             project / "lib-builder/cacert-2026-10-20.pem"]
+    nimble = project / "lib-builder/nimble-init-v2"
+    entries = sorted(nimble.iterdir())
+    require([e.name for e in entries] == ["sdk.patch", "source-policy.json"] and
+            all(e.is_file() and not e.is_symlink() for e in entries),
+            "NimBLE source policy must be exactly sdk.patch + source-policy.json")
+    policy = loads(read_bytes(nimble / "source-policy.json"))
+    require(policy.get("policy") == "tesla-psram-first-nimble-single-link-init-v2" and
+            policy.get("sdk_patch_sha256") == sha(nimble / "sdk.patch"),
+            "NimBLE source policy inventory not bound to sdk.patch")
+    paths += entries
     paths += sorted((project / "patches/lib-builder").rglob("*.patch"))
     paths += sorted((project / "patches/lib-builder").rglob("*.rawpatch"))
     paths += sorted((project / "patches/lib-builder-pre").rglob("*.patch"))
@@ -103,7 +126,8 @@ def recipe_inputs(project):
 
 
 def verify(package, manifest_path, lock, materials, project):
-    fields(lock, ("schema", "manifest_sha256", "sdk_inventory_sha256", "pins", "recipe_inputs"), ("baseline_source_gaps", "status"))
+    fields(lock, ("schema", "manifest_sha256", "sdk_inventory_sha256", "pins", "recipe_inputs"),
+           ("baseline_source_gaps", "previous_baseline_source_gaps", "status"))
     require(lock.get("schema") == "warp4-installer-sdk-lock-v1", "unknown SDK lock schema")
     require(hexpin(lock.get("manifest_sha256")), "EXTERNAL_SDK_MANIFEST_PIN_MISSING")
     require(hexpin(lock.get("sdk_inventory_sha256")), "SDK inventory pin missing")
@@ -116,10 +140,11 @@ def verify(package, manifest_path, lock, materials, project):
     manifest_bytes = read_bytes(mp)
     require(hashlib.sha256(manifest_bytes).hexdigest() == lock["manifest_sha256"], "external SDK manifest digest mismatch")
     m = loads(manifest_bytes)
-    fields(m, ("schema", "kind", "exact_upstream_package", "baseline_source_gaps", "pins", "recipe_inputs", "materials", "outputs", "config_deltas", "commands", "secure_boot_sig_block_size"))
+    fields(m, ("schema", "kind", "exact_upstream_package", "baseline_source_gaps", "previous_baseline_source_gaps", "pins", "recipe_inputs", "materials", "outputs", "config_deltas", "commands", "secure_boot_sig_block_size"))
     require(m.get("schema") == "warp4-installer-sdk-v1" and
             m.get("kind") == "source-derived-warp4-secure-ble", "not an installer SDK provenance manifest")
-    require(m.get("exact_upstream_package") is False and m.get("baseline_source_gaps") == GAPS,
+    require(m.get("exact_upstream_package") is False and m.get("baseline_source_gaps") == GAPS and
+            m.get("previous_baseline_source_gaps") == PREVIOUS_GAPS,
             "source-derived SDK must preserve unresolved baseline revisions")
     require("installable" not in m, "self-asserted installable flag forbidden")
     require(m.get("pins") == PINS and m.get("recipe_inputs") == lock["recipe_inputs"], "source/recipe pins differ")
@@ -258,7 +283,7 @@ def qualify_contents(package, config_material, deltas, policy='stock'):
     """Additional semantic gate after external inventory verification."""
     package, config_material = Path(package), Path(config_material)
     baseline = config_material / "official-sdkconfig"
-    require(sha(baseline) == "cb42fb9555d0669266564bf678860e9b44d2275450c26aa43f86a0775bb7ea96",
+    require(sha(baseline) == OFFICIAL_SDKCONFIG_SHA256,
             "official baseline sdkconfig digest mismatch")
     cfg = config_map((package / "esp32/sdkconfig").read_text())
     verify_config_maps(config_map(baseline.read_text()), cfg, deltas, policy=policy)

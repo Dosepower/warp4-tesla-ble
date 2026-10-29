@@ -32,12 +32,19 @@ ChallengeResult DomainAuthentication::begin(IdentityStore &keys,const OperationT
     if(!valid_ || !random.fill || !transport.send || owner.context==0 || owner.total_ms==0 || owner.response_ms==0 ||
        owner.total_ms>INT32_MAX || owner.response_ms>INT32_MAX) { return ChallengeResult::Invalid; }
     if(now-owner.started>=owner.total_ms) { return ChallengeResult::Expired; }
+    if(owner.phase_ms>INT32_MAX || (owner.phase_ms && owner.phase_offset()>=owner.total_ms)) { return ChallengeResult::Invalid; }
     if(budget_.context!=owner.context || budget_.generation!=owner.generation) {
         budget_=owner; attempts_=0;
-    } else if(budget_.started!=owner.started || budget_.total_ms!=owner.total_ms || budget_.response_ms!=owner.response_ms) {
+    } else if(budget_.started!=owner.started || budget_.total_ms!=owner.total_ms || budget_.response_ms!=owner.response_ms ||
+              budget_.phase_ms!=owner.phase_ms) {
         return ChallengeResult::Invalid; // caller cannot restart a running operation's total deadline
+    } else if(budget_.phase_started!=owner.phase_started) {
+        // A new phase of the same operation gets a fresh challenge budget; a phase
+        // can only move forward and never past the absolute deadline.
+        if(owner.phase_offset()<=budget_.phase_offset()) { return ChallengeResult::Invalid; }
+        budget_=owner; attempts_=0;
     }
-    if(attempts_>=3) { return ChallengeResult::Exhausted; }
+    if(!owner.phase_open(now) || attempts_>=(owner.phase_ms?session_info_max_challenges:legacy_session_info_max_challenges)) { return ChallengeResult::Exhausted; }
     if(attempts_ && now-last_attempt_<100) { return ChallengeResult::Backoff; }
     ++attempts_; last_attempt_=now;
     Pending proposal; proposal.owner=owner; proposal.transmitted=now;
@@ -65,8 +72,9 @@ bool DomainAuthentication::replayable(const OperationTime &owner,uint32_t now) c
     return valid_ && pending_.active && !pending_.sending && owner.context!=0 &&
         pending_.owner.context==owner.context && pending_.owner.generation==owner.generation &&
         pending_.owner.started==owner.started && pending_.owner.total_ms==owner.total_ms &&
-        pending_.owner.response_ms==owner.response_ms && now-owner.started<owner.total_ms &&
-        pending_.replays<session_info_max_replays && age<session_info_max_latency_ms &&
+        pending_.owner.response_ms==owner.response_ms && pending_.owner.phase_started==owner.phase_started &&
+        pending_.owner.phase_ms==owner.phase_ms && owner.phase_open(now) &&
+        pending_.replays<(owner.phase_ms?session_info_max_replays:legacy_session_info_max_replays) && age<session_info_max_latency_ms &&
         // A copy that cannot complete while still fresh is useless; renew instead.
         session_info_max_latency_ms-age>pending_.transmit_elapsed;
 }
@@ -123,6 +131,8 @@ SessionAdmission DomainAuthentication::receive(const SessionReply &reply,uint32_
        reply.generation!=pending_.owner.generation || reply.uuid!=pending_.view.uuid ||
        now-pending_.owner.started>=pending_.owner.total_ms || now-pending_.transmitted>=session_info_max_latency_ms ||
        processed-pending_.owner.started>=pending_.owner.total_ms || processed-pending_.transmitted>=session_info_max_latency_ms ||
+       // Nothing captured after the phase's own step budget authenticates (late frame).
+       !pending_.owner.phase_open(now) || !pending_.owner.phase_open(processed) ||
        (!pending_.sending && now-pending_.transmitted>=pending_.answer_until) ||
        !reply.encoded.valid() || reply.encoded.size==0 || reply.encoded.size>pending_.encoded.size() ||
        !reply.tag.valid() || reply.tag.size!=pending_.tag.size()) { return SessionAdmission::Rejected; }

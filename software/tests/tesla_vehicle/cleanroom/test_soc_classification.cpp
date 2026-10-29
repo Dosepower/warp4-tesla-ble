@@ -8,7 +8,7 @@
 #include <cstdio>
 using namespace controller_fixture;
 namespace {
-constexpr VehicleTiming soc_timing{40000,5000,10000}; // production SoC request timing (tesla_vehicle.cpp)
+constexpr VehicleTiming soc_timing=production_soc_timing; // production SoC request timing (tesla_vehicle.cpp)
 void run_until_result(Harness &h,std::vector<VehicleResult> &results,uint32_t limit)
 {
     const uint32_t end=h.clock+limit;
@@ -37,7 +37,7 @@ int main()
         assert(!d.vcsec_reused && !d.info_reused && d.vcsec_answered && !d.info_answered);
         assert(d.challenges==1 && d.response_timeouts>0 && d.frames==1 && d.elapsed_ms<=soc_timing.total_ms && d.fault==0);
     }
-    // B) VCSEC fine, Infotainment never answers session requests: own challenge cap.
+    // B) VCSEC fine, Infotainment never answers session requests: its own phase budget (challenge_cap).
     {
         Harness h; std::vector<VehicleResult> results; assert(h.vehicle.open(h.link));
         assert(h.vehicle.charge_state_poll(WakePolicy::NoWakeSkip,42,h.callback(results),soc_timing));
@@ -48,7 +48,8 @@ int main()
         assert(results.size()==1 && results[0].code==VehicleResultCode::Failed);
         const auto &d=results[0].diagnostics; print("B silent infotainment session",d);
         assert(d.failure==VehicleFailure::ChallengeCap && (d.stage==VehicleStage::InfoAuth || d.stage==VehicleStage::WaitInfoAuth));
-        assert(d.vcsec_answered && !d.info_answered && d.challenges==4); // 1 VCSEC + 3 Infotainment challenges
+        // 1 VCSEC + renewed Infotainment challenges (every 4 s within its 25 s phase), bounded.
+        assert(d.vcsec_answered && !d.info_answered && d.challenges>=1+5 && d.challenges<=1+session_info_max_challenges);
         assert(d.elapsed_ms<soc_timing.total_ms); // ends on its own challenge bound, before the operation deadline
     }
     // C) Second command on the same link reuses both sessions and succeeds unchanged.

@@ -64,7 +64,7 @@ static size_t operation(unsigned op,size_t fault)
     watching=false; const size_t boundaries=attempts; assert(throwing_new==0);
     if(fault) {
         assert(hits==1 && h.completions==0 && h.count==count && h.vehicle.high_water(info?Domain::Infotainment:Domain::Vcsec)==high);
-        if(kind==1) { h.clock+=100; h.vehicle.tick(); }
+        if(kind==1) { h.clock+=Vehicle::initial_retry_delay_ms; h.vehicle.tick(); } // first request backoff
         else { h.inject(reply); }
     }
     if(kind==0) { h.vehicle.tick(); }

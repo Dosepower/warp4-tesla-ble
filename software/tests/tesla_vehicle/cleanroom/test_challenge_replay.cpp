@@ -16,6 +16,8 @@
 using namespace controller_fixture;
 namespace {
 constexpr VehicleTiming verify{5000,1000,10000}; // production pair-verification status poll
+// Same budgets as a PHASED (SoC-style) operation: the new 1 s resend cadence applies only here.
+constexpr VehicleTiming verify_phased{5000,1000,10000,session_auth_phase_ms};
 struct Plan { uint32_t delay=0; bool armed=false; uint32_t at=0; Frame frame; void (*action)(Harness &)=nullptr; } plan;
 void timed_write(Harness &h)
 {
@@ -75,25 +77,28 @@ int main(int argc,char **argv)
     //    (1 s after completion) while fresh, then a NEW challenge at the 4 s
     //    freshness boundary; replays are bounded and the total deadline is not
     //    extended. The predecessor UUID is never readmitted afterwards.
-    if(run("B")) {
+    //    Single-phase (pairing verify, phase_ms==0): legacy renewal after the
+    //    100 ms retry delay (+4100). Phased: renewal exactly at +4000.
+    if(run("B")) for(const bool phased:{false,true}) {
+        const VehicleTiming timing=phased?verify_phased:verify; const uint32_t renew=phased?4000:4100;
         Harness h; std::vector<VehicleResult> results; reset_plan(0); h.hook=timed_write;
-        assert(h.vehicle.open(h.link) && h.vehicle.status(32,h.callback(results),verify));
+        assert(h.vehicle.open(h.link) && h.vehicle.status(32,h.callback(results),timing));
         const uint32_t start=h.clock; std::vector<uint32_t> at;
         while(results.empty() && h.clock-start<6000) {
             const size_t n=h.sent.size(); h.hook=timed_write; h.vehicle.tick();
             if(h.sent.size()!=n) { at.push_back(h.clock-start); } h.clock+=10;
         }
-        std::printf("B: %zu session requests at",h.sent.size()); for(auto t:at) { std::printf(" +%u",t); } std::puts(" ms");
+        std::printf("B%s: %zu session requests at",phased?" phased":" legacy",h.sent.size()); for(auto t:at) { std::printf(" +%u",t); } std::puts(" ms");
         if(h.sent.size()<4 || !same(h.sent[0],h.sent[1])) { return fail("RED: unanswered fresh challenge was not resent unchanged"); }
         assert(results.size()==1 && results[0].code==VehicleResultCode::Expired && !results[0].authenticated);
-        assert(h.sent.size()==5 && at[0]==0 && at[1]==1000 && at[2]==2000 && at[3]==3000 && at[4]==4100);
+        assert(h.sent.size()==5 && at[0]==0 && at[1]==1000 && at[2]==2000 && at[3]==3000 && at[4]==renew);
         for(size_t i=0;i<5;++i) { assert(h.sent[i].hello && h.sent[i].domain==Domain::Vcsec); }
         for(size_t i=1;i<4;++i) { assert(same(h.sent[0],h.sent[i])); }
         assert(!same(h.sent[0],h.sent[4])); // renewed at the freshness boundary
-        assert(h.clock-start>=verify.total_ms && h.clock-start<verify.total_ms+20); // expired exactly, not extended
+        assert(h.clock-start>=timing.total_ms && h.clock-start<timing.total_ms+20); // expired exactly, not extended
         // Next operation: neither the renewed nor the original challenge of the
         // expired operation is admitted (no cross-operation correlation).
-        std::vector<VehicleResult> next; assert(h.vehicle.status(33,h.callback(next),verify));
+        std::vector<VehicleResult> next; assert(h.vehicle.status(33,h.callback(next),timing));
         h.inject(h.hello(h.sent[4])); h.inject(h.hello(h.sent[0])); h.vehicle.tick();
         assert(h.sent.size()==6 && h.last().hello && !same(h.last(),h.sent[4]) && !same(h.last(),h.sent[0]));
         h.inject(h.hello(h.sent[4])); h.vehicle.tick(); assert(next.empty() && h.sent.size()==6);
@@ -206,7 +211,7 @@ int main(int argc,char **argv)
             assert(l.last.uuid==first.uuid && l.last.public_point==first.public_point && l.last.context==first.context);
             assert(!auth.replayable(op,2100) && auth.receive(make(first.uuid),2100,rng.get())==SessionAdmission::Rejected);
         }
-        {   // instant copies: cap 3 replays, then a NEW challenge; predecessor refused
+        {   // instant copies, single-phase (phase_ms==0): legacy cap 3 replays, then a NEW challenge; predecessor refused
             Rng rng; IdentityStore keys; seed(keys,rng); DomainAuthentication auth(Domain::Vcsec,{vectors::vin,17});
             Link l; const OperationTime op{1,9,100,9000,1000};
             assert(auth.begin(keys,op,100,rng.get(),l.get())==ChallengeResult::Sent); const auto first=l.last;
@@ -216,6 +221,17 @@ int main(int argc,char **argv)
             l.clock=3500; assert(auth.begin(keys,op,3500,rng.get(),l.get())==ChallengeResult::Sent && l.last.uuid!=first.uuid);
             assert(auth.receive(make(first.uuid),3510,rng.get())==SessionAdmission::Rejected);
             assert(auth.receive(make(l.last.uuid),3510,rng.get())==SessionAdmission::Established);
+        }
+        {   // instant copies, PHASED: identical replays only while fresh (< 4 s), then a NEW challenge; predecessor refused
+            Rng rng; IdentityStore keys; seed(keys,rng); DomainAuthentication auth(Domain::Vcsec,{vectors::vin,17});
+            Link l; const OperationTime op{1,9,100,9000,1000,100,session_auth_phase_ms};
+            assert(auth.begin(keys,op,100,rng.get(),l.get())==ChallengeResult::Sent); const auto first=l.last;
+            assert(auth.replay(op,150,rng.get(),l.get())==ChallengeResult::Backoff && l.sends==1);
+            for(uint32_t t:{1100u,2100u,3100u}) { l.clock=t; assert(auth.replay(op,t,rng.get(),l.get())==ChallengeResult::Sent && l.last.uuid==first.uuid); }
+            assert(auth.replayable(op,3500) && !auth.replayable(op,4100) && auth.replay(op,4100,rng.get(),l.get())==ChallengeResult::Invalid && l.sends==4);
+            l.clock=4100; assert(auth.begin(keys,op,4100,rng.get(),l.get())==ChallengeResult::Sent && l.last.uuid!=first.uuid);
+            assert(auth.receive(make(first.uuid),4110,rng.get())==SessionAdmission::Rejected);
+            assert(auth.receive(make(l.last.uuid),4110,rng.get())==SessionAdmission::Established);
         }
         {   // refused replay keeps the live challenge and its earlier copy's budget; reset ends replay
             Rng rng; IdentityStore keys; seed(keys,rng); DomainAuthentication auth(Domain::Vcsec,{vectors::vin,17});

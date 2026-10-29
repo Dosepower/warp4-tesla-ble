@@ -112,7 +112,11 @@ class SecureSDK(unittest.TestCase):
 
     def test_candidate_sdk_is_explicitly_not_exact_upstream_package(self):
         self.assertEqual(sdk.UPSTREAM_PACKAGE_REVISIONS,
+                         {'builder': 'b63070e', 'esp-idf': 'a3afb692749', 'arduino': 'b280564c6'})
+        # Superseded tf-esp-secure-20260922 gaps stay recorded, never erased.
+        self.assertEqual(sdk.PREVIOUS_UPSTREAM_PACKAGE_REVISIONS,
                          {'builder': 'd5a56a1', 'esp-idf': 'd2a6bf5f2b4', 'arduino': 'fa903c6b9'})
+        self.assertEqual(sdk.OFFICIAL_PACKAGE['commit'], 'd80bc8e05ab1012010f5acd87ca974206a64f4ee')
         self.assertIn('source-review candidate', (S/'lib-builder/tesla_sdk.py').read_text())
         ini=(S/'warp4_tesla_ble.ini').read_text()
         self.assertIn('#'+sdk.PINS['builder/components/arduino'][1], ini)

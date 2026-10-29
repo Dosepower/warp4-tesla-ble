@@ -1,0 +1,406 @@
+{
+  "env:warp4": {
+    "extends": [
+      "env:warp3"
+    ],
+    "board": "esp32_ethernet_brick_secure",
+    "board_build.partitions": "default_16MB_secure.csv",
+    "platform_packages": [
+      "platformio/framework-arduinoespressif32 @ https://github.com/Tinkerforge/arduino-esp32#tf-3-3-12",
+      "platformio/framework-arduinoespressif32-libs @ symlink://packages/esp32-arduino-libs#tf-esp-secure-20260922_4f0ab20592113e12c1792ba670c48aad04ceb288"
+    ],
+    "lib_deps": [
+      "https://github.com/Tinkerforge/ArduinoJson#0b03321ed33fa6965114424fbb023260120c856b",
+      "https://github.com/Tinkerforge/strict_variant#07be0b9e301a0023a658f76247d09b7d19e2fde0",
+      "https://github.com/Tinkerforge/tfjson#55e3be48",
+      "https://github.com/Tinkerforge/tftools#f73afaea",
+      "https://github.com/Tinkerforge/tfocpp#828794fe",
+      "https://github.com/Tinkerforge/WireGuard-ESP32-Arduino#96032fd0",
+      "https://github.com/Tinkerforge/tfnetwork#6d30fda885f7a22ed97df9ab5f843c7eecf50e38",
+      "https://github.com/Tinkerforge/libcbv2g"
+    ],
+    "build_flags": [
+      "-DTF_NET_ENABLE=1",
+      "-DSNTP_GET_SERVERS_FROM_DHCP=1",
+      "-DARDUINOJSON_USE_DOUBLE=1",
+      "-DARDUINOJSON_USE_LONG_LONG=1",
+      "-DNETWORK_EVENTS_MUTEX",
+      "-DUPDATE_NOCRYPT",
+      "-DBOARD_HAS_PSRAM",
+      "-DOCPP_LOG_LEVEL=4",
+      "-DOCPP_STATE_CALLBACKS",
+      "-DOCPP_SUPPORTED_FEATURE_PROFILES=\"\\\"Core,SmartCharging\\\"\"",
+      "-DOCPP_WEB_SOCKET_PING_INTERVAL=10",
+      "-DOCPP_WEB_SOCKET_PING_INTERVAL_REQUIRES_REBOOT=true",
+      "-DOCPP_METER_VALUES_ALIGNED_DATA_MAX_LENGTH=25",
+      "-DOCPP_DEFAULT_CLOCK_ALIGNED_DATA_INTERVAL=60",
+      "-DOCPP_DEFAULT_METER_VALUES_ALIGNED_DATA=\"\\\"Energy.Active.Export.Register,Energy.Active.Import.Register,Energy.Reactive.Export.Register,Energy.Reactive.Import.Register,Power.Active.Export,Power.Active.Import,Power.Offered,Power.Reactive.Export,Power.Reactive.Import,Power.Factor,Current.Import,Current.Export,Current.Offered,Voltage,Frequency,Temperature,SoC,RPM\\\"\"",
+      "-DOCPP_METER_VALUES_SAMPLED_DATA_MAX_LENGTH=25",
+      "-DOCPP_DEFAULT_METER_VALUE_SAMPLE_INTERVAL=60",
+      "-DOCPP_DEFAULT_METER_VALUES_SAMPLED_DATA=\"\\\"Energy.Active.Export.Register,Energy.Active.Import.Register,Energy.Reactive.Export.Register,Energy.Reactive.Import.Register,Power.Active.Export,Power.Active.Import,Power.Offered,Power.Reactive.Export,Power.Reactive.Import,Power.Factor,Current.Import,Current.Export,Current.Offered,Voltage,Frequency,Temperature,SoC,RPM\\\"\"",
+      "-DTF_HAL_PORT_NAMES=\"\\\"CDEFBA\\\"\""
+    ],
+    "custom_product_id": "warp4",
+    "custom_options": "manufacturer = \"Tinkerforge\"\nmanufacturer_full = \"Tinkerforge GmbH\"\nsupport_email = \"info@tinkerforge.com\"\nmanual_url = \"\"\nfirmware_info_product_id_override = \"\"\nfirmware_info_product_name_override = \"\"\nmin_data_partition_format = 0\napi_json_max_length = 10240\nweb_server_https_enabled = 1\nproduct_name = \"WARP2 Charger\"\nconfig_type = \"warp\"\nhostname_prefix = \"warp2\"\ntask_scheduler_cpu_idle = 1\nmeters_max_slots = 5\nmeters_slot_0_default_class = MeterClassID::EVSEV2\nmeters_evse_v2_default_display_name = \"WARP Charger\"\nbatteries_max_slots = 1\nfirmware_update_enable_rollback = 1\nfirmware_update_update_url = \"https://www.warp-charger.com/firmwares/\"\nfirmware_update_latest_url = \"https://www.warp-charger.com/downloads/#firmwares-warp2\"\nremote_access_host = \"my.warp-charger.com\"\npower_manager_default_meter_slot = 1\ncharge_tracker_pdf_logo = CHARGE_TRACKER_PDF_LOGO_WARP\nmanual_url = \"https://www.warp-charger.com/downloads/#documents-warp2\"\nmqtt_api_doc_url = \"https://www.warp-charger.com/api.html\"\nwarp_doc_base_url = \"https://docs.warp-charger.com\"\nproduct_name = \"WARP3 Charger\"\nhostname_prefix = \"warp3\"\nfirmware_update_latest_url = \"https://www.warp-charger.com/downloads/#firmwares-warp3\"\nmanual_url = \"https://www.warp-charger.com/downloads/#documents-warp3\"\nmin_data_partition_format = 1\nproduct_name = \"WARP4 Charger\"\nhostname_prefix = \"warp4\"\nmeters_slot_1_default_class = MeterClassID::ISO15118\nfirmware_update_latest_url = \"https://www.warp-charger.com/downloads/#firmwares-warp4\"\nfirmware_update_index_version = 3\nmanual_url = \"https://www.warp-charger.com/downloads/#documents-warp4\"\nmin_data_partition_format = 2\nove_r37_electrician_password_sha256 = \"0cbfcd751e5945972531941c4c61dc4c78af004f7206ccaf81f451c3174bc2ea\"",
+    "custom_split_esptool_ota": "true",
+    "custom_backend_modules": "Factory Data\nESP32 Common\nESP32 Ethernet Brick\nWatchdog\nUptime Tracker\nDebug Protocol\nEVSE V2\nEvse Common\nEvse Led\nNetwork\nNTP\nEthernet\nWifi\nNetwork Helper\nRtc Bricklet\nMqtt\nMqtt Auto Discovery\nHttp\nWS\nEvent\nSystem\nFirmware Update\nAutomation\nCharge Manager\nCM Networking\nNetwork Lib\nModbus TCP Client\nRCT Power Client\nSun Spec\nMeters\nMeters EVSE V2\nMeters API\nMeters Modbus TCP\nMeters Sun Spec\nMeters SMA Speedwire\nMeters RCT Power\nMeters Sonnenbatterie\nMeters Legacy API\nBatteries\nBatteries Modbus TCP\nBatteries Sun Spec\nBattery Control\nRequire Meter\nHidden Proxy\nCharge Tracker\nPower Manager\nUsers\nNFC\nNFC Bricklet\nCharge Authorization\nDevice Name\nModbus TCP\nModbus TCP Debug\nWireguard\nOcpp\nEEBus\nCharge Limits\nCoredump\nPwa\nCerts\nRemote Access\nDay Ahead Prices\nSolar Forecast\nEco\nP14a Enwg\nIo Scheduler\nISO15118\nMeters ISO15118\nEv\nESP32 Ethernet V2 Co Bricklet\nOve R37",
+    "custom_frontend_modules": "Device Name\nEvse Common\nEVSE V2\nModbus TCP Client\nSun Spec\nMeters\nMeters EVSE V2\nMeters API\nMeters Sun Spec\nMeters Modbus TCP\nMeters SMA Speedwire\nMeters RCT Power\nMeters Sonnenbatterie\nMeters Legacy API\nBatteries\nBatteries Modbus TCP\nBatteries Sun Spec\nBattery Control\nCharge Tracker\nCharge Manager\nCM Networking\nPower Manager\nNetwork\nWifi\nEthernet\nWireguard\nMqtt\nMqtt Auto Discovery\nModbus TCP\nModbus TCP Debug\nOcpp\nEEBus\nNFC\nUsers\nCharge Authorization\nCerts\nRemote Access\nAutomation\nNTP\nRtc\nTime\nEvent Log\nSystem\nFirmware Update\nCharge Limits\nRequire Meter\nDay Ahead Prices\nEco\nP14a Enwg\nSolar Forecast\nStatus Alerts\nEVSE Group\nEnergy Management Group\nNetwork Group\nInterfaces Group\nUsers Group\nSystem Group\nISO15118\nMeters ISO15118\nEv\nFactory Data\nOve R37",
+    "custom_frontend_components": "EVSE Group $ Open\nEvse Common | EVSE Settings\nEvse Common | EVSE\nISO15118\nCharge Tracker\nAutomation\nEVSE Group $ Close\nEnergy Management Group $ Open\nMeters\nBatteries\nCharge Manager | Charge Manager Chargers\nPower Manager | PV Excess Settings\nCharge Manager | Charge Manager Settings\nDay Ahead Prices\nSolar Forecast\nEco\nP14a Enwg\nOve R37\nEnergy Management Group $ Close\nNetwork Group $ Open\nNetwork\nWifi | Wifi STA\nWifi | Wifi AP\nEthernet\nWireguard\nNetwork Group $ Close\nInterfaces Group $ Open\nMqtt\nModbus TCP\nOcpp\nEEBus\nInterfaces Group $ Close\nUsers Group $ Open\nUsers\nEv\nUsers Group $ Close\nSystem Group $ Open\nSystem\nCerts\nRemote Access\nTime\nEvent Log\nFirmware Update\nSystem Group $ Close",
+    "custom_frontend_status_components": "Device Name\nStatus Alerts\nEvse Common | EVSE Status\nPower Manager\nCharge Limits\nMeters\nCharge Tracker\nWifi\nEthernet\nWireguard\nMqtt\nOcpp\nRemote Access\nTime\nCharge Manager | Charge Manager Heading\nCharge Manager | Charge Manager Mode Buttons\nEco\nCharge Manager",
+    "custom_branding": "WARP",
+    "platform": "https://github.com/pioarduino/platform-espressif32.git#55.03.37",
+    "framework": [
+      "arduino"
+    ],
+    "monitor_speed": 115200,
+    "build_type": "debug",
+    "extra_scripts": [
+      "pre:pio_hooks.py",
+      "post:merge_firmware_hook.py",
+      "post:fast_reflash_upload.py"
+    ],
+    "build_src_flags": [
+      "-Os",
+      "-Wall",
+      "-Wextra",
+      "-Wshadow=local",
+      "-Werror=return-type",
+      "-Werror=format",
+      "-Wl,--require-defined=build_custom_app_desc"
+    ],
+    "custom_provisioning": "false",
+    "custom_frontend_debug": "false",
+    "custom_web_only": "false",
+    "custom_signature_preset": "",
+    "custom_backend_modules_injections": "",
+    "custom_frontend_modules_injections": "",
+    "custom_frontend_components_injections": "",
+    "custom_frontend_status_components_injections": "",
+    "custom_fast_flash": "fast"
+  },
+  "env:warp4_signed": {
+    "extends": [
+      "env:warp4"
+    ],
+    "custom_signature_preset": "warp:v1",
+    "board": "esp32_ethernet_brick_secure",
+    "board_build.partitions": "default_16MB_secure.csv",
+    "platform_packages": [
+      "platformio/framework-arduinoespressif32 @ https://github.com/Tinkerforge/arduino-esp32#tf-3-3-12",
+      "platformio/framework-arduinoespressif32-libs @ symlink://packages/esp32-arduino-libs#tf-esp-secure-20260922_4f0ab20592113e12c1792ba670c48aad04ceb288"
+    ],
+    "lib_deps": [
+      "https://github.com/Tinkerforge/ArduinoJson#0b03321ed33fa6965114424fbb023260120c856b",
+      "https://github.com/Tinkerforge/strict_variant#07be0b9e301a0023a658f76247d09b7d19e2fde0",
+      "https://github.com/Tinkerforge/tfjson#55e3be48",
+      "https://github.com/Tinkerforge/tftools#f73afaea",
+      "https://github.com/Tinkerforge/tfocpp#828794fe",
+      "https://github.com/Tinkerforge/WireGuard-ESP32-Arduino#96032fd0",
+      "https://github.com/Tinkerforge/tfnetwork#6d30fda885f7a22ed97df9ab5f843c7eecf50e38",
+      "https://github.com/Tinkerforge/libcbv2g"
+    ],
+    "build_flags": [
+      "-DTF_NET_ENABLE=1",
+      "-DSNTP_GET_SERVERS_FROM_DHCP=1",
+      "-DARDUINOJSON_USE_DOUBLE=1",
+      "-DARDUINOJSON_USE_LONG_LONG=1",
+      "-DNETWORK_EVENTS_MUTEX",
+      "-DUPDATE_NOCRYPT",
+      "-DBOARD_HAS_PSRAM",
+      "-DOCPP_LOG_LEVEL=4",
+      "-DOCPP_STATE_CALLBACKS",
+      "-DOCPP_SUPPORTED_FEATURE_PROFILES=\"\\\"Core,SmartCharging\\\"\"",
+      "-DOCPP_WEB_SOCKET_PING_INTERVAL=10",
+      "-DOCPP_WEB_SOCKET_PING_INTERVAL_REQUIRES_REBOOT=true",
+      "-DOCPP_METER_VALUES_ALIGNED_DATA_MAX_LENGTH=25",
+      "-DOCPP_DEFAULT_CLOCK_ALIGNED_DATA_INTERVAL=60",
+      "-DOCPP_DEFAULT_METER_VALUES_ALIGNED_DATA=\"\\\"Energy.Active.Export.Register,Energy.Active.Import.Register,Energy.Reactive.Export.Register,Energy.Reactive.Import.Register,Power.Active.Export,Power.Active.Import,Power.Offered,Power.Reactive.Export,Power.Reactive.Import,Power.Factor,Current.Import,Current.Export,Current.Offered,Voltage,Frequency,Temperature,SoC,RPM\\\"\"",
+      "-DOCPP_METER_VALUES_SAMPLED_DATA_MAX_LENGTH=25",
+      "-DOCPP_DEFAULT_METER_VALUE_SAMPLE_INTERVAL=60",
+      "-DOCPP_DEFAULT_METER_VALUES_SAMPLED_DATA=\"\\\"Energy.Active.Export.Register,Energy.Active.Import.Register,Energy.Reactive.Export.Register,Energy.Reactive.Import.Register,Power.Active.Export,Power.Active.Import,Power.Offered,Power.Reactive.Export,Power.Reactive.Import,Power.Factor,Current.Import,Current.Export,Current.Offered,Voltage,Frequency,Temperature,SoC,RPM\\\"\"",
+      "-DTF_HAL_PORT_NAMES=\"\\\"CDEFBA\\\"\""
+    ],
+    "custom_product_id": "warp4",
+    "custom_options": "manufacturer = \"Tinkerforge\"\nmanufacturer_full = \"Tinkerforge GmbH\"\nsupport_email = \"info@tinkerforge.com\"\nmanual_url = \"\"\nfirmware_info_product_id_override = \"\"\nfirmware_info_product_name_override = \"\"\nmin_data_partition_format = 0\napi_json_max_length = 10240\nweb_server_https_enabled = 1\nproduct_name = \"WARP2 Charger\"\nconfig_type = \"warp\"\nhostname_prefix = \"warp2\"\ntask_scheduler_cpu_idle = 1\nmeters_max_slots = 5\nmeters_slot_0_default_class = MeterClassID::EVSEV2\nmeters_evse_v2_default_display_name = \"WARP Charger\"\nbatteries_max_slots = 1\nfirmware_update_enable_rollback = 1\nfirmware_update_update_url = \"https://www.warp-charger.com/firmwares/\"\nfirmware_update_latest_url = \"https://www.warp-charger.com/downloads/#firmwares-warp2\"\nremote_access_host = \"my.warp-charger.com\"\npower_manager_default_meter_slot = 1\ncharge_tracker_pdf_logo = CHARGE_TRACKER_PDF_LOGO_WARP\nmanual_url = \"https://www.warp-charger.com/downloads/#documents-warp2\"\nmqtt_api_doc_url = \"https://www.warp-charger.com/api.html\"\nwarp_doc_base_url = \"https://docs.warp-charger.com\"\nproduct_name = \"WARP3 Charger\"\nhostname_prefix = \"warp3\"\nfirmware_update_latest_url = \"https://www.warp-charger.com/downloads/#firmwares-warp3\"\nmanual_url = \"https://www.warp-charger.com/downloads/#documents-warp3\"\nmin_data_partition_format = 1\nproduct_name = \"WARP4 Charger\"\nhostname_prefix = \"warp4\"\nmeters_slot_1_default_class = MeterClassID::ISO15118\nfirmware_update_latest_url = \"https://www.warp-charger.com/downloads/#firmwares-warp4\"\nfirmware_update_index_version = 3\nmanual_url = \"https://www.warp-charger.com/downloads/#documents-warp4\"\nmin_data_partition_format = 2\nove_r37_electrician_password_sha256 = \"0cbfcd751e5945972531941c4c61dc4c78af004f7206ccaf81f451c3174bc2ea\"",
+    "custom_split_esptool_ota": "true",
+    "custom_backend_modules": "Factory Data\nESP32 Common\nESP32 Ethernet Brick\nWatchdog\nUptime Tracker\nDebug Protocol\nEVSE V2\nEvse Common\nEvse Led\nNetwork\nNTP\nEthernet\nWifi\nNetwork Helper\nRtc Bricklet\nMqtt\nMqtt Auto Discovery\nHttp\nWS\nEvent\nSystem\nFirmware Update\nAutomation\nCharge Manager\nCM Networking\nNetwork Lib\nModbus TCP Client\nRCT Power Client\nSun Spec\nMeters\nMeters EVSE V2\nMeters API\nMeters Modbus TCP\nMeters Sun Spec\nMeters SMA Speedwire\nMeters RCT Power\nMeters Sonnenbatterie\nMeters Legacy API\nBatteries\nBatteries Modbus TCP\nBatteries Sun Spec\nBattery Control\nRequire Meter\nHidden Proxy\nCharge Tracker\nPower Manager\nUsers\nNFC\nNFC Bricklet\nCharge Authorization\nDevice Name\nModbus TCP\nModbus TCP Debug\nWireguard\nOcpp\nEEBus\nCharge Limits\nCoredump\nPwa\nCerts\nRemote Access\nDay Ahead Prices\nSolar Forecast\nEco\nP14a Enwg\nIo Scheduler\nISO15118\nMeters ISO15118\nEv\nESP32 Ethernet V2 Co Bricklet\nOve R37",
+    "custom_frontend_modules": "Device Name\nEvse Common\nEVSE V2\nModbus TCP Client\nSun Spec\nMeters\nMeters EVSE V2\nMeters API\nMeters Sun Spec\nMeters Modbus TCP\nMeters SMA Speedwire\nMeters RCT Power\nMeters Sonnenbatterie\nMeters Legacy API\nBatteries\nBatteries Modbus TCP\nBatteries Sun Spec\nBattery Control\nCharge Tracker\nCharge Manager\nCM Networking\nPower Manager\nNetwork\nWifi\nEthernet\nWireguard\nMqtt\nMqtt Auto Discovery\nModbus TCP\nModbus TCP Debug\nOcpp\nEEBus\nNFC\nUsers\nCharge Authorization\nCerts\nRemote Access\nAutomation\nNTP\nRtc\nTime\nEvent Log\nSystem\nFirmware Update\nCharge Limits\nRequire Meter\nDay Ahead Prices\nEco\nP14a Enwg\nSolar Forecast\nStatus Alerts\nEVSE Group\nEnergy Management Group\nNetwork Group\nInterfaces Group\nUsers Group\nSystem Group\nISO15118\nMeters ISO15118\nEv\nFactory Data\nOve R37",
+    "custom_frontend_components": "EVSE Group $ Open\nEvse Common | EVSE Settings\nEvse Common | EVSE\nISO15118\nCharge Tracker\nAutomation\nEVSE Group $ Close\nEnergy Management Group $ Open\nMeters\nBatteries\nCharge Manager | Charge Manager Chargers\nPower Manager | PV Excess Settings\nCharge Manager | Charge Manager Settings\nDay Ahead Prices\nSolar Forecast\nEco\nP14a Enwg\nOve R37\nEnergy Management Group $ Close\nNetwork Group $ Open\nNetwork\nWifi | Wifi STA\nWifi | Wifi AP\nEthernet\nWireguard\nNetwork Group $ Close\nInterfaces Group $ Open\nMqtt\nModbus TCP\nOcpp\nEEBus\nInterfaces Group $ Close\nUsers Group $ Open\nUsers\nEv\nUsers Group $ Close\nSystem Group $ Open\nSystem\nCerts\nRemote Access\nTime\nEvent Log\nFirmware Update\nSystem Group $ Close",
+    "custom_frontend_status_components": "Device Name\nStatus Alerts\nEvse Common | EVSE Status\nPower Manager\nCharge Limits\nMeters\nCharge Tracker\nWifi\nEthernet\nWireguard\nMqtt\nOcpp\nRemote Access\nTime\nCharge Manager | Charge Manager Heading\nCharge Manager | Charge Manager Mode Buttons\nEco\nCharge Manager",
+    "custom_branding": "WARP",
+    "platform": "https://github.com/pioarduino/platform-espressif32.git#55.03.37",
+    "framework": [
+      "arduino"
+    ],
+    "monitor_speed": 115200,
+    "build_type": "debug",
+    "extra_scripts": [
+      "pre:pio_hooks.py",
+      "post:merge_firmware_hook.py",
+      "post:fast_reflash_upload.py"
+    ],
+    "build_src_flags": [
+      "-Os",
+      "-Wall",
+      "-Wextra",
+      "-Wshadow=local",
+      "-Werror=return-type",
+      "-Werror=format",
+      "-Wl,--require-defined=build_custom_app_desc"
+    ],
+    "custom_provisioning": "false",
+    "custom_frontend_debug": "false",
+    "custom_web_only": "false",
+    "custom_backend_modules_injections": "",
+    "custom_frontend_modules_injections": "",
+    "custom_frontend_components_injections": "",
+    "custom_frontend_status_components_injections": "",
+    "custom_fast_flash": "fast"
+  },
+  "env:warp4_tesla_ble": {
+    "extends": [
+      "env:warp4"
+    ],
+    "custom_build_cache_limit": "-1",
+    "extra_scripts": [
+      "pre:tesla_build_guard.py",
+      "pre:pio_hooks.py"
+    ],
+    "platform_packages": [
+      "platformio/framework-arduinoespressif32 @ https://github.com/Tinkerforge/arduino-esp32#0ca24d74b6ec582e2780a9fdc9aadead8e272739",
+      "platformio/framework-arduinoespressif32-libs @ symlink://"
+    ],
+    "lib_deps": [
+      "https://github.com/Tinkerforge/ArduinoJson#0b03321ed33fa6965114424fbb023260120c856b",
+      "https://github.com/Tinkerforge/strict_variant#07be0b9e301a0023a658f76247d09b7d19e2fde0",
+      "https://github.com/Tinkerforge/tfjson#55e3be48",
+      "https://github.com/Tinkerforge/tftools#f73afaea",
+      "https://github.com/Tinkerforge/tfocpp#828794fe",
+      "https://github.com/Tinkerforge/WireGuard-ESP32-Arduino#96032fd0",
+      "https://github.com/Tinkerforge/tfnetwork#6d30fda885f7a22ed97df9ab5f843c7eecf50e38",
+      "https://github.com/Tinkerforge/libcbv2g",
+      "TeslaBLEClean"
+    ],
+    "lib_ignore": [
+      "TeslaBLE"
+    ],
+    "build_flags": [
+      "-DTF_NET_ENABLE=1",
+      "-DSNTP_GET_SERVERS_FROM_DHCP=1",
+      "-DARDUINOJSON_USE_DOUBLE=1",
+      "-DARDUINOJSON_USE_LONG_LONG=1",
+      "-DNETWORK_EVENTS_MUTEX",
+      "-DUPDATE_NOCRYPT",
+      "-DBOARD_HAS_PSRAM",
+      "-DOCPP_LOG_LEVEL=4",
+      "-DOCPP_STATE_CALLBACKS",
+      "-DOCPP_SUPPORTED_FEATURE_PROFILES=\"\\\"Core,SmartCharging\\\"\"",
+      "-DOCPP_WEB_SOCKET_PING_INTERVAL=10",
+      "-DOCPP_WEB_SOCKET_PING_INTERVAL_REQUIRES_REBOOT=true",
+      "-DOCPP_METER_VALUES_ALIGNED_DATA_MAX_LENGTH=25",
+      "-DOCPP_DEFAULT_CLOCK_ALIGNED_DATA_INTERVAL=60",
+      "-DOCPP_DEFAULT_METER_VALUES_ALIGNED_DATA=\"\\\"Energy.Active.Export.Register,Energy.Active.Import.Register,Energy.Reactive.Export.Register,Energy.Reactive.Import.Register,Power.Active.Export,Power.Active.Import,Power.Offered,Power.Reactive.Export,Power.Reactive.Import,Power.Factor,Current.Import,Current.Export,Current.Offered,Voltage,Frequency,Temperature,SoC,RPM\\\"\"",
+      "-DOCPP_METER_VALUES_SAMPLED_DATA_MAX_LENGTH=25",
+      "-DOCPP_DEFAULT_METER_VALUE_SAMPLE_INTERVAL=60",
+      "-DOCPP_DEFAULT_METER_VALUES_SAMPLED_DATA=\"\\\"Energy.Active.Export.Register,Energy.Active.Import.Register,Energy.Reactive.Export.Register,Energy.Reactive.Import.Register,Power.Active.Export,Power.Active.Import,Power.Offered,Power.Reactive.Export,Power.Reactive.Import,Power.Factor,Current.Import,Current.Export,Current.Offered,Voltage,Frequency,Temperature,SoC,RPM\\\"\"",
+      "-DTF_HAL_PORT_NAMES=\"\\\"CDEFBA\\\"\"",
+      "-DTESLA_BLE_MANUAL_VEHICLE_UI=1",
+      "-fstack-usage"
+    ],
+    "custom_backend_modules": "Factory Data\nESP32 Common\nESP32 Ethernet Brick\nWatchdog\nUptime Tracker\nDebug Protocol\nEVSE V2\nEvse Common\nEvse Led\nNetwork\nNTP\nEthernet\nWifi\nNetwork Helper\nRtc Bricklet\nMqtt\nMqtt Auto Discovery\nHttp\nWS\nEvent\nSystem\nFirmware Update\nAutomation\nCharge Manager\nCM Networking\nNetwork Lib\nModbus TCP Client\nRCT Power Client\nSun Spec\nMeters\nMeters EVSE V2\nMeters API\nMeters Modbus TCP\nMeters Sun Spec\nMeters SMA Speedwire\nMeters RCT Power\nMeters Sonnenbatterie\nMeters Legacy API\nBatteries\nBatteries Modbus TCP\nBatteries Sun Spec\nBattery Control\nRequire Meter\nHidden Proxy\nCharge Tracker\nPower Manager\nUsers\nNFC\nNFC Bricklet\nCharge Authorization\nDevice Name\nModbus TCP\nModbus TCP Debug\nWireguard\nOcpp\nEEBus\nCharge Limits\nCoredump\nPwa\nCerts\nRemote Access\nDay Ahead Prices\nSolar Forecast\nEco\nP14a Enwg\nIo Scheduler\nISO15118\nMeters ISO15118\nEv\nESP32 Ethernet V2 Co Bricklet\nOve R37\nTesla Vehicle",
+    "custom_frontend_modules": "Device Name\nEvse Common\nEVSE V2\nModbus TCP Client\nSun Spec\nMeters\nMeters EVSE V2\nMeters API\nMeters Sun Spec\nMeters Modbus TCP\nMeters SMA Speedwire\nMeters RCT Power\nMeters Sonnenbatterie\nMeters Legacy API\nBatteries\nBatteries Modbus TCP\nBatteries Sun Spec\nBattery Control\nCharge Tracker\nCharge Manager\nCM Networking\nPower Manager\nNetwork\nWifi\nEthernet\nWireguard\nMqtt\nMqtt Auto Discovery\nModbus TCP\nModbus TCP Debug\nOcpp\nEEBus\nNFC\nUsers\nCharge Authorization\nCerts\nRemote Access\nAutomation\nNTP\nRtc\nTime\nEvent Log\nSystem\nFirmware Update\nCharge Limits\nRequire Meter\nDay Ahead Prices\nEco\nP14a Enwg\nSolar Forecast\nStatus Alerts\nEVSE Group\nEnergy Management Group\nNetwork Group\nInterfaces Group\nUsers Group\nSystem Group\nISO15118\nMeters ISO15118\nEv\nFactory Data\nOve R37\nTesla Vehicle",
+    "custom_frontend_components": "EVSE Group $ Open\nEvse Common | EVSE Settings\nEvse Common | EVSE\nISO15118\nCharge Tracker\nAutomation\nEVSE Group $ Close\nEnergy Management Group $ Open\nMeters\nBatteries\nCharge Manager | Charge Manager Chargers\nPower Manager | PV Excess Settings\nCharge Manager | Charge Manager Settings\nDay Ahead Prices\nSolar Forecast\nEco\nP14a Enwg\nOve R37\nEnergy Management Group $ Close\nNetwork Group $ Open\nNetwork\nWifi | Wifi STA\nWifi | Wifi AP\nEthernet\nWireguard\nNetwork Group $ Close\nInterfaces Group $ Open\nMqtt\nModbus TCP\nOcpp\nEEBus\nTesla Vehicle | Bluetooth Page\nInterfaces Group $ Close\nUsers Group $ Open\nUsers\nEv\nUsers Group $ Close\nSystem Group $ Open\nSystem\nCerts\nRemote Access\nTime\nEvent Log\nFirmware Update\nSystem Group $ Close",
+    "board": "esp32_ethernet_brick_secure",
+    "board_build.partitions": "default_16MB_secure.csv",
+    "custom_product_id": "warp4",
+    "custom_options": "manufacturer = \"Tinkerforge\"\nmanufacturer_full = \"Tinkerforge GmbH\"\nsupport_email = \"info@tinkerforge.com\"\nmanual_url = \"\"\nfirmware_info_product_id_override = \"\"\nfirmware_info_product_name_override = \"\"\nmin_data_partition_format = 0\napi_json_max_length = 10240\nweb_server_https_enabled = 1\nproduct_name = \"WARP2 Charger\"\nconfig_type = \"warp\"\nhostname_prefix = \"warp2\"\ntask_scheduler_cpu_idle = 1\nmeters_max_slots = 5\nmeters_slot_0_default_class = MeterClassID::EVSEV2\nmeters_evse_v2_default_display_name = \"WARP Charger\"\nbatteries_max_slots = 1\nfirmware_update_enable_rollback = 1\nfirmware_update_update_url = \"https://www.warp-charger.com/firmwares/\"\nfirmware_update_latest_url = \"https://www.warp-charger.com/downloads/#firmwares-warp2\"\nremote_access_host = \"my.warp-charger.com\"\npower_manager_default_meter_slot = 1\ncharge_tracker_pdf_logo = CHARGE_TRACKER_PDF_LOGO_WARP\nmanual_url = \"https://www.warp-charger.com/downloads/#documents-warp2\"\nmqtt_api_doc_url = \"https://www.warp-charger.com/api.html\"\nwarp_doc_base_url = \"https://docs.warp-charger.com\"\nproduct_name = \"WARP3 Charger\"\nhostname_prefix = \"warp3\"\nfirmware_update_latest_url = \"https://www.warp-charger.com/downloads/#firmwares-warp3\"\nmanual_url = \"https://www.warp-charger.com/downloads/#documents-warp3\"\nmin_data_partition_format = 1\nproduct_name = \"WARP4 Charger\"\nhostname_prefix = \"warp4\"\nmeters_slot_1_default_class = MeterClassID::ISO15118\nfirmware_update_latest_url = \"https://www.warp-charger.com/downloads/#firmwares-warp4\"\nfirmware_update_index_version = 3\nmanual_url = \"https://www.warp-charger.com/downloads/#documents-warp4\"\nmin_data_partition_format = 2\nove_r37_electrician_password_sha256 = \"0cbfcd751e5945972531941c4c61dc4c78af004f7206ccaf81f451c3174bc2ea\"",
+    "custom_split_esptool_ota": "true",
+    "custom_frontend_status_components": "Device Name\nStatus Alerts\nEvse Common | EVSE Status\nPower Manager\nCharge Limits\nMeters\nCharge Tracker\nWifi\nEthernet\nWireguard\nMqtt\nOcpp\nRemote Access\nTime\nCharge Manager | Charge Manager Heading\nCharge Manager | Charge Manager Mode Buttons\nEco\nCharge Manager",
+    "custom_branding": "WARP",
+    "platform": "https://github.com/pioarduino/platform-espressif32.git#55.03.37",
+    "framework": [
+      "arduino"
+    ],
+    "monitor_speed": 115200,
+    "build_type": "debug",
+    "build_src_flags": [
+      "-Os",
+      "-Wall",
+      "-Wextra",
+      "-Wshadow=local",
+      "-Werror=return-type",
+      "-Werror=format",
+      "-Wl,--require-defined=build_custom_app_desc"
+    ],
+    "custom_provisioning": "false",
+    "custom_frontend_debug": "false",
+    "custom_web_only": "false",
+    "custom_signature_preset": "",
+    "custom_backend_modules_injections": "",
+    "custom_frontend_modules_injections": "",
+    "custom_frontend_components_injections": "",
+    "custom_frontend_status_components_injections": "",
+    "custom_fast_flash": "fast"
+  },
+  "env:warp4_tesla_ble_web": {
+    "extends": [
+      "env:warp4_tesla_ble"
+    ],
+    "platform_packages": [
+      "platformio/framework-arduinoespressif32 @ https://github.com/Tinkerforge/arduino-esp32#tf-3-3-12",
+      "platformio/framework-arduinoespressif32-libs @ symlink://packages/esp32-arduino-libs#tf-esp-secure-20260922_4f0ab20592113e12c1792ba670c48aad04ceb288"
+    ],
+    "extra_scripts": [
+      "pre:pio_hooks.py"
+    ],
+    "custom_web_only": "true",
+    "custom_build_cache_limit": "-1",
+    "lib_deps": [
+      "https://github.com/Tinkerforge/ArduinoJson#0b03321ed33fa6965114424fbb023260120c856b",
+      "https://github.com/Tinkerforge/strict_variant#07be0b9e301a0023a658f76247d09b7d19e2fde0",
+      "https://github.com/Tinkerforge/tfjson#55e3be48",
+      "https://github.com/Tinkerforge/tftools#f73afaea",
+      "https://github.com/Tinkerforge/tfocpp#828794fe",
+      "https://github.com/Tinkerforge/WireGuard-ESP32-Arduino#96032fd0",
+      "https://github.com/Tinkerforge/tfnetwork#6d30fda885f7a22ed97df9ab5f843c7eecf50e38",
+      "https://github.com/Tinkerforge/libcbv2g",
+      "TeslaBLEClean"
+    ],
+    "lib_ignore": [
+      "TeslaBLE"
+    ],
+    "build_flags": [
+      "-DTF_NET_ENABLE=1",
+      "-DSNTP_GET_SERVERS_FROM_DHCP=1",
+      "-DARDUINOJSON_USE_DOUBLE=1",
+      "-DARDUINOJSON_USE_LONG_LONG=1",
+      "-DNETWORK_EVENTS_MUTEX",
+      "-DUPDATE_NOCRYPT",
+      "-DBOARD_HAS_PSRAM",
+      "-DOCPP_LOG_LEVEL=4",
+      "-DOCPP_STATE_CALLBACKS",
+      "-DOCPP_SUPPORTED_FEATURE_PROFILES=\"\\\"Core,SmartCharging\\\"\"",
+      "-DOCPP_WEB_SOCKET_PING_INTERVAL=10",
+      "-DOCPP_WEB_SOCKET_PING_INTERVAL_REQUIRES_REBOOT=true",
+      "-DOCPP_METER_VALUES_ALIGNED_DATA_MAX_LENGTH=25",
+      "-DOCPP_DEFAULT_CLOCK_ALIGNED_DATA_INTERVAL=60",
+      "-DOCPP_DEFAULT_METER_VALUES_ALIGNED_DATA=\"\\\"Energy.Active.Export.Register,Energy.Active.Import.Register,Energy.Reactive.Export.Register,Energy.Reactive.Import.Register,Power.Active.Export,Power.Active.Import,Power.Offered,Power.Reactive.Export,Power.Reactive.Import,Power.Factor,Current.Import,Current.Export,Current.Offered,Voltage,Frequency,Temperature,SoC,RPM\\\"\"",
+      "-DOCPP_METER_VALUES_SAMPLED_DATA_MAX_LENGTH=25",
+      "-DOCPP_DEFAULT_METER_VALUE_SAMPLE_INTERVAL=60",
+      "-DOCPP_DEFAULT_METER_VALUES_SAMPLED_DATA=\"\\\"Energy.Active.Export.Register,Energy.Active.Import.Register,Energy.Reactive.Export.Register,Energy.Reactive.Import.Register,Power.Active.Export,Power.Active.Import,Power.Offered,Power.Reactive.Export,Power.Reactive.Import,Power.Factor,Current.Import,Current.Export,Current.Offered,Voltage,Frequency,Temperature,SoC,RPM\\\"\"",
+      "-DTF_HAL_PORT_NAMES=\"\\\"CDEFBA\\\"\"",
+      "-DTESLA_BLE_MANUAL_VEHICLE_UI=1",
+      "-fstack-usage"
+    ],
+    "custom_backend_modules": "Factory Data\nESP32 Common\nESP32 Ethernet Brick\nWatchdog\nUptime Tracker\nDebug Protocol\nEVSE V2\nEvse Common\nEvse Led\nNetwork\nNTP\nEthernet\nWifi\nNetwork Helper\nRtc Bricklet\nMqtt\nMqtt Auto Discovery\nHttp\nWS\nEvent\nSystem\nFirmware Update\nAutomation\nCharge Manager\nCM Networking\nNetwork Lib\nModbus TCP Client\nRCT Power Client\nSun Spec\nMeters\nMeters EVSE V2\nMeters API\nMeters Modbus TCP\nMeters Sun Spec\nMeters SMA Speedwire\nMeters RCT Power\nMeters Sonnenbatterie\nMeters Legacy API\nBatteries\nBatteries Modbus TCP\nBatteries Sun Spec\nBattery Control\nRequire Meter\nHidden Proxy\nCharge Tracker\nPower Manager\nUsers\nNFC\nNFC Bricklet\nCharge Authorization\nDevice Name\nModbus TCP\nModbus TCP Debug\nWireguard\nOcpp\nEEBus\nCharge Limits\nCoredump\nPwa\nCerts\nRemote Access\nDay Ahead Prices\nSolar Forecast\nEco\nP14a Enwg\nIo Scheduler\nISO15118\nMeters ISO15118\nEv\nESP32 Ethernet V2 Co Bricklet\nOve R37\nTesla Vehicle",
+    "custom_frontend_modules": "Device Name\nEvse Common\nEVSE V2\nModbus TCP Client\nSun Spec\nMeters\nMeters EVSE V2\nMeters API\nMeters Sun Spec\nMeters Modbus TCP\nMeters SMA Speedwire\nMeters RCT Power\nMeters Sonnenbatterie\nMeters Legacy API\nBatteries\nBatteries Modbus TCP\nBatteries Sun Spec\nBattery Control\nCharge Tracker\nCharge Manager\nCM Networking\nPower Manager\nNetwork\nWifi\nEthernet\nWireguard\nMqtt\nMqtt Auto Discovery\nModbus TCP\nModbus TCP Debug\nOcpp\nEEBus\nNFC\nUsers\nCharge Authorization\nCerts\nRemote Access\nAutomation\nNTP\nRtc\nTime\nEvent Log\nSystem\nFirmware Update\nCharge Limits\nRequire Meter\nDay Ahead Prices\nEco\nP14a Enwg\nSolar Forecast\nStatus Alerts\nEVSE Group\nEnergy Management Group\nNetwork Group\nInterfaces Group\nUsers Group\nSystem Group\nISO15118\nMeters ISO15118\nEv\nFactory Data\nOve R37\nTesla Vehicle",
+    "custom_frontend_components": "EVSE Group $ Open\nEvse Common | EVSE Settings\nEvse Common | EVSE\nISO15118\nCharge Tracker\nAutomation\nEVSE Group $ Close\nEnergy Management Group $ Open\nMeters\nBatteries\nCharge Manager | Charge Manager Chargers\nPower Manager | PV Excess Settings\nCharge Manager | Charge Manager Settings\nDay Ahead Prices\nSolar Forecast\nEco\nP14a Enwg\nOve R37\nEnergy Management Group $ Close\nNetwork Group $ Open\nNetwork\nWifi | Wifi STA\nWifi | Wifi AP\nEthernet\nWireguard\nNetwork Group $ Close\nInterfaces Group $ Open\nMqtt\nModbus TCP\nOcpp\nEEBus\nTesla Vehicle | Bluetooth Page\nInterfaces Group $ Close\nUsers Group $ Open\nUsers\nEv\nUsers Group $ Close\nSystem Group $ Open\nSystem\nCerts\nRemote Access\nTime\nEvent Log\nFirmware Update\nSystem Group $ Close",
+    "board": "esp32_ethernet_brick_secure",
+    "board_build.partitions": "default_16MB_secure.csv",
+    "custom_product_id": "warp4",
+    "custom_options": "manufacturer = \"Tinkerforge\"\nmanufacturer_full = \"Tinkerforge GmbH\"\nsupport_email = \"info@tinkerforge.com\"\nmanual_url = \"\"\nfirmware_info_product_id_override = \"\"\nfirmware_info_product_name_override = \"\"\nmin_data_partition_format = 0\napi_json_max_length = 10240\nweb_server_https_enabled = 1\nproduct_name = \"WARP2 Charger\"\nconfig_type = \"warp\"\nhostname_prefix = \"warp2\"\ntask_scheduler_cpu_idle = 1\nmeters_max_slots = 5\nmeters_slot_0_default_class = MeterClassID::EVSEV2\nmeters_evse_v2_default_display_name = \"WARP Charger\"\nbatteries_max_slots = 1\nfirmware_update_enable_rollback = 1\nfirmware_update_update_url = \"https://www.warp-charger.com/firmwares/\"\nfirmware_update_latest_url = \"https://www.warp-charger.com/downloads/#firmwares-warp2\"\nremote_access_host = \"my.warp-charger.com\"\npower_manager_default_meter_slot = 1\ncharge_tracker_pdf_logo = CHARGE_TRACKER_PDF_LOGO_WARP\nmanual_url = \"https://www.warp-charger.com/downloads/#documents-warp2\"\nmqtt_api_doc_url = \"https://www.warp-charger.com/api.html\"\nwarp_doc_base_url = \"https://docs.warp-charger.com\"\nproduct_name = \"WARP3 Charger\"\nhostname_prefix = \"warp3\"\nfirmware_update_latest_url = \"https://www.warp-charger.com/downloads/#firmwares-warp3\"\nmanual_url = \"https://www.warp-charger.com/downloads/#documents-warp3\"\nmin_data_partition_format = 1\nproduct_name = \"WARP4 Charger\"\nhostname_prefix = \"warp4\"\nmeters_slot_1_default_class = MeterClassID::ISO15118\nfirmware_update_latest_url = \"https://www.warp-charger.com/downloads/#firmwares-warp4\"\nfirmware_update_index_version = 3\nmanual_url = \"https://www.warp-charger.com/downloads/#documents-warp4\"\nmin_data_partition_format = 2\nove_r37_electrician_password_sha256 = \"0cbfcd751e5945972531941c4c61dc4c78af004f7206ccaf81f451c3174bc2ea\"",
+    "custom_split_esptool_ota": "true",
+    "custom_frontend_status_components": "Device Name\nStatus Alerts\nEvse Common | EVSE Status\nPower Manager\nCharge Limits\nMeters\nCharge Tracker\nWifi\nEthernet\nWireguard\nMqtt\nOcpp\nRemote Access\nTime\nCharge Manager | Charge Manager Heading\nCharge Manager | Charge Manager Mode Buttons\nEco\nCharge Manager",
+    "custom_branding": "WARP",
+    "platform": "https://github.com/pioarduino/platform-espressif32.git#55.03.37",
+    "framework": [
+      "arduino"
+    ],
+    "monitor_speed": 115200,
+    "build_type": "debug",
+    "build_src_flags": [
+      "-Os",
+      "-Wall",
+      "-Wextra",
+      "-Wshadow=local",
+      "-Werror=return-type",
+      "-Werror=format",
+      "-Wl,--require-defined=build_custom_app_desc"
+    ],
+    "custom_provisioning": "false",
+    "custom_frontend_debug": "false",
+    "custom_signature_preset": "",
+    "custom_backend_modules_injections": "",
+    "custom_frontend_modules_injections": "",
+    "custom_frontend_components_injections": "",
+    "custom_frontend_status_components_injections": "",
+    "custom_fast_flash": "fast"
+  },
+  "env:warp2": {
+    "extends": [
+      "base_esp32_ethernet"
+    ],
+    "lib_deps": [
+      "https://github.com/Tinkerforge/ArduinoJson#0b03321ed33fa6965114424fbb023260120c856b",
+      "https://github.com/Tinkerforge/strict_variant#07be0b9e301a0023a658f76247d09b7d19e2fde0",
+      "https://github.com/Tinkerforge/tfjson#55e3be48",
+      "https://github.com/Tinkerforge/tftools#f73afaea",
+      "https://github.com/Tinkerforge/tfocpp#828794fe",
+      "https://github.com/Tinkerforge/WireGuard-ESP32-Arduino#96032fd0",
+      "https://github.com/Tinkerforge/tfnetwork#6d30fda885f7a22ed97df9ab5f843c7eecf50e38"
+    ],
+    "build_flags": [
+      "-DTF_NET_ENABLE=1",
+      "-DSNTP_GET_SERVERS_FROM_DHCP=1",
+      "-DARDUINOJSON_USE_DOUBLE=1",
+      "-DARDUINOJSON_USE_LONG_LONG=1",
+      "-DNETWORK_EVENTS_MUTEX",
+      "-DUPDATE_NOCRYPT",
+      "-DBOARD_HAS_PSRAM",
+      "-DOCPP_LOG_LEVEL=4",
+      "-DOCPP_STATE_CALLBACKS",
+      "-DOCPP_SUPPORTED_FEATURE_PROFILES=\"\\\"Core,SmartCharging\\\"\"",
+      "-DOCPP_WEB_SOCKET_PING_INTERVAL=10",
+      "-DOCPP_WEB_SOCKET_PING_INTERVAL_REQUIRES_REBOOT=true",
+      "-DOCPP_METER_VALUES_ALIGNED_DATA_MAX_LENGTH=25",
+      "-DOCPP_DEFAULT_CLOCK_ALIGNED_DATA_INTERVAL=60",
+      "-DOCPP_DEFAULT_METER_VALUES_ALIGNED_DATA=\"\\\"Energy.Active.Export.Register,Energy.Active.Import.Register,Energy.Reactive.Export.Register,Energy.Reactive.Import.Register,Power.Active.Export,Power.Active.Import,Power.Offered,Power.Reactive.Export,Power.Reactive.Import,Power.Factor,Current.Import,Current.Export,Current.Offered,Voltage,Frequency,Temperature,SoC,RPM\\\"\"",
+      "-DOCPP_METER_VALUES_SAMPLED_DATA_MAX_LENGTH=25",
+      "-DOCPP_DEFAULT_METER_VALUE_SAMPLE_INTERVAL=60",
+      "-DOCPP_DEFAULT_METER_VALUES_SAMPLED_DATA=\"\\\"Energy.Active.Export.Register,Energy.Active.Import.Register,Energy.Reactive.Export.Register,Energy.Reactive.Import.Register,Power.Active.Export,Power.Active.Import,Power.Offered,Power.Reactive.Export,Power.Reactive.Import,Power.Factor,Current.Import,Current.Export,Current.Offered,Voltage,Frequency,Temperature,SoC,RPM\\\"\""
+    ],
+    "custom_product_id": "warp2",
+    "custom_branding": "WARP",
+    "custom_options": "manufacturer = \"Tinkerforge\"\nmanufacturer_full = \"Tinkerforge GmbH\"\nsupport_email = \"info@tinkerforge.com\"\nmanual_url = \"\"\nfirmware_info_product_id_override = \"\"\nfirmware_info_product_name_override = \"\"\nmin_data_partition_format = 0\napi_json_max_length = 10240\nweb_server_https_enabled = 1\nproduct_name = \"WARP2 Charger\"\nconfig_type = \"warp\"\nhostname_prefix = \"warp2\"\ntask_scheduler_cpu_idle = 1\nmeters_max_slots = 5\nmeters_slot_0_default_class = MeterClassID::EVSEV2\nmeters_evse_v2_default_display_name = \"WARP Charger\"\nbatteries_max_slots = 1\nfirmware_update_enable_rollback = 1\nfirmware_update_update_url = \"https://www.warp-charger.com/firmwares/\"\nfirmware_update_latest_url = \"https://www.warp-charger.com/downloads/#firmwares-warp2\"\nremote_access_host = \"my.warp-charger.com\"\npower_manager_default_meter_slot = 1\ncharge_tracker_pdf_logo = CHARGE_TRACKER_PDF_LOGO_WARP\nmanual_url = \"https://www.warp-charger.com/downloads/#documents-warp2\"\nmqtt_api_doc_url = \"https://www.warp-charger.com/api.html\"\nwarp_doc_base_url = \"https://docs.warp-charger.com\"",
+    "custom_backend_modules": "ESP32 Common\nESP32 Ethernet Brick\nWatchdog\nUptime Tracker\nDebug Protocol\nEVSE V2\nEvse Common\nEvse Led\nNetwork\nNTP\nEthernet\nWifi\nNetwork Helper\nRtc Bricklet\nMqtt\nMqtt Auto Discovery\nHttp\nWS\nEvent\nSystem\nFirmware Update\nAutomation\nCharge Manager\nCM Networking\nNetwork Lib\nModbus TCP Client\nRCT Power Client\nSun Spec\nMeters\nMeters EVSE V2\nMeters API\nMeters Modbus TCP\nMeters Sun Spec\nMeters SMA Speedwire\nMeters RCT Power\nMeters Sonnenbatterie\nMeters Legacy API\nBatteries\nBatteries Modbus TCP\nBatteries Sun Spec\nBattery Control\nRequire Meter\nHidden Proxy\nCharge Tracker\nPower Manager\nUsers\nNFC\nNFC Bricklet\nCharge Authorization\nDevice Name\nModbus TCP\nModbus TCP Debug\nWireguard\nOcpp\nEEBus\nCharge Limits\nCoredump\nPwa\nCerts\nRemote Access\nDay Ahead Prices\nSolar Forecast\nEco\nP14a Enwg\nIo Scheduler",
+    "custom_frontend_modules": "Device Name\nEvse Common\nEVSE V2\nModbus TCP Client\nSun Spec\nMeters\nMeters EVSE V2\nMeters API\nMeters Sun Spec\nMeters Modbus TCP\nMeters SMA Speedwire\nMeters RCT Power\nMeters Sonnenbatterie\nMeters Legacy API\nBatteries\nBatteries Modbus TCP\nBatteries Sun Spec\nBattery Control\nCharge Tracker\nCharge Manager\nCM Networking\nPower Manager\nNetwork\nWifi\nEthernet\nWireguard\nMqtt\nMqtt Auto Discovery\nModbus TCP\nModbus TCP Debug\nOcpp\nEEBus\nNFC\nUsers\nCharge Authorization\nCerts\nRemote Access\nAutomation\nNTP\nRtc\nTime\nEvent Log\nSystem\nFirmware Update\nCharge Limits\nRequire Meter\nDay Ahead Prices\nEco\nP14a Enwg\nSolar Forecast\nStatus Alerts\nEVSE Group\nEnergy Management Group\nNetwork Group\nInterfaces Group\nUsers Group\nSystem Group",
+    "custom_frontend_components": "EVSE Group $ Open\nEvse Common | EVSE Settings\nEvse Common | EVSE\nCharge Tracker\nAutomation\nEVSE Group $ Close\nEnergy Management Group $ Open\nMeters\nBatteries\nCharge Manager | Charge Manager Chargers\nPower Manager | PV Excess Settings\nCharge Manager | Charge Manager Settings\nDay Ahead Prices\nSolar Forecast\nEco\nP14a Enwg\nEnergy Management Group $ Close\nNetwork Group $ Open\nNetwork\nWifi | Wifi STA\nWifi | Wifi AP\nEthernet\nWireguard\nNetwork Group $ Close\nInterfaces Group $ Open\nMqtt\nModbus TCP\nOcpp\nEEBus\nInterfaces Group $ Close\nUsers Group $ Open\nUsers\nUsers Group $ Close\nSystem Group $ Open\nSystem\nCerts\nRemote Access\nTime\nEvent Log\nFirmware Update\nSystem Group $ Close",
+    "custom_frontend_status_components": "Device Name\nStatus Alerts\nEvse Common | EVSE Status\nPower Manager\nCharge Limits\nMeters\nCharge Tracker\nWifi\nEthernet\nWireguard\nMqtt\nOcpp\nRemote Access\nTime\nCharge Manager | Charge Manager Heading\nCharge Manager | Charge Manager Mode Buttons\nEco\nCharge Manager",
+    "board": "esp32_ethernet_brick",
+    "platform_packages": [
+      "platformio/framework-arduinoespressif32 @ https://github.com/Tinkerforge/arduino-esp32#tf-3-3-12",
+      "platformio/framework-arduinoespressif32-libs @ symlink://packages/esp32-arduino-libs#tf-esp-ethernet-20260922_b31fbe4b2ac28fc16ca9a12a88e78240f8b3d6bf"
+    ],
+    "platform": "https://github.com/pioarduino/platform-espressif32.git#55.03.37",
+    "framework": [
+      "arduino"
+    ],
+    "monitor_speed": 115200,
+    "build_type": "debug",
+    "extra_scripts": [
+      "pre:pio_hooks.py",
+      "post:merge_firmware_hook.py",
+      "post:fast_reflash_upload.py"
+    ],
+    "board_build.partitions": "default_16MB_coredump.csv",
+    "build_src_flags": [
+      "-Os",
+      "-Wall",
+      "-Wextra",
+      "-Wshadow=local",
+      "-Werror=return-type",
+      "-Werror=format",
+      "-Wl,--require-defined=build_custom_app_desc"
+    ],
+    "custom_split_esptool_ota": "false",
+    "custom_provisioning": "false",
+    "custom_frontend_debug": "false",
+    "custom_web_only": "false",
+    "custom_signature_preset": "",
+    "custom_backend_modules_injections": "",
+    "custom_frontend_modules_injections": "",
+    "custom_frontend_components_injections": "",
+    "custom_frontend_status_components_injections": "",
+    "custom_fast_flash": "fast"
+  }
+}

@@ -15,7 +15,8 @@ int main()
         h.inject(h.response(h.last(),{asleep,sizeof(asleep)}));
         h.on_frame=[](Harness &p) { assert(p.last().plaintext==std::vector<uint8_t>({0x10,30})); p.accepted=false; };
         h.vehicle.tick(); assert(h.last().plaintext==std::vector<uint8_t>({0x10,30}));
-        h.accepted=true; h.clock+=100; h.vehicle.tick();
+        // Refused wake TX: follow-up status after the first request backoff (250 ms).
+        h.accepted=true; h.clock+=Vehicle::initial_retry_delay_ms; h.vehicle.tick();
         assert(h.last().plaintext==std::vector<uint8_t>({0x0a,0}));
         h.inject(h.response(h.last(),{awake,sizeof(awake)},2)); h.vehicle.tick(); h.establish();
         h.inject(h.response(h.last(),{soc,sizeof(soc)})); assert(results.size()==1 && results[0].code==VehicleResultCode::Soc);

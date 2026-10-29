@@ -51,15 +51,25 @@ int main()
     //    is refused, the renewed challenge carries a new UUID and the predecessor
     //    UUID is refused afterwards. No KeyDenied/success is invented.
     //    (Longer total than production so the renewed challenge fits the budget.)
-    {
+    //    Single-phase (phase_ms==0, pairing verify): legacy renewal after the 100 ms
+    //    retry delay. Phased (SoC): renewed at once at the transport interval.
+    for(const bool phased:{false,true}) {
+        const VehicleTiming timing=phased?VehicleTiming{9000,1000,10000,session_auth_phase_ms}:VehicleTiming{9000,1000,10000};
         Harness h; std::vector<VehicleResult> results; write_delay=150; h.hook=slow_write;
-        assert(h.vehicle.open(h.link)); assert(h.vehicle.status(12,h.callback(results),{9000,1000,10000}));
+        assert(h.vehicle.open(h.link)); assert(h.vehicle.status(12,h.callback(results),timing));
         const uint32_t created=h.clock; h.vehicle.tick(); const auto first=h.last(); assert(first.hello && h.clock==created+900);
         h.clock+=1000; h.hook=slow_write; h.vehicle.tick(); // response budget spent: identical replay
         assert(h.sent.size()==2 && h.last().hello && h.last().uuid==first.uuid && h.clock==created+2800);
         h.clock=created+4000; h.hook=nullptr; h.inject(h.hello(first)); h.vehicle.tick();
-        assert(results.empty() && h.sent.size()==2); // stale (maxLatency); renewal backoff armed
-        h.clock+=100; h.hook=slow_write; h.vehicle.tick(); const auto second=h.last(); assert(second.hello && second.uuid!=first.uuid);
+        if(!phased) {
+            assert(results.empty() && h.sent.size()==2); // stale (maxLatency); renewal backoff armed
+            h.clock+=100; h.hook=slow_write; h.vehicle.tick();
+        } else {
+            // Stale (maxLatency) reply refused; the challenge is renewed at once at the
+            // transport interval (reference vehicle.cpp:325-334), never with that reply.
+            assert(results.empty() && h.sent.size()==3);
+        }
+        const auto second=h.last(); assert(second.hello && second.uuid!=first.uuid);
         h.clock+=10; h.hook=nullptr; h.inject(h.hello(first)); h.vehicle.tick();
         assert(results.empty() && h.last().hello && h.last().uuid==second.uuid);
         // Bad HMAC on the current UUID within the window is still refused.

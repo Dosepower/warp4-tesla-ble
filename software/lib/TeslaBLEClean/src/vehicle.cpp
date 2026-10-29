@@ -66,12 +66,12 @@ bool Vehicle::enqueue(Kind kind,WakePolicy policy,uint64_t context,VehicleComple
     if(operation_sequence_==UINT64_MAX) { operation_retired_=true; }
     if(exhausted() || !valid_ || !connected_ || operation_sequence_==UINT64_MAX || context==0 || count_==commands_.size() ||
        timing.total_ms==0 || timing.response_ms==0 || timing.transmit_ms==0 || timing.total_ms>INT32_MAX ||
-       timing.response_ms>INT32_MAX || timing.transmit_ms>INT32_MAX ||
+       timing.response_ms>INT32_MAX || timing.transmit_ms>INT32_MAX || timing.phase_ms>INT32_MAX ||
        (policy!=WakePolicy::NoWakeSkip && policy!=WakePolicy::WakeIfNeeded)) { return false; }
     for(size_t i=0;i<count_;++i) { if(commands_[i].context==context) { return false; } }
     Command c; c.kind=kind; c.policy=policy; c.context=context; c.generation=generation_;
     c.authentication_context=++operation_sequence_;
-    c.started=ports_.now(ports_.context); c.timing=timing; c.completion=std::move(completion);
+    c.started=c.phase_started=ports_.now(ports_.context); c.timing=timing; c.completion=std::move(completion);
     c.diagnostics.vcsec_reused=vcsec_.authentication.ready(); c.diagnostics.info_reused=info_.authentication.ready();
     c.stage=kind==Kind::Pair?Stage::Pair:Stage::VcsecAuth; commands_[count_++]=std::move(c); return true;
 }
@@ -112,6 +112,24 @@ void Vehicle::finish(VehicleResultCode code,uint8_t battery,SleepState sleep,boo
     result.awake_after_wake=retired.awake_after_wake;
     result.diagnostics=d;
     retired.completion(result);
+}
+uint32_t Vehicle::backoff(Command &c)
+{
+    // Request failure retries (build/TX failure, status/charge response timeout,
+    // retryable vehicle fault 1/2/11) follow reference retry_command
+    // (tesla-ble v6.2.0 vehicle.cpp:526-552): 250 ms, then x2, capped at 8 s.
+    // The reference adds 0..100 ms clock jitter; it is omitted here so the
+    // schedule stays deterministic (no protocol meaning, only spreading).
+    // Still bounded by max_attempts (3 first sends + MAX_RETRIES 5), the phase
+    // budget and the absolute deadline, all checked in tick() before any delay
+    // elapses. Wake-status probes and session copies keep their 1 s transport pace.
+    // Single-phase operations (phase_ms==0: pairing PRESENT_KEY, approval
+    // verification polls, other legacy callers) keep their original fixed
+    // 100 ms retry delay; their bounded pairing proof schedule is unchanged.
+    if(!c.timing.phase_ms) { return legacy_retry_delay_ms; }
+    const unsigned shift=std::min<unsigned>(c.retries,5);
+    if(c.retries!=~0u) { ++c.retries; }
+    return std::min<uint32_t>(initial_retry_delay_ms<<shift,max_retry_delay_ms);
 }
 void Vehicle::retry(Stage stage,uint32_t now,uint32_t delay)
 {
@@ -173,7 +191,11 @@ bool Vehicle::authenticate(Domain domain,Stage waiting,Stage next,uint32_t now)
     auto &c=commands_[0]; auto &ch=channel(domain);
     if(ch.authentication.ready() && !c.refresh) { c.stage=next; return true; }
     if(!advance()) { fail(VehicleFailure::Internal); return false; }
-    ++c.attempts; c.transmitted=now; c.stage=waiting;
+    // Phase operations: session request copies are bounded by the phase (time,
+    // challenges, replays), not by the generic request attempt cap. Single-phase
+    // (legacy/pairing) operations keep counting every session request attempt.
+    if(!c.timing.phase_ms) { ++c.attempts; }
+    c.transmitted=now; c.stage=waiting;
     Transmission tx{this,ports_,serial_,generation_,now,c.started,c.timing};
     const OperationTime time=operation_time(c);
     const ChallengeTransport transport{transmit_challenge,&tx,transmit_clock};
@@ -185,6 +207,9 @@ bool Vehicle::authenticate(Domain domain,Stage waiting,Stage next,uint32_t now)
     if(!replaying && (result==ChallengeResult::Sent || result==ChallengeResult::Established || result==ChallengeResult::Superseded)) {
         bump(c.diagnostics.challenges); // a new challenge (UUID) actually went out
     }
+    // A refused/failed session request is a failure retry and counts toward the
+    // generic attempt cap (persistent transport refusal ends fast and bounded).
+    if(c.timing.phase_ms && result!=ChallengeResult::Sent && result!=ChallengeResult::Established && result!=ChallengeResult::Exhausted) { ++c.attempts; }
     if(serial_!=tx.serial) { return false; }
     // Response wait counts from full ATT-acknowledged TX completion, never from
     // before a multi-write request (official dispatcher.go tryStartSession).
@@ -193,7 +218,12 @@ bool Vehicle::authenticate(Domain domain,Stage waiting,Stage next,uint32_t now)
     if(result==ChallengeResult::Sent || result==ChallengeResult::Established) { drain(tx); }
     else if(result==ChallengeResult::KeyDenied) { finish(VehicleResultCode::KeyDenied); }
     else if(result==ChallengeResult::Expired) { finish(VehicleResultCode::Expired); }
-    else if(result==ChallengeResult::Exhausted) { fail(VehicleFailure::ChallengeCap); }
+    else if(result==ChallengeResult::Exhausted) {
+        // Challenge budget spent but the phase still open: keep waiting (no TX)
+        // for a reply to the last fresh challenge; tick ends the phase on time.
+        // Single-phase (legacy/pairing) operations end at the challenge cap as before.
+        if(c.timing.phase_ms && time.phase_open(now)) { c.transmitted=now; } else { fail(VehicleFailure::ChallengeCap); }
+    }
     else if(result==ChallengeResult::Invalid) { fail(VehicleFailure::ChallengeInvalid); }
     else { retry(domain==Domain::Vcsec?Stage::VcsecAuth:Stage::InfoAuth,now); drain(tx); }
     return false;
@@ -213,16 +243,18 @@ void Vehicle::encrypted(Domain domain,Bytes payload,Stage waiting,uint32_t now)
         OutgoingMessages messages(*ch.authentication.crypto(),session,{vin_.data(),17},{point.data(),65});
         built=messages.build(payload,route,now-ch.clock_anchor,5,ports_.random,encoded);
     }
-    if(!built) { retry(c.stage,now); return; }
+    if(!built) { retry(c.stage,now,backoff(c)); return; }
     // Reserve every potentially exposed counter, including partial/refused sends. Never roll it back.
     ch.high_water=encoded.counter; last_uuid_=route.uuid; uuid_used_=true;
     Transmission tx{this,ports_,serial_,generation_,now,c.started,c.timing};
     const Stage sending=c.stage;
     // An explicit wake authorization is consumed before possible wire exposure,
     // not after the adapter reports success. A refused write may have reached the car.
-    if(waiting==Stage::WaitWake) { c.wake_sent=true; }
+    if(waiting==Stage::WaitWake) { c.wake_sent=true; c.phase_started=now; }
     if(!transmit({encoded.bytes.data(),encoded.length},tx)) {
-        if(serial_==tx.serial) { retry(waiting==Stage::WaitWake?Stage::Status:sending,now); drain(tx); } return;
+        if(serial_==tx.serial) {
+            retry(waiting==Stage::WaitWake?Stage::Status:sending,now,backoff(c)); drain(tx);
+        } return;
     }
     if(serial_!=tx.serial) { return; }
     Request request; request.uuid=route.uuid; request.identifier_length=encoded.identifier_length;
@@ -244,9 +276,20 @@ void Vehicle::tick()
     if(exhausted() || !connected_ || !count_ || transmission_) { return; }
     const uint32_t now=ports_.now(ports_.context); auto &c=commands_[0];
     if(now-c.started>=c.timing.total_ms) { finish(VehicleResultCode::Expired); return; }
+    // Own step budget per phase (session establishment, awake wait), checked before
+    // any backoff; always additionally inside the absolute deadline above.
+    if(c.timing.phase_ms && now-c.phase_started>=c.timing.phase_ms) {
+        if(in_auth(c)) { fail(VehicleFailure::ChallengeCap); return; }
+        if(in_wake(c)) { fail(VehicleFailure::WakePollCap); return; }
+    }
     if(c.delayed) { if(now-c.retry_at<c.retry_delay) { return; } c.delayed=false; }
     if(c.stage==Stage::WaitVcsecAuth || c.stage==Stage::WaitInfoAuth || c.stage==Stage::WaitStatus || c.stage==Stage::WaitCharge || c.stage==Stage::WaitWake) {
-        if(now-c.transmitted<c.timing.response_ms) { return; }
+        // Session requests: resent/renewed at the transport interval (reference
+        // vehicle.cpp:319-344) instead of after a full response budget.
+        // Single-phase (legacy/pairing) operations keep their original schedule.
+        const bool phased=c.timing.phase_ms!=0;
+        const bool auth_wait=c.stage==Stage::WaitVcsecAuth || c.stage==Stage::WaitInfoAuth;
+        if(now-c.transmitted<(phased && auth_wait?std::min(c.timing.response_ms,transport_retry_interval_ms):c.timing.response_ms)) { return; }
         bump(c.diagnostics.response_timeouts);
         Stage next=Stage::Status;
         if(c.stage==Stage::WaitVcsecAuth) { next=Stage::VcsecAuth; }
@@ -255,13 +298,19 @@ void Vehicle::tick()
         // Response budget after the full framed TX is spent. A still-fresh
         // challenge is replayed at once (no gap in which a reply to it could be
         // dropped by stage); everything else keeps the ordinary retry backoff.
-        const bool replay=(next==Stage::VcsecAuth || next==Stage::InfoAuth) &&
-            channel(next==Stage::VcsecAuth?Domain::Vcsec:Domain::Infotainment).authentication.replayable(operation_time(c),now);
-        // A wake is sent once only; after its timeout ask for status, never send another wake.
-        if(!replay) { retry(next,now); return; }
+        // A session request is replayed (still fresh) or renewed (new challenge)
+        // at once by authenticate(), bounded by the phase. A wake is sent once only;
+        // after its timeout ask for status at the transport pace, never another wake.
+        if(!phased) {
+            // Original single-phase schedule: replay a still-fresh challenge at once,
+            // otherwise the fixed retry delay before the next session request/status.
+            const bool replay=(next==Stage::VcsecAuth || next==Stage::InfoAuth) &&
+                channel(next==Stage::VcsecAuth?Domain::Vcsec:Domain::Infotainment).authentication.replayable(operation_time(c),now);
+            if(!replay) { retry(next,now); return; }
+        } else if(!auth_wait) { retry(next,now,in_wake(c)?wake_status_interval_ms:backoff(c)); return; }
         c.stage=next; c.delayed=false;
     }
-    if(c.attempts>=8) { fail(VehicleFailure::AttemptCap); return; }
+    if(c.attempts>=max_attempts) { fail(VehicleFailure::AttemptCap); return; }
     if(c.wake_polls>=max_wake_status_polls) { fail(VehicleFailure::WakePollCap); return; }
     for(unsigned transitions=0;transitions<3 && count_;++transitions) {
         switch(c.stage) {
@@ -337,6 +386,16 @@ void Vehicle::frame(const Frame &incoming,uint32_t now)
     const uint32_t current=ports_.now(ports_.context);
     auto &c=commands_[0]; bump(c.diagnostics.frames);
     if(now-c.started>=c.timing.total_ms || current-c.started>=c.timing.total_ms) { return; }
+    // The current phase budget (session establishment, post-wake awake wait) is
+    // enforced at RX admission too, not only in tick(): the worker dispatches RX
+    // before the next tick, and an authentic answer after the phase end must not
+    // change state or restart phase_started (that would bypass the phase budget).
+    // Same capture- and dispatch-time rule as for the absolute deadline above;
+    // the phase never extends the absolute deadline (OperationTime::phase_open).
+    if(c.timing.phase_ms && (in_auth(c) || in_wake(c))) {
+        const OperationTime phase=operation_time(c);
+        if(!phase.phase_open(now) || !phase.phase_open(current)) { bump(c.diagnostics.rejected_replies); return; }
+    }
     SessionWireReply hello;
     if(decode_session_reply({incoming.data.data(),incoming.length},{address_.data(),16},hello)) {
         if(session_replies_seen_!=UINT32_MAX) { ++session_replies_seen_; }
@@ -389,8 +448,8 @@ void Vehicle::frame(const Frame &incoming,uint32_t now)
     if(verified.fault) {
         c.diagnostics.fault=verified.fault;
         if(verified.fault==5 || verified.fault==6 || verified.fault==15 || verified.fault==17 || verified.fault==26) {
-            c.refresh=true; retry(charge?Stage::InfoAuth:Stage::VcsecAuth,now);
-        } else if(verified.fault==1 || verified.fault==2 || verified.fault==11) { retry(charge?Stage::Charge:Stage::Status,now); }
+            c.refresh=true; c.phase_started=now; retry(charge?Stage::InfoAuth:Stage::VcsecAuth,now);
+        } else if(verified.fault==1 || verified.fault==2 || verified.fault==11) { retry(charge?Stage::Charge:Stage::Status,now,backoff(c)); }
         else { fail(VehicleFailure::VehicleFault); } return;
     }
     if(charge) {
@@ -411,7 +470,10 @@ void Vehicle::frame(const Frame &incoming,uint32_t now)
         // Authenticated awake status after this command's wake: evidence only
         // (reporting); budgets, deadlines and session rules are unchanged.
         if(c.wake_sent) { c.awake_after_wake=true; }
-        c.stage=Stage::InfoAuth; c.delayed=false;
+        // New bounded step budget for the infotainment session (reference
+        // vehicle.cpp:1391-1400 restarts the phase clock once awake is observed).
+        // The infotainment of a just-woken car ignores early requests (vehicle.h:160-163).
+        c.phase_started=now; c.stage=Stage::InfoAuth; c.delayed=false;
     }
     else if(c.policy==WakePolicy::NoWakeSkip) { finish(VehicleResultCode::SkippedAsleep,0,status.sleep,true); }
     else if(!c.wake_sent) { c.stage=Stage::Wake; c.delayed=false; }

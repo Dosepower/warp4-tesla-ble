@@ -40,7 +40,11 @@ extern WebServer server;
 #include "tesla_ble_presence.h"
 
 
-static constexpr uint32_t RESPONSE_TIMEOUT_MS = 40000;
+// SoC poll timing: explicit per-phase budgets inside a 90 s absolute bound
+// (tesla_clean::production_soc_timing). The in-flight watchdog only backs up the
+// controller's own terminal result and must never fire before it.
+static constexpr tesla_clean::VehicleTiming SOC_POLL_TIMING = tesla_clean::production_soc_timing;
+static constexpr uint32_t SOC_IN_FLIGHT_WATCHDOG_MS = SOC_POLL_TIMING.total_ms + 5000;
 
 // Wall-clock receive time for SoC publication. 0 = clock not synchronized:
 // never substitute uptime as a time of day.
@@ -974,7 +978,7 @@ void TeslaVehicle::task_loop()
         check_worker_exhaustion();
         flush_pair_trace();
 
-        if (r->in_flight_started_ms != 0 && millis() - r->in_flight_started_ms > RESPONSE_TIMEOUT_MS) {
+        if (r->in_flight_started_ms != 0 && millis() - r->in_flight_started_ms > SOC_IN_FLIGHT_WATCHDOG_MS) {
             r->in_flight_started_ms = 0;
             r->manual_poll_pending.store(false);
             post_event(EventType::Error, "Tesla SoC request timed out");
@@ -1498,7 +1502,7 @@ void TeslaVehicle::request_soc(bool manual)
     });
     const bool accepted = ready && r->vehicle->charge_state_poll(decision.allow_wake ? tesla_clean::WakePolicy::WakeIfNeeded
                                                    : tesla_clean::WakePolicy::NoWakeSkip, r->in_flight.request, std::move(completion),
-                                                   {RESPONSE_TIMEOUT_MS, 5000, 10000});
+                                                   SOC_POLL_TIMING);
     if (!accepted) {
         r->policy.request_refused(decision, millis());
         check_worker_exhaustion();

@@ -107,7 +107,7 @@ static void public_negatives(bool info)
         else { h.inject(frame); }
         assert(out.empty() && h.vehicle.high_water(sent.domain)==high &&
             h.vehicle.high_water(info?Domain::Vcsec:Domain::Infotainment)==other);
-        if(mode==5) { h.vehicle.tick(); h.clock+=100; h.vehicle.tick(); }
+        if(mode==5) { h.vehicle.tick(); h.clock+=Vehicle::initial_retry_delay_ms; h.vehicle.tick(); } // first request backoff
         h.inject(reply(h,h.last(),info?Bytes{soc,sizeof(soc)}:Bytes{awake,sizeof(awake)},1));
         assert(out.size()==1 && out[0].authenticated);
     }
@@ -119,7 +119,7 @@ static void lifecycle(bool info)
     for(unsigned mode=0;mode<4;++mode) {
         Harness h; std::vector<VehicleResult> out; assert(h.vehicle.open(h.link)); start(h,out,info,1);
         const auto previous=h.last(); const auto high=h.vehicle.high_water(previous.domain);
-        h.clock+=500; h.vehicle.tick(); h.clock+=100;
+        h.clock+=500; h.vehicle.tick(); h.clock+=Vehicle::initial_retry_delay_ms; // response timeout, first request backoff
         h.accept_final=mode!=1;
         h.on_frame= mode==2 ? +[](Harness &p) {
             p.inject(synchronization_error(p,p.last())); p.clock+=500;
@@ -153,7 +153,9 @@ static void lifecycle(bool info)
         auto data=initial_info(); data.counter=100+i; data.clock=2000+i;
         h.inject(session_frame(h,h.last(),data)); h.clock+=100; h.vehicle.tick();
     }
-    assert(out.size()==1 && out[0].code==VehicleResultCode::Failed && h.sent.size()<=8);
+    // Session request copies are phase-bounded; the attempt cap bounds the requests.
+    size_t requests=0; for(const auto &s:h.sent) { requests+=!s.hello; }
+    assert(out.size()==1 && out[0].code==VehicleResultCode::Failed && requests<=Vehicle::max_attempts);
 }
 static void wake_and_reentry()
 {

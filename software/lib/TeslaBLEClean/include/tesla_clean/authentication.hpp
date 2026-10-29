@@ -4,7 +4,20 @@
 #include <tesla_clean/response.hpp>
 #include <tesla_clean/session_info.hpp>
 namespace tesla_clean {
-struct OperationTime { uint64_t context=0,generation=0; uint32_t started=0,total_ms=0,response_ms=0; };
+// started/total_ms: the operation's absolute deadline (never extended).
+// phase_started/phase_ms: the current authentication phase's own step budget
+// (pinned tesla-ble v6.2.0 set_command_phase_ restarts the step clock per phase,
+// vehicle.cpp:640-649, 1391-1400). phase_ms==0: one phase spanning the operation.
+// A phase never ends after the absolute deadline and only ever moves forward.
+struct OperationTime {
+    uint64_t context=0,generation=0; uint32_t started=0,total_ms=0,response_ms=0,phase_started=0,phase_ms=0;
+    uint32_t phase_offset() const { return phase_ms?phase_started-started:0; }
+    uint32_t phase_budget() const { return phase_ms?phase_ms:total_ms; }
+    // True while `at` lies inside both the phase budget and the absolute deadline.
+    bool phase_open(uint32_t at) const {
+        return at-started<total_ms && (phase_ms==0 || (phase_offset()<total_ms && at-phase_started<phase_ms));
+    }
+};
 struct ChallengeView {
     Domain domain=Domain::Vcsec;
     uint64_t context=0,generation=0;
@@ -18,12 +31,26 @@ struct ChallengeTransport { bool (*send)(void *,const ChallengeView &)=nullptr; 
 // Official pkg/connector/ble/ble.go maxLatency (AllowedLatency): SessionInfo older
 // than this from request creation is discarded (dispatcher.go checkForSessionUpdate).
 inline constexpr uint32_t session_info_max_latency_ms=4000;
-// Unanswered challenge: retransmit the identical request (same UUID) at most this
-// many times while it stays fresh (pinned tesla-ble v6.2.0 vehicle.cpp:320-342
-// resends unchanged and renews only at CLOCK_SYNC_MAX_LATENCY). A reply to any
-// copy then remains admissible until the challenge's own freshness/total deadline
-// instead of being invalidated by an artificial UUID change.
-inline constexpr unsigned session_info_max_replays=3;
+// Pinned reference tesla-ble v6.2.0 (a00f3872) include/vehicle.h:363-381 and
+// src/vehicle.cpp:319-344: an unanswered session request is resent UNCHANGED every
+// TRANSPORT_RETRY_INTERVAL (1 s) and rebuilt with a new UUID once it is
+// CLOCK_SYNC_MAX_LATENCY (4 s) old, without extending the AUTH_RESPONSE_TIMEOUT
+// (25 s) wait. A reply to any copy stays admissible while its challenge is fresh.
+inline constexpr uint32_t session_info_resend_interval_ms=1000; // TRANSPORT_RETRY_INTERVAL
+// MAX_AUTH_RESENDS: identical copies of ONE challenge (freshness binds first: <=3 at 1 s).
+inline constexpr unsigned session_info_max_replays=10;
+// AUTH_RESPONSE_TIMEOUT: production step budget of one authentication phase.
+inline constexpr uint32_t session_auth_phase_ms=25000;
+// New challenges (UUIDs) per authentication phase: ceil(25 s / 4 s) + 1. Unlike the
+// reference (whose 10 resends span only ~10 s of its 25 s wait, leaving no fresh
+// challenge after ~12 s), fresh coverage continues through the whole phase, so a
+// late-waking infotainment answering at e.g. 20 s is admitted. Hard bound per phase:
+// <= 8 UUIDs and <= 1 + 25 s / 1 s = 26 copies; never beyond the absolute deadline.
+inline constexpr unsigned session_info_max_challenges=8;
+// Single-phase operations (OperationTime::phase_ms==0: pairing, approval
+// verification polls, legacy callers) keep their original caps unchanged.
+inline constexpr unsigned legacy_session_info_max_replays=3;
+inline constexpr unsigned legacy_session_info_max_challenges=3;
 struct SessionReply { Domain domain=Domain::Vcsec; uint64_t generation=0; std::array<uint8_t,16> uuid{}; Bytes encoded,tag; };
 enum class ChallengeResult { Sent, Refused, Superseded, Established, KeyDenied, Backoff, Exhausted, Expired, Invalid };
 enum class SessionAdmission { Rejected, Deferred, Established, Updated, KeyDenied };
@@ -69,7 +96,8 @@ class DomainAuthentication {
 public:
     bool exhausted() const { return serial_ == UINT64_MAX; }
     DomainAuthentication(Domain domain,Bytes vin);
-    // Always creates a fresh challenge (new UUID); counts toward the 3-challenge cap.
+    // Always creates a fresh challenge (new UUID); counts toward the per-phase challenge cap.
+    // Exhausted: the phase budget (time or challenges) is spent; Expired: absolute deadline.
     ChallengeResult begin(IdentityStore &keys,const OperationTime &owner,uint32_t now,Random random,ChallengeTransport transport);
     // True only for this exact owner's idle pending challenge with replay budget
     // left and enough freshness for another copy of the latest TX duration.

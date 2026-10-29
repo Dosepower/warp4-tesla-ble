@@ -21,6 +21,31 @@ if SAN:
     sys.argv.remove('sanitize')
 
 
+def cbv2g_root():
+    """Real libcbv2g sources (read-only). TESLA_LATE_CBV2G_ROOT overrides the
+    PlatformIO libdeps location, e.g. for a fresh integration copy without .pio.
+    A missing dependency is an explicit environment blocker: never a skip and
+    never a mock codec fallback."""
+    override = os.environ.get('TESLA_LATE_CBV2G_ROOT')
+    root = Path(override) if override else S/'.pio/libdeps/warp4_tesla_ble/libcbv2g'
+    probe = root/'include/cbv2g/app_handshake/appHand_Encoder.h'
+    if not probe.is_file():
+        raise RuntimeError(f'ENVIRONMENT BLOCKER: libcbv2g not found at {root} '
+                           f'({probe.name} missing); set TESLA_LATE_CBV2G_ROOT to a read-only libcbv2g checkout')
+    return root
+
+
+def lambda_body(text, anchor):
+    """Complete brace-matched body of the lambda registered at `anchor`."""
+    start = text.index(anchor)
+    opening = text.index('{', start + len(anchor) - 1)
+    depth, end = 1, opening + 1
+    while depth:
+        depth += (text[end] == '{') - (text[end] == '}')
+        end += 1
+    return text[opening + 1:end - 1]
+
+
 class LateTesla(unittest.TestCase):
     def test_real_decoder_boundaries(self):
         """Generate an over-limit wire vector without indexing a 5-slot object.
@@ -29,7 +54,7 @@ class LateTesla(unittest.TestCase):
         decoder uses untouched production headers/source, including its bound.
         No generated library files in the repository are changed.
         """
-        lib = S/'.pio/libdeps/warp4_tesla_ble/libcbv2g'
+        lib = cbv2g_root()
         encode = r'''
 #include <assert.h>
 #include <stdio.h>
@@ -100,12 +125,18 @@ int main(int argc,char **argv) {
         assert match, 'production API capacity declaration not found'
         capacity = match.group(1)
         bounds = header[header.index('// Publish every namespace'):header.index('// Convert value')]
-        cbv2g = S/'.pio/libdeps/warp4_tesla_ble/libcbv2g'
+        cbv2g = cbv2g_root()
         vendors = [x.strip().replace(' ', '') for x in (S/'src/modules/iso15118/EVCC Vendor.uint8.enum').read_text().splitlines() if x.strip()]
-        methods = '\n'.join(function(policy, x) for x in ('bool is_soc_compatible()', 'bool is_autocharge_only()', 'bool is_autocharge()', 'bool use_nonegotiation_autocharge()'))
+        methods = '\n'.join(function(policy, x) for x in ('bool is_soc_compatible()', 'bool is_read_soc_only()', 'bool is_autocharge_only()', 'bool is_autocharge()', 'bool use_nonegotiation_autocharge()', 'bool use_prefer_din()'))
         impl = '\n'.join(function(common, x) for x in ('void Common::set_evcc_vendor', 'void Common::detect_evcc_vendor_from_mac', 'void Common::detect_evcc_vendor_from_protocol', 'void Common::handle_supported_app_protocol_req', 'void Common::decode'))
         controller = (S/'src/modules/iso15118/iso15118.cpp').read_text()
-        disconnect = controller[controller.index('        if (charger_state->asUint() == 0)'):controller.index('            qca700x.link_down();', controller.index('// Monitor charger state'))]
+        # Upstream 2.13.6: the State A handler resets vendor/deadlines and, only when
+        # enabled, delegates the PLC/SLAC cleanup to rearm_for_next_ev(). Both real
+        # production functions are compiled; nothing is sliced at an indentation.
+        disconnect = lambda_body(controller, 'event.registerEvent("evse/state", {"charger_state"}, [this](const Config *charger_state) {')
+        assert 'rearm_for_next_ev();' in disconnect, 'State A handler no longer re-arms through rearm_for_next_ev()'
+        rearm = function(controller, 'void ISO15118::rearm_for_next_ev()')
+        assert 'qca700x.link_down();' in rearm, 'link_down cleanup missing from rearm_for_next_ev()'
         publications = []
         for filename in ('din70121.cpp', 'iso2.cpp'):
             text = (S/'src/modules/iso15118'/filename).read_text()
@@ -154,7 +185,8 @@ enum class CommonState {Idle, ProtocolNegotiated};
 struct ISOTLS {};
 int api_mutations=0;
 struct Node {
- std::map<std::string,Node> children; bool v=false; EVCCVendor vendor=EVCCVendor::Unknown;
+ std::map<std::string,Node> children; bool v=false; EVCCVendor vendor=EVCCVendor::Unknown; unsigned u=0;
+ void updateUint(unsigned x) {u=x;}
  Node *get(const char *s) {return &children[s];}
  const Node *get(const char *s) const {return &children.at(s);}
  bool asBool() const {return v;}
@@ -179,17 +211,24 @@ struct EV {int publications=0,sources=0; void set_soc(float) {++publications;} t
 enum class EVDataSource {DIN,ISO2};
 enum class EventResult {OK};
 struct CPD {bool DC_EVChargeParameter_isUsed=true; struct {struct {int EVRESSSOC=42;} DC_EVStatus;} DC_EVChargeParameter;};
-struct ProbeDIN {int calls=0; void handle_bitstream(void *) {++calls; CPD fixture; auto *req=&fixture; PUBDIN }};
-struct ProbeISO2 {int calls=0; void handle_bitstream(void *) {++calls; CPD fixture; auto *req=&fixture; PUBISO }};
+struct ProbeDIN {int calls=0,session_resets=0; void handle_bitstream(void *) {++calls; CPD fixture; auto *req=&fixture; PUBDIN } void reset_session() {++session_resets;}};
+struct ProbeISO2 {int calls=0,session_resets=0,soc_resets=0; void handle_bitstream(void *) {++calls; CPD fixture; auto *req=&fixture; PUBISO } void reset_session() {++session_resets;} void reset_dc_soc_done() {++soc_resets;}};
+// Counting stubs for the hardware/SLAC boundary touched by rearm_for_next_ev().
+enum class SLACState {ModemInitialization, ModemReset};
+struct QCA700x {int link_downs=0; void link_down() {++link_downs;}} qca700x;
+struct SLACStub {int link_up_cancels=0,retry_resets=0,reported_resets=0; SLACState state=SLACState::ModemInitialization; Node api_state;
+ void cancel_link_up_task() {++link_up_cancels;} void reset_slac_init_retry_count() {++retry_resets;} void reset_ev_connected_reported() {++reported_resets;}} slac;
+struct EVSEV2 {int plc_on=0; void set_plc_modem(bool on) {plc_on+=on;}} evse_v2;
 V2GTP_PAYLOAD_TYPE
 struct Probe20 {int calls=0;void handle_bitstream(void *, V2GTPPayloadType) {++calls;}};
 struct ISO15118 {
  Common common; Config config,config_experimental; bool nonegotiation_pending=false;
  int communication_setup_deadline=9,reslac_guard_deadline=9,transitions=0,charging_protocol_calls=0;
- bool enabled=true;
+ bool enabled=true,iec_temporary_active=false; int pending_cancels=0;
  bool is_enabled() const {return enabled;}
- void cancel_pending_tasks() {}
+ void cancel_pending_tasks() {++pending_cancels;}
  EventResult disconnect();
+ void rearm_for_next_ev();
  ProbeDIN din70121; ProbeISO2 iso2; Probe20 iso20;
  enum class ModemOff {Delayed};
  void begin_iec_transition(ModemOff) {++transitions;}
@@ -207,12 +246,13 @@ void tracked_bitstream_init(exi_bitstream *s,uint8_t *data,size_t size,size_t of
 
 void *calloc_psram_or_dram(size_t n,size_t s) {++allocations;return calloc(n,s);}
 void Common::send_exi(ExiType) {}
-void Common::reset_active_socket() {} // OS boundary; vendor reset remains production code.
+int socket_resets=0;
+void Common::reset_active_socket() {++socket_resets;} // OS boundary; vendor reset remains production code.
 EventResult ISO15118::disconnect() {
  Node disconnected; const Node *charger_state=&disconnected;
  DISCONNECT
- } return EventResult::OK;
 }
+REARM
 TABLE
 IMPL
 void offer(Common &c,const char *ns) {
@@ -244,6 +284,7 @@ void roundtrip(appHand_exiDocument &doc) {
 int main(int argc,char **argv) {
  assert(argc==2); std::string mode=argv[1]; auto &p=iso15118; auto &c=p.common;
  array_slot.prototype=&array_prototype;
+ p.config_experimental.get("prefer_din")->v=false; // Upstream 2.13.6 testing option, default off (not varied here).
  if(mode=="capacity-overflow") {
   for(size_t i=0;i<array_slot.maxElements;++i) array_instance.add();
   assert(array_instance.children.size()==SUPPORTED_APP_PROTOCOL_CAPACITY);
@@ -311,7 +352,26 @@ int main(int argc,char **argv) {
   if(mode=="same-mac" || mode=="same-bmw" || mode=="changed-mac" || mode=="changed-bmw" || mode=="disconnect") {
    if(mode=="same-bmw") c.detect_evcc_vendor_from_mac(bmw);
    const char *ns="urn:tesla:din:2018:MsgDef"; c.detect_evcc_vendor_from_protocol(ns,strlen(ns));
-   if(mode=="disconnect") {p.enabled=bits&1; p.disconnect();}
+   if(mode=="disconnect") {
+    p.enabled=bits&1; p.communication_setup_deadline=9; p.reslac_guard_deadline=9; p.iec_temporary_active=true;
+    slac.state=SLACState::ModemInitialization; slac.api_state.get("modem_initialization_tries")->u=7;
+    const int links=qca700x.link_downs,cancels=slac.link_up_cancels,plc=evse_v2.plc_on,cp=p.charging_protocol_calls,
+     iso2s=p.iso2.session_resets,socs=p.iso2.soc_resets,dins=p.din70121.session_resets,sockets=socket_resets,
+     retries=slac.retry_resets,reported=slac.reported_resets;
+    assert(c.get_evcc_vendor()==EVCCVendor::Tesla);
+    p.disconnect();
+    const int once=p.enabled?1:0;
+    // Physical identity and deadlines end in both cases; PLC/SLAC cleanup exactly once only when enabled.
+    if(c.get_evcc_vendor()!=EVCCVendor::Unknown || p.communication_setup_deadline || p.reslac_guard_deadline || p.nonegotiation_pending ||
+       qca700x.link_downs-links!=once || slac.link_up_cancels-cancels!=once || evse_v2.plc_on-plc!=once || p.charging_protocol_calls-cp!=once ||
+       p.iso2.session_resets-iso2s!=once || p.iso2.soc_resets-socs!=once || p.din70121.session_resets-dins!=once || socket_resets-sockets!=once ||
+       slac.retry_resets-retries!=once || slac.reported_resets-reported!=once ||
+       (slac.state==SLACState::ModemReset)!=p.enabled || (slac.api_state.get("modem_initialization_tries")->u==0)!=p.enabled ||
+       p.iec_temporary_active==p.enabled) {
+     fprintf(stderr,"FAIL disconnect bits=%u enabled=%d: vendor=%u link_down=%d plc=%d cp=%d slac=%d\n",bits,p.enabled,unsigned(c.get_evcc_vendor()),
+      qca700x.link_downs-links,evse_v2.plc_on-plc,p.charging_protocol_calls-cp,int(slac.state)); return 1;
+    }
+   }
    c.detect_evcc_vendor_from_mac(mode=="changed-bmw" || mode=="same-bmw"?bmw:mode=="changed-mac"?other:unknown);
    const auto expected=mode=="same-mac" || mode=="same-bmw"?EVCCVendor::Tesla:mode=="changed-bmw"?EVCCVendor::BMW:EVCCVendor::Unknown;
    if(c.get_evcc_vendor()!=expected) {fprintf(stderr,"FAIL %s bits=%u: vendor=%u expected=%u after retry/reset\n",argv[1],bits,unsigned(c.get_evcc_vendor()),unsigned(expected)); return 1;}
@@ -399,7 +459,7 @@ int main(int argc,char **argv) {
             'VENDORS': ','.join(vendors),
             'CLASS': function(header, 'class Common final').replace('private:', 'public:').strip(),
             'METHODS': methods, 'IMPL': impl,
-            'DISCONNECT': disconnect,
+            'DISCONNECT': disconnect, 'REARM': rearm,
             'TABLE': common[common.index('struct EVCCVendorOUI'):common.index('void Common::set_evcc_vendor')],
             'PUBDIN': publications[0], 'PUBISO': publications[1],
         }

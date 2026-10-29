@@ -15,7 +15,7 @@
 struct SocRun {
  unsigned wakes=0,wake_partial=0,statuses=0,statuses_after_wake=0,hellos=0,charges=0,frames=0,info_ignored=0;
  std::vector<uint32_t> after_wake_at;
- uint32_t committed=0,finished=0,update_unix=0;
+ uint32_t committed=0,finished=0,update_unix=0,wake_tx_at=0;
  bool automatic=false,outcome_automatic=false;
  std::string error,outcome;float soc=NAN;uint64_t update=0;int applied=0;
 };
@@ -83,7 +83,7 @@ static void soc_wake_flow(TeslaVehicle &m,const std::string &mode) {
    if(unplug_on_charge){unplug_on_charge=false;unplug();} // physical unplug while the SoC answer is in flight
    replies.push_back(peer.response(s,{controller_fixture::soc,sizeof(controller_fixture::soc)},++info));return;}
   if(s.plaintext.size()==sizeof(wake_plain)&&!memcmp(s.plaintext.data(),wake_plain,sizeof(wake_plain))){
-   if(run)++run->wakes;wake_at=millis();if(drop_after_wake)pending_drop=true;
+   if(run){++run->wakes;run->wake_tx_at=millis();}wake_at=millis();if(drop_after_wake)pending_drop=true;
    return; // RKE wake: no decodable vehicle-status reply (authentic replies may only carry commandStatus).
   }
   assert(s.plaintext.size()==sizeof(status_plain)&&!memcmp(s.plaintext.data(),status_plain,sizeof(status_plain)));
@@ -692,8 +692,8 @@ static void soc_wake_flow(TeslaVehicle &m,const std::string &mode) {
  } else if(mode=="soc-wake-slow") {
   soc_expect(runs.size()==1&&runs[0].wakes==1,mode,"exactly one wake");
   for(size_t i=1;i<runs[0].after_wake_at.size();++i)soc_expect(runs[0].after_wake_at[i]-runs[0].after_wake_at[i-1]>=900,mode,"post-wake status polls must be paced (>=0.9 s)");
-  expect_soc(runs[0],nullptr,"car awake 9 s after the wake must still deliver SoC within the unchanged 40 s request deadline");
-  soc_expect(runs[0].finished-runs[0].committed<40000+5000,mode,"bounded by request deadline");
+  expect_soc(runs[0],nullptr,"car awake 9 s after the wake must deliver SoC within its phase budgets (90 s absolute bound)");
+  soc_expect(runs[0].finished-runs[0].committed<tesla_clean::production_soc_timing.total_ms+5000,mode,"bounded by the absolute request bound");
  } else if(mode=="soc-wake-never") {
   // R1's wake without SoC arms one firmware follow-up without wake (deterministic order in
  // this simulation: it runs when R2's explicit scan result expires, before R3).
@@ -705,7 +705,16 @@ static void soc_wake_flow(TeslaVehicle &m,const std::string &mode) {
   soc_expect(runs[0].statuses_after_wake<=40,mode,"R1 bounded post-wake status polls");
   // Never confirmed awake: honest "wake sent", never "woken".
   soc_expect(runs[0].error==WAKE_NO_SOC&&runs[0].outcome=="wake_sent_no_soc",mode,"R1 exposed wake without awake evidence: 'wake sent' outcome");
-  soc_expect(runs[0].finished-runs[0].committed>=39000&&runs[0].finished-runs[0].committed<=46000,mode,"R1 ends at the unchanged 40 s request deadline");
+  // Awake wait is its own 25 s phase from the wake exposure (reference
+  // AUTH_RESPONSE_TIMEOUT, WakePollCap), inside the 90 s absolute bound. Boundary:
+  // not cut before the phase (statuses keep coming up to its end), not extended
+  // past it (ends within one 1 s transport tick + one main pass after it).
+  {const uint32_t phase=tesla_clean::session_auth_phase_ms,end=runs[0].finished-runs[0].wake_tx_at,last=runs[0].after_wake_at.empty()?0:runs[0].after_wake_at.back()-runs[0].wake_tx_at;
+   std::printf("SOC_WAKE_NEVER_PHASE wake_at=+%u end=wake+%u last_status=wake+%u statuses_after_wake=%u\n",runs[0].wake_tx_at-runs[0].committed,end,last,runs[0].statuses_after_wake);std::fflush(stdout);
+   soc_expect(runs[0].wake_tx_at>runs[0].committed&&end+tesla_clean::Vehicle::transport_retry_interval_ms>=phase&&end<=phase+1500,mode,
+    "R1 awake wait ends at its own 25 s phase after the wake (WakePollCap), not at a shared 40 s request deadline");
+   soc_expect(last+2*tesla_clean::Vehicle::transport_retry_interval_ms>=phase&&last<phase,mode,"R1 post-wake status probes continue up to (not past) the awake phase end");
+   soc_expect(runs[0].finished-runs[0].committed<tesla_clean::production_soc_timing.total_ms,mode,"R1 inside the 90 s absolute bound");}
   soc_expect(runs[1].wakes==0&&runs[1].error==ASLEEP_LIMITED,mode,"R2 immediately after: no second wake, clear outcome");
   expect_no_new_soc(runs[1],runs[0],"R2 no new SoC");
   soc_expect(runs[2].wakes==1,mode,"R3 after spacing: one new wake");expect_soc(runs[2],nullptr,"R3 SoC");

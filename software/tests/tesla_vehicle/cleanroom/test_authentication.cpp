@@ -86,6 +86,7 @@ int main()
         assert(link.last.public_point!=before);
     }
     // Refused recovery preserves original live challenge; attempts/backoff/deadline are bounded.
+    // Single-phase operation (phase_ms==0: pairing/approval verify): legacy cap of 3 challenges unchanged.
     {
         Rng rng; IdentityStore keys; seed(keys,rng); DomainAuthentication auth(Domain::Vcsec,{vectors::vin,17}); Link link;
         OperationTime owner{1,7,100,1000,500};
@@ -97,9 +98,32 @@ int main()
         rng.id=2;
         assert(auth.begin(keys,owner,300,rng.get(),link.get())==ChallengeResult::Refused);
         assert(auth.begin(keys,owner,400,rng.get(),link.get())==ChallengeResult::Exhausted && link.sends==3);
+        assert(legacy_session_info_max_challenges==3);
         auto r=reply(Domain::Vcsec,7,uuid);
         assert(auth.receive(r,401,rng.get())==SessionAdmission::Established);
         owner.context=2; owner.started=100; assert(auth.begin(keys,owner,1100,rng.get(),link.get())==ChallengeResult::Expired && link.sends==3);
+    }
+    // Same refusal sequence in a PHASED (SoC) operation: per-phase cap session_info_max_challenges.
+    {
+        Rng rng; IdentityStore keys; seed(keys,rng); DomainAuthentication auth(Domain::Vcsec,{vectors::vin,17}); Link link;
+        OperationTime owner{1,7,100,1000,500,100,session_auth_phase_ms};
+        assert(auth.begin(keys,owner,100,rng.get(),link.get())==ChallengeResult::Sent);
+        const auto uuid=link.last.uuid;
+        rng.id=1; link.accepted=false;
+        assert(auth.begin(keys,owner,150,rng.get(),link.get())==ChallengeResult::Backoff && link.sends==1);
+        assert(auth.begin(keys,owner,200,rng.get(),link.get())==ChallengeResult::Refused && auth.pending());
+        rng.id=2;
+        assert(auth.begin(keys,owner,300,rng.get(),link.get())==ChallengeResult::Refused);
+        // Per-phase challenge cap (session_info_max_challenges), refused copies included.
+        uint32_t at=400; ChallengeResult result;
+        while((result=auth.begin(keys,owner,at,rng.get(),link.get()))!=ChallengeResult::Exhausted) {
+            if(result!=ChallengeResult::Refused) { std::printf("unexpected challenge result %d at %u\n",static_cast<int>(result),at); assert(false); }
+            ++rng.id; at+=100; assert(at<1000);
+        }
+        assert(link.sends>3 && link.sends<=session_info_max_challenges); // pre-send refusals also spend the budget
+        auto r=reply(Domain::Vcsec,7,uuid);
+        assert(auth.receive(r,401,rng.get())==SessionAdmission::Established);
+        owner.context=2; owner.started=100; assert(auth.begin(keys,owner,1100,rng.get(),link.get())==ChallengeResult::Expired && link.sends<=session_info_max_challenges);
     }
     // Transport refusal cannot publish a synchronous staged response.
     for(bool accepted:{false,true}) {

@@ -48,7 +48,25 @@ struct VehicleResult {
     VehicleDiagnostics diagnostics;
 };
 using VehicleCompletion=CheckedCallback<void(const VehicleResult &)>;
-struct VehicleTiming { uint32_t total_ms=5000,response_ms=500,transmit_ms=500; };
+// total_ms: absolute operation deadline (hard upper bound, never extended).
+// response_ms: wait for an encrypted reply after full framed TX; session requests
+// are additionally resent at the 1 s transport interval while fresh.
+// phase_ms: own step budget of each authentication phase and of the post-wake
+// awake wait (reference AUTH_RESPONSE_TIMEOUT 25 s); 0 = one phase = total_ms.
+struct VehicleTiming { uint32_t total_ms=5000,response_ms=500,transmit_ms=500,phase_ms=0; };
+// Production SoC poll (WARP tesla_vehicle). Explicit phases, each with its own step
+// budget, inside one hard absolute bound that no phase can extend:
+//   VCSEC session  <= 25 s (from command start; usually immediate),
+//   status/wake request exchange (bounded by attempts/backoff),
+//   awake wait     <= 25 s after the single wake (authenticated status every 1 s),
+//   infotainment session <= 25 s, a NEW budget from authenticated awake
+//     (fresh challenge every 4 s, identical copies every 1 s in between),
+//   charge-state request (response 5 s, bounded by attempts/backoff).
+// Absolute upper bound for the whole operation: 90 s. There is no shared 30/40 s
+// limit cutting the infotainment phase short after a slow wake.
+inline constexpr VehicleTiming production_soc_timing{90000,5000,10000,session_auth_phase_ms};
+static_assert(production_soc_timing.total_ms>=3*session_auth_phase_ms+2*production_soc_timing.response_ms,
+    "absolute bound must cover VCSEC, awake and infotainment phases plus two request exchanges");
 struct VehiclePorts {
     Random random;
     uint32_t (*now)(void *)=nullptr;
@@ -72,6 +90,11 @@ class Vehicle {
         WakePolicy policy=WakePolicy::NoWakeSkip;
         uint64_t context=0,generation=0,authentication_context=0;
         uint32_t started=0,transmitted=0,retry_at=0;
+        // Start of the current step budget: command start (VCSEC session), wake
+        // exposure (awake wait), authenticated awake / fault refresh (session).
+        uint32_t phase_started=0;
+        // Failure retries of encrypted requests (exponential backoff index).
+        unsigned retries=0;
         VehicleTiming timing;
         unsigned attempts=0;
         // Post-wake VCSEC status probes: paced and separately bounded (see tick/encrypted).
@@ -128,13 +151,24 @@ class Vehicle {
     bool pair_reply_pending_=false,pair_reply_terminal_=false;
     VcsecStatus pair_reply_;
     Channel &channel(Domain d) { return d==Domain::Vcsec?vcsec_:info_; }
-    static OperationTime operation_time(const Command &c) { return {c.authentication_context,c.generation,c.started,c.timing.total_ms,c.timing.response_ms}; }
+    static OperationTime operation_time(const Command &c) {
+        return {c.authentication_context,c.generation,c.started,c.timing.total_ms,c.timing.response_ms,
+            c.timing.phase_ms?c.phase_started:c.started,c.timing.phase_ms};
+    }
+    static bool in_auth(const Command &c) {
+        return c.stage==Stage::VcsecAuth || c.stage==Stage::WaitVcsecAuth || c.stage==Stage::InfoAuth || c.stage==Stage::WaitInfoAuth;
+    }
+    // Waiting for authenticated awake evidence after this command exposed a wake.
+    static bool in_wake(const Command &c) {
+        return c.wake_sent && !c.awake_after_wake && (c.stage==Stage::WaitWake || c.stage==Stage::Status || c.stage==Stage::WaitStatus);
+    }
+    uint32_t backoff(Command &c);
     bool advance();
     bool enqueue(Kind kind,WakePolicy policy,uint64_t context,VehicleCompletion &&completion,VehicleTiming timing);
     void finish(VehicleResultCode code,uint8_t battery=0,SleepState sleep=SleepState::Unknown,bool authenticated=false,
         VehicleFailure failure=VehicleFailure::Internal);
     void fail(VehicleFailure failure) { finish(VehicleResultCode::Failed,0,SleepState::Unknown,false,failure); }
-    void retry(Stage stage,uint32_t now,uint32_t delay=100);
+    void retry(Stage stage,uint32_t now,uint32_t delay=legacy_retry_delay_ms);
     bool transmit(Bytes payload,Transmission &tx);
     void drain(Transmission &tx);
     static bool transmit_owns(void *,uint64_t);
@@ -146,13 +180,30 @@ class Vehicle {
     bool authenticate(Domain d,Stage waiting,Stage next,uint32_t now);
     void encrypted(Domain d,Bytes payload,Stage waiting,uint32_t now);
 public:
+    // Timing model (pinned reference tesla-ble v6.2.0 include/vehicle.h:363-381):
+    //   TRANSPORT_RETRY_INTERVAL 1 s  -> transport_retry_interval_ms (session request
+    //     resend cadence and post-wake status pace),
+    //   AUTH_RESPONSE_TIMEOUT 25 s     -> VehicleTiming::phase_ms per phase (production),
+    //   CLOCK_SYNC_MAX_LATENCY 4 s     -> session_info_max_latency_ms (challenge renewal),
+    //   MAX_AUTH_RESENDS 10            -> session_info_max_replays,
+    //   MAX_RETRIES 5, backoff 250 ms x2 up to 8 s -> request retries (backoff()).
+    // The generic cap max_attempts counts every encrypted request including the
+    // first status/wake/charge sends: 3 + MAX_RETRIES(5) = 8. Session request copies
+    // are bounded per phase instead (session_info_max_challenges, phase_ms).
     // After a (possibly) exposed wake, VCSEC reports asleep until the car has woken.
-    // Probe its status at this pace (official/reference transport retry interval) and
-    // never with the 100 ms backoff. Probes count against their own cap, bounded in
-    // addition by the command's unchanged total deadline, not the generic 8-attempt
-    // budget that protects session/command retries. A wake is still never resent.
-    static constexpr uint32_t wake_status_interval_ms=1000;
+    // Probe its status at the transport pace and never with the request backoff.
+    // A wake is never resent; the awake wait is bounded by its own phase_ms, by
+    // max_wake_status_polls and by the absolute total deadline.
+    static constexpr uint32_t transport_retry_interval_ms=1000;
+    static constexpr uint32_t wake_status_interval_ms=transport_retry_interval_ms;
     static constexpr unsigned max_wake_status_polls=40;
+    static constexpr unsigned max_retries=5;
+    static constexpr unsigned max_attempts=3+max_retries;
+    static constexpr uint32_t initial_retry_delay_ms=250,max_retry_delay_ms=8000;
+    // Single-phase operations (VehicleTiming::phase_ms==0, e.g. pairing and the
+    // approval verification polls): original fixed retry delay, challenge and
+    // replay caps (legacy_session_info_max_*). Their pairing proof is unchanged.
+    static constexpr uint32_t legacy_retry_delay_ms=100;
     bool exhausted() const { return operation_retired_ || serial_ == UINT64_MAX || receiver_.exhausted() || vcsec_.exhausted() || info_.exhausted(); }
     Vehicle(IdentityStore &keys,Bytes vin,Bytes routing_address,VehiclePorts ports);
     Vehicle(const Vehicle &)=delete;
