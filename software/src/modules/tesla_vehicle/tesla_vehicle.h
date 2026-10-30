@@ -28,6 +28,7 @@
 #include "tesla_ble_result.h"
 #include "tesla_ble_operation.h"
 #include "tesla_ble_command_outcome.h"
+#include "tesla_poll_snapshot.h"
 #include "tesla_ble_storage.h"
 #include "tesla_ble_transport.h"
 #include "bluetooth_config_store.h"
@@ -200,6 +201,14 @@ private:
     void publish_discovery();
     bool discovery_allowed() const;
     bool fresh_binding(int index, uint64_t mac, const char *vin, const char *address, uint8_t type, uint32_t revision);
+    // Persisted trusted binding (main task, idle storage probe only): the exact
+    // WARP profile MAC, a present key authorized for this VIN/MAC and the
+    // on-disk transport record of this VIN/address/type. SoC polling only; it
+    // can never admit pairing (pairing requires an unauthorized profile).
+    bool persisted_binding(int index, uint64_t mac, const char *vin, const char *address, uint8_t type);
+    // Already prepared runtime of this live profile holding a persisted binding:
+    // reused for a SoC request without reload, scan or reconnect.
+    bool persisted_runtime_ready(int index);
     // worker=true only from the Tesla worker task (never main, never under the
     // outcome/session/discovery locks): waits briefly for main's zero-wait
     // publication instead of treating lock contention as revoked authority.
@@ -207,10 +216,11 @@ private:
     Config make_profile();
     String validate_profiles(Config &update, ConfigSource source);
     Config *find_profile(int index) const;
-    // revision_override: firmware-internal autonomous poll only. It replaces the
-    // persisted discovery_revision by a fresh own scan revision that already
-    // passed the identical fresh_binding() check; never persisted, never API input.
-    bool select_profile(int index, bool deleting, String &errmsg, uint32_t revision_override = 0);
+    // revision_override: firmware-internal only; never persisted, never API input.
+    // persisted: SoC polling may load the persisted trusted binding (stored
+    // VIN + BLE address/type + WARP EV MAC + authorized key) without a fresh
+    // scan. Pairing/loading never sets it and keeps the fresh-discovery gate.
+    bool select_profile(int index, bool deleting, String &errmsg, uint32_t revision_override = 0, bool persisted = false);
     void auto_poll();
     void auto_poll_publish(const char *state);
     bool live_profile(int index) const;
@@ -294,6 +304,7 @@ private:
             uint32_t discovery_revision = 0;
             uint8_t address_type = 0;
             bool deleting = false;
+            bool persisted = false; // SoC poll: accept the saved, authorized transport binding
             // Per-profile settings, applied by the worker with the profile.
             uint32_t poll_interval = 300;
             bool wake = false; // Persisted as "wake_once": automatic polls may wake when needed.
@@ -306,6 +317,10 @@ private:
         uint64_t profile_mac = 0; // Immutable between acknowledged switches.
         uint32_t binding_revision = 0; // Exact scan chosen, never replaced by a newer result.
         uint8_t remote_address_type = 0;
+        // Worker-set at profile apply: the committed on-disk transport record
+        // equals this runtime's VIN/address/type. With authorized it forms the
+        // persisted trusted binding; never set from a scan or API input.
+        std::atomic<bool> transport_bound{false};
         bool deleting_profile = false; // Worker-only local erase scope.
 #endif
         uint32_t poll_interval_seconds = 300;
@@ -322,23 +337,21 @@ private:
         // the main-task scheduler per cycle (stored before auto_poll_requested):
         // true only in its permitted contexts, false for a post-wake follow-up.
         std::atomic<bool> auto_poll_wake{false};
-        // Last finished SoC operation outcome, worker writer, main publisher.
-        std::atomic<uint8_t> poll_outcome{0};
-        std::atomic<bool> poll_outcome_automatic{false};
-        std::atomic<uint32_t> poll_outcome_sequence{0};
-        // Nonsecret classification of the same finished operation, written by
-        // the worker before poll_outcome_sequence advances (diagnostics only):
-        // failure code (TeslaPollFailure), last stage (tesla_clean::VehicleStage
-        // + 1, 0 = none), elapsed ms, fault, packed per-operation counts
-        // (attempts | timeouts << 8 | frames << 16 | rejected << 24) and flags
-        // (1 = VCSEC reused, 2 = Infotainment reused, 4 = VCSEC answered, 8 = Infotainment answered,
-        // 16 = ignored encrypted responses seen).
-        std::atomic<uint8_t> poll_failure{0};
-        std::atomic<uint8_t> poll_stage{0};
-        std::atomic<uint32_t> poll_elapsed_ms{0};
-        std::atomic<uint32_t> poll_fault{0};
-        std::atomic<uint32_t> poll_counts{0};
-        std::atomic<uint8_t> poll_flags{0};
+        // Last finished SoC operation: outcome, origin and the nonsecret
+        // classification/trace of the SAME operation, handed over as one
+        // coherent snapshot (worker = single writer via set_poll_outcome, main =
+        // bounded non-blocking reader; tesla_poll_snapshot.h). Classification
+        // (diagnostics only): failure code (TeslaPollFailure), last stage
+        // (tesla_clean::VehicleStage + 1, 0 = none), elapsed ms, fault, packed
+        // per-operation counts (attempts | timeouts << 8 | frames << 16 | rejected << 24),
+        // flags (1 = VCSEC reused, 2 = Infotainment reused, 4 = VCSEC answered,
+        // 8 = Infotainment answered, 16 = ignored encrypted responses seen), the
+        // bounded payload-free event trace with its ring head and meta word
+        // (trace_total | unrelated << 16 | late session replies (7 bit) << 24 | deferral overflow << 31).
+        TeslaPollSnapshotChannel poll_snapshot;
+        // Worker only: classification staged by set_poll_diagnostics for the next
+        // set_poll_outcome publication, which consumes and clears it.
+        TeslaPollSnapshot poll_staged;
         // HTTP acceptance through terminal worker outcome, not HTTP latency.
         std::atomic<bool> manual_poll_pending{false};
         std::atomic<bool> forget_requested{false};
@@ -550,13 +563,13 @@ private:
         uint64_t guidance_macs[TeslaBleStorageAdapter::MAX_PROFILES]{};
         int guidance_key_signature = -1;
         // Main-task-only autonomous SoC scheduler (TESLA_BLE_MANUAL_VEHICLE_UI).
-        // One cycle: own VIN-scoped scan -> exact stored-address fresh_binding ->
-        // profile reload with that scan revision -> one bounded SoC operation.
+        // One cycle: persisted trusted binding probe -> reuse the prepared runtime
+        // or load the stored address (no scan) -> one bounded SoC operation.
         struct AutoPoll {
-            enum class Phase : uint8_t { Idle, Scanning, Selecting, Polling } phase = Phase::Idle;
+            enum class Phase : uint8_t { Idle, Selecting, Polling } phase = Phase::Idle;
             TeslaBleIdentity identity{UINT64_MAX, -1, 0};
             uint32_t next_ms = 0, phase_ms = 0;
-            uint32_t scan_baseline = 0, own_revision = 0, config_revision = 0;
+            uint32_t own_revision = 0, config_revision = 0;
             uint64_t runtime_epoch = 0;
             uint32_t last_operation_ms = 0; // any finished SoC operation (manual or automatic)
             bool operation_seen = false;
@@ -605,6 +618,9 @@ private:
         TeslaBleIdentity pair_approved_identity{UINT64_MAX, -1, 0};
         uint32_t poll_outcome_seen = 0;
         uint64_t poll_outcome_epoch = 0;
+        // Main task only: coherent copy of the runtime's last publication (kept
+        // here, not on the main-task stack).
+        TeslaPollSnapshot poll_outcome_copy;
 #endif
         TeslaBleRuntimeOwner<Runtime> runtime_owner;
         TeslaBlePairingPolicy pairing_policy;

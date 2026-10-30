@@ -1,4 +1,5 @@
 #include "host/module_platform.h"
+#include "host/poll_snapshot_hooks.h"
 #include "../../src/modules/tesla_vehicle/tesla_vehicle.cpp"
 #include "host/nimble_fixture.h"
 #include "cleanroom/controller_fixture.hpp"
@@ -340,6 +341,7 @@ struct TeslaBleModuleTest {
 #include "host/card_confirm_contracts.inc"
 #include "host/discovery_connectable_contracts.inc"
 #include "host/soc_wake_contracts.inc"
+#include "host/poll_snapshot_contracts.inc"
  static void run(const std::string &mode) {
   if(mode=="quiesce-error-delayed") {
    BluetoothLifecycle bt;controller_status=test_status=0;async_bluetooth=true;std::thread host;
@@ -469,6 +471,7 @@ struct TeslaBleModuleTest {
   if(mode.rfind("authority-",0)==0){authority_flow(m,mode);return;}
   if(mode=="flow-repeat"||mode=="flow-repeat-cleanup"){repeated_flow(m,mode=="flow-repeat-cleanup");return;}
 #ifdef TESLA_BLE_BINDING_VFS_TEST
+  if(mode=="binding-restore"){binding_restore_flow(m);return;}
   if(mode.rfind("binding-",0)==0){binding_flow(m,mode);return;}
 #endif
 #ifdef TESLA_NIMBLE_REAL_DRAIN_HEADER
@@ -477,6 +480,7 @@ struct TeslaBleModuleTest {
   if(mode.rfind("trace-",0)==0){trace_flow(m,mode);return;}
   if(mode.rfind("card-",0)==0){card_flow(m,mode);return;}
   if(mode.rfind("soc-",0)==0){soc_wake_flow(m,mode);return;}
+  if(mode.rfind("snapshot-",0)==0){snapshot_flow(m,mode);return;}
   if(mode.rfind("flow-",0)==0){approval_flow(m,mode);return;}
   if(mode=="pairing"||mode=="generate"||mode=="notify-only"||mode=="indicate-and-notify"||mode=="delayed-pair"||mode=="connect-timeout"||mode=="no-card"||mode=="decline"||mode=="link-drop"||mode=="profile-switch"||mode=="partial-pair"||mode=="late-response"){
     host_rx_properties=mode=="notify-only"?16:mode=="indicate-and-notify"?48:32;pairing(m,mode=="generate",mode=="delayed-pair",mode);return;

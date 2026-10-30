@@ -54,6 +54,10 @@ inline constexpr unsigned legacy_session_info_max_challenges=3;
 struct SessionReply { Domain domain=Domain::Vcsec; uint64_t generation=0; std::array<uint8_t,16> uuid{}; Bytes encoded,tag; };
 enum class ChallengeResult { Sent, Refused, Superseded, Established, KeyDenied, Backoff, Exhausted, Expired, Invalid };
 enum class SessionAdmission { Rejected, Deferred, Established, Updated, KeyDenied };
+// Nonsecret reason of the latest Rejected session admission (diagnostics only,
+// never authority): which admission gate refused the reply.
+enum class SessionRejection : uint8_t { None, NoPending, Route, Uuid, Deadline, Stale, Phase, Window, Malformed, Staged,
+    Authentication, Epoch, NotReady, RequestWindow };
 class DomainAuthentication {
     struct Pending {
         OperationTime owner;
@@ -84,6 +88,7 @@ class DomainAuthentication {
     uint64_t serial_=0;
     std::array<uint8_t,16> last_uuid_{};
     bool used_uuid_=false;
+    SessionRejection rejection_=SessionRejection::None;
     // Do not readmit an epoch retired on this live session. Refuse further epoch
     // changes on capacity exhaustion instead of silently forgetting old epochs.
     std::array<std::array<uint8_t,16>,8> retired_epochs_{};
@@ -113,6 +118,8 @@ public:
     // This path never starts a handshake, rekeys, reallocates identity or resets budgets.
     SessionAdmission receive_update(const SessionReply &reply,const Request &request,uint32_t now);
     bool pending() const { return pending_.active; }
+    // Gate of the latest Rejected receive()/receive_update() (diagnostics only).
+    SessionRejection last_rejection() const { return rejection_; }
     bool ready() const { return ready_; }
     bool identity(IdentityLease &output) const { return established_.clone(output); }
     const SessionInfo &info() const { return info_; }

@@ -127,17 +127,26 @@ SessionAdmission DomainAuthentication::receive(const SessionReply &reply,uint32_
     // freshness fixed at creation and the owner's total deadline (both at capture
     // AND dispatch time). A renewed challenge has a new UUID, so predecessor
     // replies cannot match.
-    if(!valid_ || !pending_.active || reply.domain!=domain_ ||
-       reply.generation!=pending_.owner.generation || reply.uuid!=pending_.view.uuid ||
-       now-pending_.owner.started>=pending_.owner.total_ms || now-pending_.transmitted>=session_info_max_latency_ms ||
-       processed-pending_.owner.started>=pending_.owner.total_ms || processed-pending_.transmitted>=session_info_max_latency_ms ||
-       // Nothing captured after the phase's own step budget authenticates (late frame).
-       !pending_.owner.phase_open(now) || !pending_.owner.phase_open(processed) ||
-       (!pending_.sending && now-pending_.transmitted>=pending_.answer_until) ||
-       !reply.encoded.valid() || reply.encoded.size==0 || reply.encoded.size>pending_.encoded.size() ||
-       !reply.tag.valid() || reply.tag.size!=pending_.tag.size()) { return SessionAdmission::Rejected; }
+    // Same admission conditions as one combined test; split only to record
+    // which gate refused (all are side-effect free).
+    rejection_=SessionRejection::None;
+    const auto reject=[this](SessionRejection why) { rejection_=why; return SessionAdmission::Rejected; };
+    if(!valid_ || !pending_.active) { return reject(SessionRejection::NoPending); }
+    if(reply.domain!=domain_ || reply.generation!=pending_.owner.generation) { return reject(SessionRejection::Route); }
+    if(reply.uuid!=pending_.view.uuid) { return reject(SessionRejection::Uuid); }
+    if(now-pending_.owner.started>=pending_.owner.total_ms || processed-pending_.owner.started>=pending_.owner.total_ms) {
+        return reject(SessionRejection::Deadline);
+    }
+    if(now-pending_.transmitted>=session_info_max_latency_ms || processed-pending_.transmitted>=session_info_max_latency_ms) {
+        return reject(SessionRejection::Stale);
+    }
+    // Nothing captured after the phase's own step budget authenticates (late frame).
+    if(!pending_.owner.phase_open(now) || !pending_.owner.phase_open(processed)) { return reject(SessionRejection::Phase); }
+    if(!pending_.sending && now-pending_.transmitted>=pending_.answer_until) { return reject(SessionRejection::Window); }
+    if(!reply.encoded.valid() || reply.encoded.size==0 || reply.encoded.size>pending_.encoded.size() ||
+       !reply.tag.valid() || reply.tag.size!=pending_.tag.size()) { return reject(SessionRejection::Malformed); }
     if(pending_.sending) {
-        if(pending_.staged) { return SessionAdmission::Rejected; }
+        if(pending_.staged) { return reject(SessionRejection::Staged); }
         std::memcpy(pending_.encoded.data(),reply.encoded.data,reply.encoded.size);
         std::memcpy(pending_.tag.data(),reply.tag.data,reply.tag.size);
         pending_.length=reply.encoded.size; pending_.staged_at=now; pending_.staged=true;
@@ -149,14 +158,17 @@ SessionAdmission DomainAuthentication::receive(const SessionReply &reply,uint32_
     if(update) {
         // Resynchronization and denial must be vouched for by the established peer,
         // not by a new public key carried by an otherwise untrusted response.
-        if(verify_update(reply,candidate) && fresh_epoch(candidate)) {
-            result=candidate.status==0?SessionInfoResult::Established:SessionInfoResult::KeyDenied;
-        }
+        if(!verify_update(reply,candidate)) { rejection_=SessionRejection::Authentication; }
+        else if(!fresh_epoch(candidate)) { rejection_=SessionRejection::Epoch; }
+        else { result=candidate.status==0?SessionInfoResult::Established:SessionInfoResult::KeyDenied; }
     } else {
         result=authenticate_session_info(*pending_.identity.key(),random,{vin_.data(),vin_.size()},
             {reply.uuid.data(),reply.uuid.size()},reply.encoded,reply.tag,candidate,secret);
     }
-    if(result==SessionInfoResult::Rejected) { return SessionAdmission::Rejected; }
+    if(result==SessionInfoResult::Rejected) {
+        if(rejection_==SessionRejection::None) { rejection_=SessionRejection::Authentication; }
+        return SessionAdmission::Rejected;
+    }
     if(result==SessionInfoResult::KeyDenied) {
         pending_=Pending{}; ready_=false; return SessionAdmission::KeyDenied;
     }
@@ -199,15 +211,22 @@ void DomainAuthentication::apply_update(SessionInfo candidate)
 }
 SessionAdmission DomainAuthentication::receive_update(const SessionReply &reply,const Request &request,uint32_t now)
 {
-    if(!valid_ || !ready_ || !session_ || pending_.active || request.context==0 ||
-       reply.domain!=domain_ || reply.generation!=request.generation || reply.uuid!=request.uuid ||
-       !request.total_ms || !request.response_ms || request.total_ms>INT32_MAX || request.response_ms>INT32_MAX ||
-       request.transmit_elapsed>INT32_MAX ||
-       request.transmitted-request.started>=request.total_ms || now-request.started>=request.total_ms ||
-       now-request.transmitted>=request.transmit_elapsed+request.response_ms || now-request.transmitted>=5000) { return SessionAdmission::Rejected; }
+    rejection_=SessionRejection::None;
+    const auto reject=[this](SessionRejection why) { rejection_=why; return SessionAdmission::Rejected; };
+    if(!valid_ || !ready_ || !session_ || pending_.active || request.context==0) { return reject(SessionRejection::NotReady); }
+    if(reply.domain!=domain_ || reply.generation!=request.generation) { return reject(SessionRejection::Route); }
+    if(reply.uuid!=request.uuid) { return reject(SessionRejection::Uuid); }
+    if(!request.total_ms || !request.response_ms || request.total_ms>INT32_MAX || request.response_ms>INT32_MAX ||
+       request.transmit_elapsed>INT32_MAX) { return reject(SessionRejection::Malformed); }
+    if(request.transmitted-request.started>=request.total_ms || now-request.started>=request.total_ms) {
+        return reject(SessionRejection::Deadline);
+    }
+    if(now-request.transmitted>=request.transmit_elapsed+request.response_ms || now-request.transmitted>=5000) {
+        return reject(SessionRejection::RequestWindow);
+    }
     SessionInfo candidate;
-    if(!verify_update(reply,candidate) || !fresh_epoch(candidate) ||
-       (candidate.epoch==info_.epoch && candidate.clock<info_.clock)) { return SessionAdmission::Rejected; }
+    if(!verify_update(reply,candidate)) { return reject(SessionRejection::Authentication); }
+    if(!fresh_epoch(candidate) || (candidate.epoch==info_.epoch && candidate.clock<info_.clock)) { return reject(SessionRejection::Epoch); }
     if(candidate.status!=0) { ready_=false; return SessionAdmission::KeyDenied; }
     // All admission and fallible work precedes the allocation-free publication.
     apply_update(candidate); return SessionAdmission::Updated;

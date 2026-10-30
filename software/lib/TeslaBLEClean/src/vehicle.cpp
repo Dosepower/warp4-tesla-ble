@@ -1,12 +1,61 @@
 // SPDX-License-Identifier: Apache-2.0
 #include <tesla_clean/vehicle.hpp>
+#include <tesla_clean/protobuf.hpp>
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
 namespace tesla_clean {
 namespace {
 bool validate_status(Bytes encoded,void *) { VcsecStatus status; return decode_vcsec_status(encoded,status); }
 bool validate_charge(Bytes encoded,void *) { return charge_state_well_formed(encoded); }
 void bump(uint8_t &counter) { if(counter!=UINT8_MAX) { ++counter; } }
+uint8_t domain_detail(Domain domain) { return static_cast<uint8_t>(domain); }
+uint8_t rejection_detail(Domain domain,SessionRejection why) { return static_cast<uint8_t>(static_cast<uint8_t>(why)|(domain==Domain::Infotainment?32:0)); }
+}
+bool format_vehicle_trace(const VehicleDiagnostics &d,char *out,size_t size)
+{
+    if(!out || !size) { return false; }
+    int n=snprintf(out,size,"u=%u l=%u o=%u n=%u|",unsigned(d.unrelated_frames),unsigned(d.late_session_replies),
+        unsigned(d.deferred_overflow),unsigned(d.trace_total));
+    if(n<0 || size_t(n)>=size) { return false; }
+    size_t used=size_t(n);
+    const size_t count=std::min<size_t>(d.trace_total,vehicle_trace_capacity);
+    // Full ring: the oldest retained event sits at the head (the saturating total is no index).
+    const size_t first=d.trace_total>vehicle_trace_capacity?d.trace_head%vehicle_trace_capacity:0;
+    for(size_t i=0;i<count;++i) {
+        const uint32_t w=d.trace[(first+i)%vehicle_trace_capacity];
+        n=snprintf(out+used,size-used,"%s%lu.%u.%u.%u",i?" ":"",static_cast<unsigned long>(w>>15),unsigned((w>>10)&31),
+            unsigned((w>>6)&15),unsigned(w&63));
+        if(n<0 || size_t(n)>=size-used) { return false; }
+        used+=size_t(n);
+    }
+    return true;
+}
+bool Vehicle::reply_shaped(const Frame &frame)
+{
+    // Session replies (decode_session_reply) and encrypted responses
+    // (decode_encrypted_response) both require top-level signature_data (13);
+    // session_info (15) is checked too. A frame without either, or one that is
+    // malformed before either appears, is ignored by frame() in every state
+    // (pairing replies are excluded by the caller).
+    ProtoReader reader({frame.data.data(),frame.length}); ProtoField field;
+    while(reader.next(field)) { if(field.number==13 || field.number==15) { return true; } }
+    return false;
+}
+void Vehicle::trace(Command &c,VehicleTraceEvent event,uint8_t detail,uint32_t now)
+{
+    auto &d=c.diagnostics;
+    const uint32_t offset=std::min<uint32_t>(now-c.started,vehicle_trace_max_offset_ms);
+    const uint32_t key=uint32_t(static_cast<uint8_t>(event)&31)<<10|uint32_t(static_cast<uint8_t>(c.stage)&15)<<6;
+    if(event==VehicleTraceEvent::Unrelated) {
+        uint32_t *last=vehicle_trace_last(d);
+        if(last && (*last&0x7fc0u)==key && (*last&63u)<63u) { ++*last; return; }
+    }
+    vehicle_trace_push(d,offset<<15|key|(detail&63u));
+}
+void Vehicle::unrelated(Command &c,uint32_t now)
+{
+    bump(c.diagnostics.unrelated_frames); trace(c,VehicleTraceEvent::Unrelated,1,now);
 }
 const char *vehicle_failure_name(VehicleFailure failure)
 {
@@ -58,6 +107,9 @@ void Vehicle::close(uint64_t generation)
         result.diagnostics.failure=VehicleFailure::Disconnected; result.diagnostics.stage=retired[i].stage;
         result.diagnostics.attempts=static_cast<uint8_t>(std::min<unsigned>(retired[i].attempts,UINT8_MAX));
         result.diagnostics.elapsed_ms=ports_.now(ports_.context)-retired[i].started;
+        trace(retired[i],VehicleTraceEvent::Finish,static_cast<uint8_t>(VehicleFailure::Disconnected),ports_.now(ports_.context));
+        result.diagnostics.trace=retired[i].diagnostics.trace; result.diagnostics.trace_total=retired[i].diagnostics.trace_total;
+        result.diagnostics.trace_head=retired[i].diagnostics.trace_head;
         retired[i].completion(result);
     }
 }
@@ -95,6 +147,13 @@ void Vehicle::end_pairing_status(uint64_t context)
 void Vehicle::finish(VehicleResultCode code,uint8_t battery,SleepState sleep,bool authenticated,VehicleFailure failure)
 {
     if(!count_) { return; }
+    {
+        const bool ok=code==VehicleResultCode::Soc || code==VehicleResultCode::Status || code==VehicleResultCode::WakeConfirmed ||
+            code==VehicleResultCode::PairRequestSent || code==VehicleResultCode::SkippedAsleep;
+        const VehicleFailure why=ok?VehicleFailure::None:code==VehicleResultCode::Expired?VehicleFailure::Deadline:
+            code==VehicleResultCode::KeyDenied?VehicleFailure::KeyDenied:code==VehicleResultCode::Disconnected?VehicleFailure::Disconnected:failure;
+        trace(commands_[0],VehicleTraceEvent::Finish,static_cast<uint8_t>(why),ports_.now(ports_.context));
+    }
     Command retired=std::move(commands_[0]);
     auto &d=retired.diagnostics;
     d.stage=retired.stage; d.elapsed_ms=ports_.now(ports_.context)-retired.started;
@@ -210,6 +269,9 @@ bool Vehicle::authenticate(Domain domain,Stage waiting,Stage next,uint32_t now)
     // A refused/failed session request is a failure retry and counts toward the
     // generic attempt cap (persistent transport refusal ends fast and bounded).
     if(c.timing.phase_ms && result!=ChallengeResult::Sent && result!=ChallengeResult::Established && result!=ChallengeResult::Exhausted) { ++c.attempts; }
+    trace(c,result==ChallengeResult::Sent || result==ChallengeResult::Established?
+        (replaying?VehicleTraceEvent::SessionReplay:VehicleTraceEvent::SessionNew):
+        result==ChallengeResult::Exhausted?VehicleTraceEvent::SessionExhausted:VehicleTraceEvent::SessionTxRefused,domain_detail(domain),now);
     if(serial_!=tx.serial) { return false; }
     // Response wait counts from full ATT-acknowledged TX completion, never from
     // before a multi-write request (official dispatcher.go tryStartSession).
@@ -250,9 +312,10 @@ void Vehicle::encrypted(Domain domain,Bytes payload,Stage waiting,uint32_t now)
     const Stage sending=c.stage;
     // An explicit wake authorization is consumed before possible wire exposure,
     // not after the adapter reports success. A refused write may have reached the car.
-    if(waiting==Stage::WaitWake) { c.wake_sent=true; c.phase_started=now; }
+    if(waiting==Stage::WaitWake) { c.wake_sent=true; c.phase_started=now; trace(c,VehicleTraceEvent::Phase,1,now); }
     if(!transmit({encoded.bytes.data(),encoded.length},tx)) {
         if(serial_==tx.serial) {
+            trace(c,VehicleTraceEvent::RequestTxRefused,0,now);
             retry(waiting==Stage::WaitWake?Stage::Status:sending,now,backoff(c)); drain(tx);
         } return;
     }
@@ -269,6 +332,7 @@ void Vehicle::encrypted(Domain domain,Bytes payload,Stage waiting,uint32_t now)
     if(!ch.guard->arm(request)) { fail(VehicleFailure::Internal); return; }
     c.stage=c.published=waiting; c.has_request=true; c.transmitted=now+request.transmit_elapsed; c.delayed=false;
     if(waiting==Stage::WaitWake) { c.wake_sent=true; }
+    trace(c,VehicleTraceEvent::Request,0,now);
     drain(tx);
 }
 void Vehicle::tick()
@@ -290,7 +354,7 @@ void Vehicle::tick()
         const bool phased=c.timing.phase_ms!=0;
         const bool auth_wait=c.stage==Stage::WaitVcsecAuth || c.stage==Stage::WaitInfoAuth;
         if(now-c.transmitted<(phased && auth_wait?std::min(c.timing.response_ms,transport_retry_interval_ms):c.timing.response_ms)) { return; }
-        bump(c.diagnostics.response_timeouts);
+        bump(c.diagnostics.response_timeouts); trace(c,VehicleTraceEvent::Timeout,0,now);
         Stage next=Stage::Status;
         if(c.stage==Stage::WaitVcsecAuth) { next=Stage::VcsecAuth; }
         if(c.stage==Stage::WaitInfoAuth) { next=Stage::InfoAuth; }
@@ -348,7 +412,17 @@ void Vehicle::emitted(void *p,const Frame &incoming)
     auto &v=*static_cast<Vehicle *>(p); const uint32_t now=v.ports_.now(v.ports_.context);
     if(v.frames_seen_!=UINT32_MAX) { ++v.frames_seen_; }
     if(v.transmission_) {
+        // Unsolicited traffic (e.g. VCSEC status broadcasts of a waking car) carries
+        // no signature_data and is ignored by frame() in every state except pairing.
+        // It must not occupy the bounded deferral queue: an overflow aborts the
+        // started frame and retires the link. Pairing keeps deferring everything.
+        if(v.count_ && v.commands_[0].kind!=Kind::Pair && !v.pair_context_ && !reply_shaped(incoming)) {
+            auto &c=v.commands_[0]; bump(c.diagnostics.frames); v.unrelated(c,now); return;
+        }
         if(v.deferred_count_==v.deferred_.size()) {
+            if(v.count_ && !v.deferred_overflow_) {
+                v.commands_[0].diagnostics.deferred_overflow=true; v.trace(v.commands_[0],VehicleTraceEvent::DeferredOverflow,0,now);
+            }
             if(!v.deferred_overflow_ && v.deferred_overflows_!=UINT32_MAX) { ++v.deferred_overflows_; }
             v.deferred_overflow_=true; return;
         }
@@ -386,6 +460,8 @@ void Vehicle::frame(const Frame &incoming,uint32_t now)
     const uint32_t current=ports_.now(ports_.context);
     auto &c=commands_[0]; bump(c.diagnostics.frames);
     if(now-c.started>=c.timing.total_ms || current-c.started>=c.timing.total_ms) { return; }
+    // Cannot be a session reply or encrypted response: diagnostics only (no state).
+    if(!reply_shaped(incoming)) { unrelated(c,now); return; }
     // The current phase budget (session establishment, post-wake awake wait) is
     // enforced at RX admission too, not only in tick(): the worker dispatches RX
     // before the next tick, and an authentic answer after the phase end must not
@@ -394,7 +470,9 @@ void Vehicle::frame(const Frame &incoming,uint32_t now)
     // the phase never extends the absolute deadline (OperationTime::phase_open).
     if(c.timing.phase_ms && (in_auth(c) || in_wake(c))) {
         const OperationTime phase=operation_time(c);
-        if(!phase.phase_open(now) || !phase.phase_open(current)) { bump(c.diagnostics.rejected_replies); return; }
+        if(!phase.phase_open(now) || !phase.phase_open(current)) {
+            bump(c.diagnostics.rejected_replies); trace(c,VehicleTraceEvent::PhaseClosed,0,now); return;
+        }
     }
     SessionWireReply hello;
     if(decode_session_reply({incoming.data.data(),incoming.length},{address_.data(),16},hello)) {
@@ -409,15 +487,28 @@ void Vehicle::frame(const Frame &incoming,uint32_t now)
             // cannot synchronize state after a write callback has spent the budget.
             if(!c.has_request || hello.domain!=(charge?Domain::Infotainment:Domain::Vcsec) || !ch.guard ||
                !ch.guard->pending_request(request) || now-request.transmitted>=request.transmit_elapsed+request.response_ms ||
-               now-request.started>=request.total_ms) { bump(c.diagnostics.rejected_replies); return; }
+               now-request.started>=request.total_ms) {
+                // Refused by state/window only: no armed request of this domain, or its
+                // window ended. Nothing here is authenticated, so this classification does
+                // not prove the frame answers an earlier identical copy (a delayed copy is
+                // one possible origin, not an established one).
+                bump(c.diagnostics.rejected_replies); bump(c.diagnostics.late_session_replies);
+                trace(c,VehicleTraceEvent::SessionLate,static_cast<uint8_t>((hello.domain==Domain::Infotainment?32:0)|
+                    (c.has_request && hello.domain==(charge?Domain::Infotainment:Domain::Vcsec) && ch.guard && ch.guard->pending_request(request)?
+                        static_cast<uint8_t>(SessionRejection::RequestWindow):static_cast<uint8_t>(SessionRejection::NotReady))),now);
+                return;
+            }
             const auto result=ch.authentication.receive_update(hello.view(generation_),request,current);
-            if(result==SessionAdmission::Rejected) { bump(c.diagnostics.rejected_replies); return; }
+            if(result==SessionAdmission::Rejected) {
+                bump(c.diagnostics.rejected_replies);
+                trace(c,VehicleTraceEvent::SessionRejected,rejection_detail(hello.domain,ch.authentication.last_rejection()),now); return;
+            }
             ch.guard->cancel(); c.has_request=false;
             if(result==SessionAdmission::KeyDenied) { finish(VehicleResultCode::KeyDenied); return; }
             ch.clock_anchor=now;
             ch.high_water=std::max(ch.high_water,ch.authentication.info().counter);
             (hello.domain==Domain::Vcsec?c.vcsec_answered:c.info_answered)=true;
-            c.refresh=false;
+            c.refresh=false; trace(c,VehicleTraceEvent::SessionUpdated,domain_detail(hello.domain),now);
             // A possibly exposed wake is never resent. Synchronization shares the
             // original eight-attempt/total budget and the ordinary retry backoff.
             retry(charge?Stage::Charge:Stage::Status,current); return;
@@ -426,8 +517,13 @@ void Vehicle::frame(const Frame &incoming,uint32_t now)
             (!ch.authentication.ready() || decoded.epoch!=ch.authentication.info().epoch || decoded.clock>=ch.authentication.info().clock);
         const auto result=ch.authentication.receive(hello.view(generation_),now,current,ports_.random);
         if(result==SessionAdmission::KeyDenied) { finish(VehicleResultCode::KeyDenied); return; }
-        if(result==SessionAdmission::Rejected) { bump(c.diagnostics.rejected_replies); }
+        if(result==SessionAdmission::Rejected) {
+            bump(c.diagnostics.rejected_replies);
+            trace(c,VehicleTraceEvent::SessionRejected,rejection_detail(hello.domain,ch.authentication.last_rejection()),now);
+        }
+        if(result==SessionAdmission::Deferred) { trace(c,VehicleTraceEvent::SessionDeferred,domain_detail(hello.domain),now); }
         if(result!=SessionAdmission::Established && result!=SessionAdmission::Updated) { return; }
+        trace(c,VehicleTraceEvent::SessionOk,domain_detail(hello.domain),now);
         (hello.domain==Domain::Vcsec?c.vcsec_answered:c.info_answered)=true;
         if(clock_update) { ch.clock_anchor=now; }
         ch.high_water=std::max(ch.high_water,ch.authentication.info().counter);
@@ -436,29 +532,37 @@ void Vehicle::frame(const Frame &incoming,uint32_t now)
         c.stage=hello.domain==Domain::Vcsec?(c.kind==Kind::Wake && !c.wake_sent?Stage::Wake:Stage::Status):Stage::Charge; return;
     }
     Response response;
-    if(!c.has_request || !decode_encrypted_response({incoming.data.data(),incoming.length},{address_.data(),16},response)) { return; }
+    if(!c.has_request) { trace(c,VehicleTraceEvent::ResponseUnmatched,2,now); return; }
+    if(!decode_encrypted_response({incoming.data.data(),incoming.length},{address_.data(),16},response)) {
+        trace(c,VehicleTraceEvent::ResponseUnmatched,1,now); return;
+    }
     const bool charge=c.published==Stage::WaitCharge;
-    if(response.domain!=(charge?Domain::Infotainment:Domain::Vcsec)) { return; }
+    if(response.domain!=(charge?Domain::Infotainment:Domain::Vcsec)) { trace(c,VehicleTraceEvent::ResponseUnmatched,3,now); return; }
     auto &ch=channel(response.domain); std::array<uint8_t,1024> plaintext{}; VerifiedReply verified;
     if(!ch.guard || !ch.guard->accept(response,now,generation_,plaintext,verified,charge?validate_charge:validate_status)) {
-        bump(c.diagnostics.ignored_responses); return;
+        bump(c.diagnostics.ignored_responses);
+        trace(c,VehicleTraceEvent::ResponseIgnored,ch.guard?static_cast<uint8_t>(ch.guard->last_rejection()):0,now); return;
     }
     c.has_request=false;
     (response.domain==Domain::Vcsec?c.vcsec_answered:c.info_answered)=true;
     if(verified.fault) {
         c.diagnostics.fault=verified.fault;
+        trace(c,VehicleTraceEvent::Fault,static_cast<uint8_t>(std::min<uint32_t>(verified.fault,63)),now);
         if(verified.fault==5 || verified.fault==6 || verified.fault==15 || verified.fault==17 || verified.fault==26) {
-            c.refresh=true; c.phase_started=now; retry(charge?Stage::InfoAuth:Stage::VcsecAuth,now);
+            c.refresh=true; c.phase_started=now; trace(c,VehicleTraceEvent::Phase,3,now); retry(charge?Stage::InfoAuth:Stage::VcsecAuth,now);
         } else if(verified.fault==1 || verified.fault==2 || verified.fault==11) { retry(charge?Stage::Charge:Stage::Status,now,backoff(c)); }
         else { fail(VehicleFailure::VehicleFault); } return;
     }
     if(charge) {
+        trace(c,VehicleTraceEvent::Response,0,now);
         uint8_t battery=0;
         if(decode_charge_state({plaintext.data(),verified.length},battery)) { finish(VehicleResultCode::Soc,battery,SleepState::Unknown,true); }
         else { fail(VehicleFailure::ChargeUnusable); } return;
     }
     VcsecStatus status;
-    if(!decode_vcsec_status({plaintext.data(),verified.length},status) || status.kind!=VcsecKind::Vehicle || status.sleep==SleepState::Unknown) {
+    const bool decoded=decode_vcsec_status({plaintext.data(),verified.length},status);
+    trace(c,VehicleTraceEvent::Response,decoded && status.kind==VcsecKind::Vehicle?static_cast<uint8_t>(status.sleep):63,now);
+    if(!decoded || status.kind!=VcsecKind::Vehicle || status.sleep==SleepState::Unknown) {
         fail(VehicleFailure::StatusUnusable); return;
     }
     if(c.kind==Kind::Status) { finish(VehicleResultCode::Status,0,status.sleep,true); return; }
@@ -473,7 +577,7 @@ void Vehicle::frame(const Frame &incoming,uint32_t now)
         // New bounded step budget for the infotainment session (reference
         // vehicle.cpp:1391-1400 restarts the phase clock once awake is observed).
         // The infotainment of a just-woken car ignores early requests (vehicle.h:160-163).
-        c.phase_started=now; c.stage=Stage::InfoAuth; c.delayed=false;
+        c.phase_started=now; c.stage=Stage::InfoAuth; c.delayed=false; trace(c,VehicleTraceEvent::Phase,2,now);
     }
     else if(c.policy==WakePolicy::NoWakeSkip) { finish(VehicleResultCode::SkippedAsleep,0,status.sleep,true); }
     else if(!c.wake_sent) { c.stage=Stage::Wake; c.delayed=false; }

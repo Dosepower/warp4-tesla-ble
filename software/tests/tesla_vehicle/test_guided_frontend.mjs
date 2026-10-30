@@ -175,6 +175,36 @@ assert.equal(findButton('forget_key').props.className,'w-100');
 findButton('hide_settings').props.onClick();
 f.call=async(t,p)=>{if(p.phase==='prepare_poll'){f.values['tesla_vehicle/guidance']={...f.values['tesla_vehicle/guidance'],ready:true,request:p.request};event('tesla_vehicle/guidance');}};
 await button('read_soc').props.onClick();assert.deepEqual(f.calls.slice(-2).map(c=>c.payload.phase),['prepare_poll','commit']);
+{ // Persisted trusted binding: a paired profile refreshes WITHOUT a frontend search, even with an
+  // expired/absent discovery result; the backend connects the stored address. Controls below.
+ const g=f.values['tesla_vehicle/guidance'],saved=structuredClone(g.profiles[0]),savedCall=f.call;
+ const steps=[];
+ f.call=async(t,p)=>{steps.push(page.state.busy_step);if(p.phase==='prepare_poll'){f.values['tesla_vehicle/guidance']={...f.values['tesla_vehicle/guidance'],ready:true,request:p.request};event('tesla_vehicle/guidance');}};
+ g.profiles[0]={ev_index:0,paired:true,key_presence:'present',binding_fresh:false,binding_persisted:true};event('tesla_vehicle/guidance');
+ f.values['tesla_vehicle/discovery']={status:'complete',busy:false,revision:3,result_age_ms:999999,result_ttl_ms:120000,targets:[]};event('tesla_vehicle/discovery');
+ let n=f.calls.length;await button('read_soc').props.onClick();
+ assert.deepEqual(f.calls.slice(n).map(c=>c.topic+':'+(c.payload.phase??'')),['tesla_vehicle/guided:prepare_poll','tesla_vehicle/guided:commit'],
+  'Persisted paired refresh: no scan, no profile save, just prepare+commit');
+ assert(!steps.includes('searching'),'Persisted refresh never shows the vehicle search step');
+ assert(!page.state.command_error,'Persisted refresh succeeds without error');
+ // Control 1: not persisted (no saved binding) -> the confirmed fresh search is still required first.
+ g.profiles[0]={ev_index:0,paired:true,key_presence:'present',binding_fresh:false,binding_persisted:false};event('tesla_vehicle/guidance');
+ let release;f.call=async(t)=>{if(t==='tesla_vehicle/scan')await new Promise(r=>release=r);};n=f.calls.length;
+ let pending=button('read_soc').props.onClick();await new Promise(setImmediate);
+ assert.equal(f.calls[n]?.topic,'tesla_vehicle/scan','Without a persisted binding the refresh starts with the explicit search');
+ assert.equal(page.state.busy_step,'searching','Search step shown only during the actual search');
+ page.selectProfile('1');page.selectProfile('0');release();await pending; // cancel the control search
+ assert(!f.calls.slice(n).some(c=>c.payload?.phase?.startsWith('prepare')),'Control search never prepared');
+ // Control 2: pairing never uses the persisted path, even if a binding is reported persisted.
+ g.profiles[0]={ev_index:0,paired:false,key_presence:'present',binding_fresh:false,binding_persisted:true};event('tesla_vehicle/guidance');
+ f.call=async(t)=>{if(t==='tesla_vehicle/scan')await new Promise(r=>release=r);};n=f.calls.length;
+ pending=button('pair').props.onClick();await new Promise(setImmediate);
+ assert.equal(f.calls[n]?.topic,'tesla_vehicle/scan','Pairing keeps the fresh exact-VIN search');
+ page.selectProfile('1');page.selectProfile('0');release();await pending;
+ assert(!f.calls.slice(n).some(c=>c.payload?.phase?.startsWith('prepare')),'Cancelled pairing search never prepared');
+ g.profiles[0]=saved;event('tesla_vehicle/guidance');f.call=savedCall;normal();
+}
+console.log('GUIDED_PERSISTED_BINDING_PASS');
 assert(!nodes().some(n=>String(n.props.value).includes('null %')));
 f.values['ev/state'].soc=63.5;f.values['tesla_vehicle/state']={profile_ev_index:0,last_soc:63.5,last_update:12345,key_presence:'present',key_present:true,paired:true};event('ev/state');event('tesla_vehicle/state');
 assert(nodes().some(n=>n.props.value==='63.5 %'));assert(nodes().some(n=>n.props.label==='tesla_vehicle.status.soc_time'));

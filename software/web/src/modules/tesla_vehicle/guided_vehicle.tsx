@@ -429,13 +429,19 @@ export class TeslaVehicle extends ConfigComponent<"tesla_vehicle/profiles", {}, 
                 return; // Accepted local cleanup is not a Tesla-side revocation.
             }
             // Radio discovery belongs ONLY to this explicitly confirmed action.
-            // A saved address is permission metadata, never fresh transport proof.
+            // A saved address alone is permission metadata, never fresh transport proof.
+            // Exception: a SoC refresh of a paired profile uses the backend-verified
+            // persisted trusted binding (VIN + BLE address/type + WARP EV MAC +
+            // authorized key); the backend connects that stored address directly.
+            // Pairing and first assignment keep the fresh exact-VIN search.
             // Reserve the bounded 15s backend preparation plus request latency.
             // Backend independently rechecks freshness at commit; after acceptance
             // its command-owned authority spans connect/send/full approval.
             const knownAge = this.discoveryAge();
             const preparationFresh = !Number.isFinite(knownAge) || knownAge + 20000 < this.discovery_ttl;
-            if (!API.get("tesla_vehicle/guidance")?.profiles.find(p => p.ev_index === index)?.binding_fresh || !preparationFresh) {
+            const row = API.get("tesla_vehicle/guidance")?.profiles.find(p => p.ev_index === index);
+            const persisted = action === 'poll' && row?.binding_persisted === true && row?.paired === true;
+            if (!persisted && (!row?.binding_fresh || !preparationFresh)) {
                 const p = {...this.profile()}, scan_revision = API.get("tesla_vehicle/discovery")?.revision ?? 0;
                 const deadline = Date.now() + 22000;
                 this.setState({busy_step: 'searching'});
@@ -574,9 +580,12 @@ export class TeslaVehicle extends ConfigComponent<"tesla_vehicle/profiles", {}, 
                     code === 'disconnected' ? __("tesla_vehicle.status.poll_link") :
                     code === 'vehicle_fault' ? __("tesla_vehicle.status.poll_vehicle_fault") :
                     code === 'status_unusable' || code === 'charge_unusable' ? __("tesla_vehicle.status.poll_unusable") :
+                    code === 'connect' ? __("tesla_vehicle.status.poll_connect") :
                     __("tesla_vehicle.status.outcome_failed");
             }
         }
+        // The persisted address did not connect: actionable, binding unchanged.
+        if (reason === 'Could not connect to current Tesla over BLE') return __("tesla_vehicle.status.poll_connect");
         // Only this unambiguous backend outcome is an ordinary approval expiry.
         if (reason === 'Approval deadline expired; approval not authenticated') return __("tesla_vehicle.status.approval_expired");
         // SoC operation outcomes (exact backend texts, no identifiers).

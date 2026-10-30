@@ -151,4 +151,86 @@
   m.loop();if(r->teardown_handle)run_task(r->teardown_handle);m.loop();assert(ev.applied==0);
   std::printf("BINDING_RUNTIME_PASS mode=%s attempts=%u transmitted=%u fail_closed=%u isolation=profile1-unchanged\n",mode.c_str(),attempts,sent_attempts,failed_attempts);
  }
+ // binding-restore: the key + authorization + ble_binding committed through the production
+// storage transactions on the real esp_littlefs VFS/lfs (seed(): TeslaBleStorageAdapter
+// save_transaction, the same path pairing uses) are restored into a NEW Runtime by the normal
+// guided refresh, with the clock far past the discovery TTL and no discovery result:
+//   boot 0: new Runtime in the same module instance (worker recreation, no reboot);
+//   boot 1: reboot-equivalent - a FRESH TeslaVehicle + fresh Bluetooth lifecycle/NimBLE host
+//           (like the empty-legacy boots); only the VFS/lfs image and the WARP EV identity
+//           survive. (After a same-module teardown of a stopped worker the old module reports
+//           restart_required=1 / Bluetooth inactive - identical on the baseline production by
+//           control - so only a fresh module models a reboot. Not a gate of this change.)
+// Each boot: worker connects only to the stored address; nothing is written, nothing scanned.
+// Control: a persisted profile address that differs from the stored binding is refused.
+// Uses only API common to the pre-change module, so --expect-red shows RED_RESTORE there.
+static void binding_restore_flow(TeslaVehicle &m0) {
+ auto driver0=std::make_unique<HostNimbleDriver>(m0.bluetooth,TeslaVehicle::gatt_callback);ev.index=0;ev.mac=A;test_submit=nimble_auto_submit;
+ seed(0);seed(1);
+ const auto initial=namespace_bytes(0,A),other=namespace_bytes(1,B);
+ assert(!initial.at("private_key").empty()&&!initial.at("ble_binding").empty()&&initial.at("authorized")==std::vector<uint8_t>{1});
+ const int scans0=test_scans;String error;unsigned id=500;uint64_t last_epoch=0;
+ TeslaVehicle *mod=&m0;std::unique_ptr<TeslaVehicle> fresh;std::unique_ptr<HostNimbleDriver> driver1;
+ auto guided=[&](const char*phase)->std::string{
+  auto &m=*mod;auto &c=m.tesla->guided_command;auto*p=m.find_profile(0);auto*q=c.get("profile");
+  for(const char*k:{"ev_mac","vin","ble_address"})q->get(k)->updateString(p->get(k)->asString());
+  q->get("ev_index")->updateInt(0);q->get("enable")->updateBool(true);
+  for(const char*k:{"ble_address_type","discovery_revision","poll_interval"})q->get(k)->updateUint(p->get(k)->asUint());
+  c.get("phase")->updateString(phase);char rid[33];snprintf(rid,sizeof(rid),"%032u",++id);c.get("request")->updateString(rid);
+  c.get("generation")->updateString(std::to_string(ev.generation));c.get("revision")->updateUint(m.tesla->config_revision);
+  error.clear();api.commands.at("tesla_vehicle/guided")(0,error);return error.c_str();
+ };
+ for(unsigned boot=0;boot<2;++boot){
+  if(boot==1){
+   // Reboot: the old module and its Bluetooth lifecycle are gone; only the VFS image stays.
+   driver0.reset();
+   fresh=std::make_unique<TeslaVehicle>();fresh->pre_setup();fresh->setup();
+   fresh->bluetooth_boot_enabled=true;fresh->bluetooth_config.get("enable")->updateBool(true);
+   assert(fresh->prepare_tesla());fresh->register_urls();
+   auto *entries=fresh->tesla->profiles.get("entries");assert(entries->setCount(2));entry(entries->get(size_t{0}),0);entry(entries->get(size_t{1}),1);
+   assert(fresh->validate_profiles(fresh->tesla->profiles,ConfigSource::File).empty()); // profiles as restored from the config file
+   mod=fresh.get();driver1=std::make_unique<HostNimbleDriver>(mod->bluetooth,TeslaVehicle::gatt_callback);
+   assert(namespace_bytes(0,A)==initial&&namespace_bytes(1,B)==other);
+  }
+  auto &m=*mod;
+  assert(!m.tesla->runtime_owner.get()&&m.bluetooth.active());clock_ms.fetch_add(10*TeslaBleDiscovery::RESULT_TTL_MS+1);
+  const auto opens=peer_open_calls;
+  const auto e=guided("prepare_poll");
+  if(!e.empty()){std::fprintf(stderr,"RED_RESTORE boot=%u persisted refresh refused: %s\n",boot,e.c_str());std::fflush(stderr);std::_Exit(3);}
+  auto *r=m.tesla->runtime_owner.get();assert(r&&(boot==1||r->epoch!=last_epoch));last_epoch=r->epoch;
+  bool checked=false;
+  on_delay=[&]{
+   if(checked||r->profile_pending.load())return;checked=true;m.loop();
+   // Restored from the VFS by the worker's apply_profile: authorization, exact key/VIN/MAC, stored address.
+   if(!(r->authorized.load()&&m.runtime_binding_matches()&&m.runtime_binding_matches(true))){
+    std::fprintf(stderr,"RED_RESTORE boot=%u restored runtime not bound\n",boot);std::fflush(stderr);std::_Exit(3);}
+   const uint8_t stored[6]{1,2,3,4,5,6};assert(!memcmp(r->remote_address,stored,6)&&r->remote_address_type==0);
+   assert(m.ensure_connected()&&peer_open_calls==opens+1); // connects to the stored address, no scan
+   assert(test_peer.type==0&&test_peer.val[5]==1&&test_peer.val[0]==6);
+   m.publish_guidance();assert(m.tesla->guidance.get("ready")->asBool());
+   r->stop_requested.store(true);
+  };
+  run_task(r->task_handle);on_delay={};assert(checked);m.loop();if(r->teardown_handle)run_task(r->teardown_handle);m.loop();
+  assert(namespace_bytes(0,A)==initial&&namespace_bytes(1,B)==other&&test_scans==scans0);
+  std::printf("BINDING_RESTORE boot=%u restored from VFS: authorized, stored address, no scan, no write\n",boot);
+ }
+ // Control (rebooted module): a persisted profile address that differs from the committed
+ // binding is refused, nothing opened or written. Needs a module whose Bluetooth is usable.
+ driver1.reset();
+ fresh=std::make_unique<TeslaVehicle>();fresh->pre_setup();fresh->setup();
+ fresh->bluetooth_boot_enabled=true;fresh->bluetooth_config.get("enable")->updateBool(true);
+ assert(fresh->prepare_tesla());fresh->register_urls();
+ {auto *entries=fresh->tesla->profiles.get("entries");assert(entries->setCount(2));entry(entries->get(size_t{0}),0);entry(entries->get(size_t{1}),1);}
+ assert(fresh->validate_profiles(fresh->tesla->profiles,ConfigSource::File).empty());
+ mod=fresh.get();driver1=std::make_unique<HostNimbleDriver>(mod->bluetooth,TeslaVehicle::gatt_callback);
+ auto &m=*mod;
+ m.find_profile(0)->get("ble_address")->updateString("04:02:03:04:05:06");clock_ms.fetch_add(1000);
+ const auto opens=peer_open_calls;const auto refused=guided("prepare_poll");
+ assert(!refused.empty()&&refused.find("VIN")!=std::string::npos&&refused.find("Bluetooth inactive")==std::string::npos); // binding refusal, not an inactive stack
+ std::printf("BINDING_RESTORE control changed address refused: %s\n",refused.c_str());
+ if(auto *r=m.tesla->runtime_owner.get()){r->stop_requested.store(true);run_task(r->task_handle);m.loop();if(r->teardown_handle)run_task(r->teardown_handle);m.loop();}
+ assert(peer_open_calls==opens&&namespace_bytes(0,A)==initial&&namespace_bytes(1,B)==other&&test_scans==scans0);
+ test_submit={};assert(ev.applied==0);
+ std::printf("BINDING_RESTORE_PASS runtime recreation + reboot (fresh module) restored key+ble_binding from VFS; changed address refused\n");
+}
 #endif

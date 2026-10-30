@@ -27,14 +27,16 @@
 // user's explicit request. The follow-up never wakes, so it cannot re-arm itself.
 // The EVSE state is only observed (read-only); this module never starts,
 // stops, releases or authorizes charging.
-// One cycle reuses the existing production predicates unchanged:
+// One cycle uses the persisted trusted binding (one-time explicit search,
+// adoption and authenticated pairing), like a fixed-MAC BLE client:
 //   1. read-only key/authorization/transport-binding probe (same as guidance),
-//   2. an own VIN-scoped discovery for the CURRENT physical PEV generation,
-//   3. fresh_binding(): exactly one connectable advertiser with the VIN name at
-//      the profile's already persisted and authorized BLE address (an address
-//      change still requires the user's explicit scan/adoption),
-//   4. select_profile() with that scan revision (runtime-only, never persisted),
-//   5. one bounded SoC operation through the normal worker request path.
+//   2. reuse this profile's already prepared runtime (no reload, no reconnect),
+//      otherwise select_profile(persisted) loads the stored VIN/address/type;
+//      no scan, no adoption of any advertiser (an address change still
+//      requires the user's explicit search and adoption),
+//   3. one bounded SoC operation through the normal worker request path; the
+//      worker connects only to the stored address. A failed connection is
+//      reported as not_found and changes no binding.
 // Never pairs, never writes key/binding material, never charges, never
 // queues behind or concurrently with manual/guided/discovery/pairing work.
 // Unplug, identity or profile changes abandon the cycle; the worker's own
@@ -43,8 +45,9 @@
 
 static constexpr uint32_t AUTO_POLL_FIRST_DELAY_MS = 15000; // after plug-in/identity change
 static constexpr uint32_t AUTO_POLL_RETRY_MS = 5000;        // non-radio deferral only
-static constexpr uint32_t AUTO_POLL_SCAN_TIMEOUT_MS = (TeslaBleDiscovery::SCAN_SECONDS + 10) * 1000;
 static constexpr uint32_t AUTO_POLL_SELECT_TIMEOUT_MS = 15000;
+// tesla_vehicle.cpp POLL_FAILURE_CONNECT (stored address did not connect).
+static constexpr uint8_t AUTO_POLL_FAILURE_CONNECT = 12;
 // Real charge start/resume: request after a short settle delay, but never
 // sooner than this gap after any finished SoC operation (manual or automatic).
 static constexpr uint32_t AUTO_POLL_CHARGE_START_DELAY_MS = 5000;
@@ -102,36 +105,54 @@ void TeslaVehicle::auto_poll()
     // Publish the worker's terminal SoC outcome first, so a just-finished
     // operation always pushes the next automatic cycle out by one interval.
     if (r) {
-        const auto sequence = r->poll_outcome_sequence.load();
-        if (tesla->poll_outcome_epoch != r->epoch || tesla->poll_outcome_seen != sequence) {
+        const auto sequence = r->poll_snapshot.sequence();
+        auto &snap = tesla->poll_outcome_copy;
+        // One coherent copy of outcome + classification + trace of the same
+        // operation. If the worker is mid-publication on every bounded attempt,
+        // nothing is marked seen and the next loop pass retries (never blocks).
+        if ((tesla->poll_outcome_epoch != r->epoch || tesla->poll_outcome_seen != sequence) && r->poll_snapshot.read(snap)) {
             // Per runtime epoch; a new worker's sequence restarts at 0 (nothing to publish yet).
-            tesla->poll_outcome_epoch = r->epoch; tesla->poll_outcome_seen = sequence;
+            tesla->poll_outcome_epoch = r->epoch; tesla->poll_outcome_seen = snap.sequence;
             static const char *const names[] = {"none", "ok", "asleep_wake_disabled", "asleep_wake_limited", "woken_no_soc", "failed", "busy", "wake_sent_no_soc"};
-            const auto value = r->poll_outcome.load();
-            if (sequence != 0 && value < sizeof(names) / sizeof(names[0])) {
+            const auto value = snap.outcome;
+            if (snap.sequence != 0 && value < sizeof(names) / sizeof(names[0])) {
                 tesla->state.get("poll_outcome")->updateString(names[value]);
-                tesla->state.get("poll_outcome_automatic")->updateBool(r->poll_outcome_automatic.load());
+                tesla->state.get("poll_outcome_automatic")->updateBool(snap.automatic);
                 // Structured classification of the same operation (diagnostics only).
                 static const char *const failures[] = {"none", "deadline", "attempt_cap", "wake_poll_cap", "challenge_cap",
                     "challenge_invalid", "key_denied", "disconnected", "vehicle_fault", "status_unusable", "charge_unusable",
                     "internal", "connect", "not_bound", "refused", "not_admitted"};
-                const auto failure = r->poll_failure.load();
-                const auto stage = r->poll_stage.load();
-                const auto counts = r->poll_counts.load();
-                const auto flags = r->poll_flags.load();
+                const auto failure = snap.failure;
+                const auto stage = snap.stage;
+                const auto counts = snap.counts;
+                const auto flags = snap.flags;
                 tesla->state.get("poll_failure")->updateString(failure < sizeof(failures) / sizeof(failures[0]) ? failures[failure] : "internal");
                 tesla->state.get("poll_stage")->updateString(stage ? tesla_clean::vehicle_stage_name(static_cast<tesla_clean::VehicleStage>(stage - 1)) : "");
-                tesla->state.get("poll_elapsed_ms")->updateUint(r->poll_elapsed_ms.load());
+                tesla->state.get("poll_elapsed_ms")->updateUint(snap.elapsed_ms);
                 tesla->state.get("poll_attempts")->updateUint(counts & 0xff);
                 tesla->state.get("poll_timeouts")->updateUint((counts >> 8) & 0xff);
                 tesla->state.get("poll_frames")->updateUint((counts >> 16) & 0xff);
                 tesla->state.get("poll_rejected")->updateUint(counts >> 24);
-                tesla->state.get("poll_fault")->updateUint(r->poll_fault.load());
+                tesla->state.get("poll_fault")->updateUint(snap.fault);
                 tesla->state.get("poll_session_reused")->updateBool((flags & 3) != 0);
                 tesla->state.get("poll_vcsec_answered")->updateBool((flags & 4) != 0);
                 tesla->state.get("poll_info_answered")->updateBool((flags & 8) != 0);
+                {
+                    tesla_clean::VehicleDiagnostics d;
+                    const auto meta = snap.trace_meta;
+                    d.trace_total = static_cast<uint16_t>(meta & 0xffff);
+                    d.unrelated_frames = static_cast<uint8_t>((meta >> 16) & 0xff);
+                    d.late_session_replies = static_cast<uint8_t>((meta >> 24) & 0x7f);
+                    d.deferred_overflow = (meta >> 31) != 0;
+                    d.trace_head = snap.trace_head;
+                    d.trace = snap.trace;
+                    // Worst case fits (25 + 32 * 16 bytes); a truncated text keeps its prefix.
+                    char text[544];
+                    (void)tesla_clean::format_vehicle_trace(d, text, sizeof(text));
+                    tesla->state.get("poll_trace")->updateString(meta ? text : "");
+                }
                 a.last_operation_ms = now; a.operation_seen = true;
-                a.last_operation_manual = !r->poll_outcome_automatic.load();
+                a.last_operation_manual = !snap.automatic;
                 const auto outcome = static_cast<PollOutcome>(value);
                 if (outcome == PollOutcome::Ok) {
                     a.post_wake_armed = a.post_wake = false; // SoC delivered: no follow-up needed
@@ -298,37 +319,24 @@ void TeslaVehicle::auto_poll()
             !profile_material_authorized(store, vin, live.mac) || !profile_transport_matches(store, vin, address, type)) {
             end_cycle("not_paired", false); return;
         }
-        TeslaBleDiscovery::Scope scope;
-        scope.index = live.index; scope.mac = live.mac; scope.generation = live.generation;
-        memcpy(scope.searched_vin, vin, 17);
-        if (!tesla_ble_vehicle_name(vin, scope.name) || !bluetooth.request_discovery(scope)) {
-            // Not started: no radio contact, the follow-up (if any) stays pending.
-            a.cycle_initial = false; a.post_wake = a.cycle_post_wake; a.cycle_post_wake = a.cycle_post_wake_manual = false;
-            a.post_pair = a.cycle_post_pair; a.cycle_post_pair = false;
-            retry_later(); return;
+        // charge_cycle_obsolete was computed before this cycle's flags were set
+        // (it would wrongly end the plug-in request); re-evaluate for this cycle.
+        if (!a.cycle_initial && !a.cycle_post_wake_manual && !a.cycle_post_pair && !charging) { end_cycle("not_charging"); return; } // no contact
+        a.config_revision = tesla->config_revision;
+        if (persisted_runtime_ready(live.index)) {
+            a.runtime_epoch = r->epoch; // existing correctly owned runtime/connection: no reload
+            // Same visible state as the reload path (publish_profile clears the banner at
+            // every cycle start): an older operation's error is not this cycle's result.
+            // Needed because a no-wake automatic outcome publishes no banner of its own.
+            publish_error("");
+        } else {
+            String error;
+            if (!select_profile(live.index, false, error, 0, true)) { end_cycle("failed"); return; }
+            r = tesla->runtime_owner.get();
+            a.runtime_epoch = r ? r->epoch : 0;
         }
-        a.scan_baseline = s.revision; a.config_revision = tesla->config_revision;
-        a.phase = Tesla::AutoPoll::Phase::Scanning; a.phase_ms = now;
-        auto_poll_publish("searching"); publish_discovery(); publish_bluetooth_state();
-        return;
-    }
-    case Tesla::AutoPoll::Phase::Scanning: {
-        TeslaBleDiscovery::Snapshot s{};
-        if (!bluetooth.discovery_snapshot(s) || s.busy || s.revision == a.scan_baseline) {
-            if (now - a.phase_ms > AUTO_POLL_SCAN_TIMEOUT_MS) { end_cycle("failed"); }
-            return;
-        }
-        a.own_revision = s.revision;
-        if (charge_cycle_obsolete) { end_cycle("not_charging"); return; } // passive scan only, no contact
-        if (s.status != TeslaBleDiscovery::Status::Complete || tesla->config_revision != a.config_revision ||
-            !fresh_binding(live.index, live.mac, vin, address, type, s.revision)) {
-            end_cycle("not_found"); return; // Out of range, not connectable, ambiguous or address changed.
-        }
-        String error;
-        if (!select_profile(live.index, false, error, s.revision)) { end_cycle("failed"); return; }
-        r = tesla->runtime_owner.get();
-        a.runtime_epoch = r ? r->epoch : 0;
         a.phase = Tesla::AutoPoll::Phase::Selecting; a.phase_ms = now;
+        auto_poll_publish("polling"); publish_bluetooth_state();
         return;
     }
     case Tesla::AutoPoll::Phase::Selecting: {
@@ -342,7 +350,7 @@ void TeslaVehicle::auto_poll()
             !r->command_outcome.forward_available() || r->manual_poll_pending.exchange(true)) {
             end_cycle("waiting"); return; // An explicit action owns the worker; its result stands.
         }
-        a.outcome_sequence0 = r->poll_outcome_sequence.load();
+        a.outcome_sequence0 = r->poll_snapshot.sequence();
         a.cycle_edges = a.charge_edges; // this request is issued after every edge seen so far
         // Wake permission of this hand-over: every scheduler context except the
         // post-wake follow-up (stored before the request flag the worker claims).
@@ -367,13 +375,23 @@ void TeslaVehicle::auto_poll()
         // Plug-in request: success or "asleep, wake not permitted" is final for
         // this plug-in session; other outcomes may be retried (bounded).
         bool retryable = true;
-        if (own_runtime && r->poll_outcome_sequence.load() != a.outcome_sequence0 && r->poll_outcome_automatic.load()) {
-            const auto value = static_cast<PollOutcome>(r->poll_outcome.load());
-            // "Asleep, wake not permitted" is final for the plug-in request only as a
-            // configuration decision; a no-wake follow-up finding the car asleep is not.
-            retryable = value != PollOutcome::Ok && !(value == PollOutcome::AsleepWakeDisabled && !a.cycle_post_wake);
+        const char *state = "waiting";
+        if (own_runtime && r->poll_snapshot.sequence() != a.outcome_sequence0) {
+            // Outcome and origin from one coherent snapshot; a publication still
+            // being written is read again on the next pass (bounded, non-blocking).
+            TeslaPollSnapshot &latest = tesla->poll_outcome_copy;
+            if (!r->poll_snapshot.read(latest)) { return; }
+            if (latest.automatic) {
+                const auto value = static_cast<PollOutcome>(latest.outcome);
+                // "Asleep, wake not permitted" is final for the plug-in request only as a
+                // configuration decision; a no-wake follow-up finding the car asleep is not.
+                retryable = value != PollOutcome::Ok && !(value == PollOutcome::AsleepWakeDisabled && !a.cycle_post_wake);
+                // The stored address did not connect: actionable reconnect/reassign
+                // state. The saved binding/pairing stays untouched; no scan follows.
+                if (value == PollOutcome::Failed && latest.failure == AUTO_POLL_FAILURE_CONNECT) { state = "not_found"; }
+            }
         }
-        end_cycle("waiting", retryable);
+        end_cycle(state, retryable);
         return;
     }
     }

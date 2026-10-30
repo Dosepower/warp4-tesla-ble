@@ -49,17 +49,23 @@ bool ResponseGuard::accept(const Response &response, uint32_t now, uint64_t gene
     plaintext.fill(0); reply = {};
     // A missing request_uuid is admissible only for VCSEC; correlation then rests on the
     // routing address, this single armed request and the request hash in the GCM AAD.
-    if (!active_ || generation != request_.generation || response.domain != domain_ ||
-        (response.has_uuid ? response.uuid != request_.uuid : domain_ != Domain::Vcsec) ||
-        now - request_.started >= request_.total_ms ||
-        now - request_.transmitted >= request_.transmit_elapsed + request_.response_ms) { return false; }
+    // Same conditions and evaluation order as before; split only to record the gate.
+    rejection_ = ResponseRejection::None;
+    if (!active_) { rejection_ = ResponseRejection::Inactive; return false; }
+    if (generation != request_.generation || response.domain != domain_) { rejection_ = ResponseRejection::Route; return false; }
+    if (response.has_uuid ? response.uuid != request_.uuid : domain_ != Domain::Vcsec) { rejection_ = ResponseRejection::Uuid; return false; }
+    if (now - request_.started >= request_.total_ms) { rejection_ = ResponseRejection::Deadline; return false; }
+    if (now - request_.transmitted >= request_.transmit_elapsed + request_.response_ms) { rejection_ = ResponseRejection::Window; return false; }
     std::array<uint8_t,32> aad{};
     size_t length = 0;
     if (!response_aad(domain_, {vin_.data(),vin_.size()}, {request_.identifier.data(),request_.identifier_length},
-                      response.counter, response.flags, response.fault, aad) ||
-        !crypto_.decrypt(response.packet, {aad.data(),aad.size()}, plaintext, length) ||
-        (response.fault==0 && validate_payload && !validate_payload({plaintext.data(),length},validation_context)) ||
-        !replay_.admit(response.counter)) {
+                      response.counter, response.flags, response.fault, aad)) { rejection_ = ResponseRejection::Metadata; }
+    else if (!crypto_.decrypt(response.packet, {aad.data(),aad.size()}, plaintext, length)) { rejection_ = ResponseRejection::Decrypt; }
+    else if (response.fault==0 && validate_payload && !validate_payload({plaintext.data(),length},validation_context)) {
+        rejection_ = ResponseRejection::Payload;
+    }
+    else if (!replay_.admit(response.counter)) { rejection_ = ResponseRejection::Replay; }
+    if (rejection_ != ResponseRejection::None) {
         plaintext.fill(0);
         return false;
     }

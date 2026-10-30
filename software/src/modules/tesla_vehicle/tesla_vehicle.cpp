@@ -131,6 +131,7 @@ bool TeslaVehicle::prepare_tesla()
         {"ev_index", Config::Int(-1, -1, EV_MAX_EVS - 1)},
         {"ev_mac", Config::Str("", 0, 17)}, {"namespace_clean", Config::Bool(false)},
         {"binding_fresh", Config::Bool(false)},
+        {"binding_persisted", Config::Bool(false)},
         {"paired", Config::Bool(false)}, {"key_presence", Config::Str("unknown", 0, TESLA_BLE_PRESENCE_MAX_LENGTH)},
     });
     tesla->guidance = Config::Object({
@@ -253,7 +254,8 @@ bool TeslaVehicle::prepare_tesla()
         // Terminal outcome of the last SoC operation (see PollOutcome).
         {"poll_outcome", Config::Str("none", 0, 24)},
         {"poll_outcome_automatic", Config::Bool(false)},
-        // Autonomous firmware scheduler: off|initial|waiting|not_charging|not_paired|searching|polling|not_found|failed.
+        // Autonomous firmware scheduler: off|initial|waiting|not_charging|not_paired|polling|not_found|failed.
+        // not_found: the persisted BLE address did not connect (no scan, no reassignment).
         {"auto_poll", Config::Str("off", 0, 12)},
         // Classification of the last finished SoC operation (no identifiers):
         // none|deadline|attempt_cap|wake_poll_cap|challenge_cap|challenge_invalid|key_denied|
@@ -270,6 +272,10 @@ bool TeslaVehicle::prepare_tesla()
         {"poll_session_reused", Config::Bool(false)},
         {"poll_vcsec_answered", Config::Bool(false)},
         {"poll_info_answered", Config::Bool(false)},
+        // Bounded payload-free RX/TX event trace of the same operation (diagnostics only):
+        // "u=<unrelated frames> l=<late session replies> o=<deferral overflow> n=<events>|
+        // ms.event.stage.detail ..." oldest first; codes: tesla_clean::VehicleTraceEvent.
+        {"poll_trace", Config::Str("", 0, 543)},
         {"last_error", Config::Str("", 0, 96)},
     });
 
@@ -1324,17 +1330,24 @@ void TeslaVehicle::process_commands()
 // Local (pre-vehicle) failure classes follow tesla_clean::VehicleFailure's values.
 enum : uint8_t { POLL_FAILURE_CONNECT = 12, POLL_FAILURE_NOT_BOUND = 13, POLL_FAILURE_REFUSED = 14, POLL_FAILURE_NOT_ADMITTED = 15 };
 
+// Worker only: stages the classification of the operation whose outcome the
+// next set_poll_outcome publishes (no cross-task write happens here).
 template <typename RuntimeT>
 static void set_poll_diagnostics(RuntimeT *r, uint8_t failure, const tesla_clean::VehicleDiagnostics *d = nullptr)
 {
-    r->poll_failure.store(failure);
-    r->poll_stage.store(d ? static_cast<uint8_t>(static_cast<uint8_t>(d->stage) + 1) : 0);
-    r->poll_elapsed_ms.store(d ? d->elapsed_ms : 0);
-    r->poll_fault.store(d ? d->fault : 0);
-    r->poll_counts.store(d ? (uint32_t{d->attempts} | uint32_t{d->response_timeouts} << 8 | uint32_t{d->frames} << 16 |
-        uint32_t{d->rejected_replies} << 24) : 0);
-    r->poll_flags.store(d ? static_cast<uint8_t>((d->vcsec_reused ? 1 : 0) | (d->info_reused ? 2 : 0) | (d->vcsec_answered ? 4 : 0) |
-        (d->info_answered ? 8 : 0) | (d->ignored_responses ? 16 : 0)) : 0);
+    auto &s = r->poll_staged;
+    s.failure = failure;
+    s.stage = d ? static_cast<uint8_t>(static_cast<uint8_t>(d->stage) + 1) : 0;
+    s.elapsed_ms = d ? d->elapsed_ms : 0;
+    s.fault = d ? d->fault : 0;
+    s.counts = d ? (uint32_t{d->attempts} | uint32_t{d->response_timeouts} << 8 | uint32_t{d->frames} << 16 |
+        uint32_t{d->rejected_replies} << 24) : 0;
+    s.flags = d ? static_cast<uint8_t>((d->vcsec_reused ? 1 : 0) | (d->info_reused ? 2 : 0) | (d->vcsec_answered ? 4 : 0) |
+        (d->info_answered ? 8 : 0) | (d->ignored_responses ? 16 : 0)) : 0;
+    for (size_t i = 0; i < s.trace.size(); ++i) { s.trace[i] = d ? d->trace[i] : 0; }
+    s.trace_head = d ? d->trace_head : 0;
+    s.trace_meta = d ? (uint32_t{d->trace_total} | uint32_t{d->unrelated_frames} << 16 |
+        uint32_t{std::min<uint8_t>(d->late_session_replies, 127)} << 24 | (d->deferred_overflow ? 1u << 31 : 0)) : 0;
 }
 
 // Concise, identifier-free English diagnostic for the classified failure; the
@@ -1360,11 +1373,16 @@ static void soc_failure_text(const tesla_clean::VehicleDiagnostics &d, char *out
     }
 }
 
+// Worker only (the snapshot's single writer): publishes outcome, origin and the
+// staged classification as one coherent snapshot, then clears the staging so
+// an outcome without its own classification (e.g. Busy) never carries an
+// earlier operation's failure/trace.
 void TeslaVehicle::set_poll_outcome(Runtime *r, PollOutcome outcome, bool automatic)
 {
-    r->poll_outcome.store(static_cast<uint8_t>(outcome));
-    r->poll_outcome_automatic.store(automatic);
-    r->poll_outcome_sequence.fetch_add(1);
+    r->poll_staged.outcome = static_cast<uint8_t>(outcome);
+    r->poll_staged.automatic = automatic;
+    r->poll_snapshot.publish(r->poll_staged);
+    r->poll_staged = {};
 }
 
 void TeslaVehicle::request_soc(bool manual)

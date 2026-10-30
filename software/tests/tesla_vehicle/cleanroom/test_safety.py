@@ -12,7 +12,18 @@ for path in sorted(module.glob('*')):
     if path.suffix not in ('.cpp','.h'): continue
     text=path.read_text()
     observed.update(re.findall(r'\bvehicle\s*->\s*([A-Za-z_]\w*)\s*\(',text))
-    assert not re.search(r'\b(?:charge_start|start_charging|ChargingStartStopAction|chargingStartStopAction)\b',text), path
+# No charge-start vehicle command in any module TU file (.cpp/.h and #included
+# .inc). Only the AutoPoll scheduler's bool demand flag and its due-time lambda
+# are exempt, by exact form (see charge_start_guard.py and its fixtures).
+import sys; sys.path.insert(0, str(Path(__file__).resolve().parent))
+from charge_start_guard import violations, module_files
+module_tu = module_files(module)
+assert any(n.endswith('.inc') for n, _ in module_tu)
+bad = violations(module_tu)
+assert not bad, bad
+for name, text in module_tu:
+    if name.endswith('.inc'):
+        observed.update(re.findall(r'\bvehicle\s*->\s*([A-Za-z_]\w*)\s*\(', text))
 # Exhaustion, the active-TX state used to gate worker RX service, the
 # deferred-overflow count and the per-attempt RX frame/pair-reply/session-reply
 # counters are read-only local diagnostics (const getters returning a member),

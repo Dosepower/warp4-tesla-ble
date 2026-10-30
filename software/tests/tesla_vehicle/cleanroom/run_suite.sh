@@ -4,6 +4,7 @@ set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 python3 "$here/make_vectors.py"
 python3 "$here/wire_vectors.py"
+python3 "$here/test_charge_start_guard.py"
 python3 "$here/test_safety.py"
 python3 "$here/test_production_binding.py"
 count=0

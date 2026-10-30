@@ -8,8 +8,19 @@ for p in sorted(module.glob('*')):
     assert 'TeslaBLE::' not in text, str(p)
     for header in ('<vehicle.h>','<adapters.h>','<checked_mutex.h>','<checked_function.h>'):
         assert header not in text, (str(p),header)
-    for op in ('charge_start','start_charging','charging_start','ACTION_CHARGE_START'):
+    for op in ('start_charging','charging_start','ACTION_CHARGE_START'):
         assert op not in text, (str(p),op)
+# charge_start: any identifier containing it is forbidden in .cpp/.h/.inc except
+# the exact AutoPoll scheduler flag/due-lambda forms (charge_start_guard.py).
+import sys; sys.path.insert(0, str(Path(__file__).resolve().parent))
+from charge_start_guard import violations, module_files
+module_tu = module_files(module)
+assert any(n.endswith('.inc') for n, _ in module_tu)
+bad = violations(module_tu)
+assert not bad, bad
+for p, text in module_tu:
+    for op in ('start_charging','charging_start','ACTION_CHARGE_START'):
+        assert op not in text, (p, op)
 main=(module/'tesla_vehicle.cpp').read_text()
 assert 'tesla_clean::Vehicle' in main
 assert 'tesla_clean::WakePolicy::NoWakeSkip' in main

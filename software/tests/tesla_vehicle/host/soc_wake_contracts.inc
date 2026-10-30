@@ -6,9 +6,12 @@
 //   API scan -> profile save (validate_profiles, API source) -> guided prepare_poll ->
 //   worker apply_profile -> guidance.ready -> guided commit -> real worker request_soc ->
 //   TeslaBleSocPolicy -> tesla_clean::Vehicle -> NimBLE adapter/framing/crypto -> main publication.
-// Automatic chain (no browser, no API call): TeslaVehicle::loop() -> auto_poll() -> own
-//   VIN-scoped discovery -> fresh_binding -> select_profile(scan revision) -> worker
-//   request_soc(false) -> same policy/controller/transport -> main publication.
+// Automatic chain (no browser, no API call): TeslaVehicle::loop() -> auto_poll() ->
+//   persisted trusted binding (key + authorized + ble_binding == profile VIN/address/type),
+//   reuse of the prepared runtime or select_profile(persisted) -> worker request_soc(false)
+//   -> connect to the STORED address only -> same policy/controller/transport -> main
+//   publication. The firmware never starts its own radio scan (checked continuously); a
+//   vehicle out of range is a failed connect to the stored address, never an adoption.
 // Wake policy under test (user decision): at most one wake per operation, repeated wakes
 // across operations allowed, spaced by TeslaBleSocPolicy::MIN_WAKE_SPACING_MS.
 // RED/GREEN lines are printed; a violated expectation exits 1 with "RED: <reason>".
@@ -16,6 +19,10 @@ struct SocRun {
  unsigned wakes=0,wake_partial=0,statuses=0,statuses_after_wake=0,hellos=0,charges=0,frames=0,info_ignored=0;
  std::vector<uint32_t> after_wake_at;
  uint32_t committed=0,finished=0,update_unix=0,wake_tx_at=0;
+ // Automatic runs: the main pass in which the scheduler left Polling (= its end_cycle, the
+ // firmware's own anchor for interval/backoff/post-wake gaps). 'finished' is captured a few
+ // settle passes later (state publication) and must not be used as the gap anchor.
+ uint32_t ended=0;
  bool automatic=false,outcome_automatic=false;
  std::string error,outcome;float soc=NAN;uint64_t update=0;int applied=0;
 };
@@ -61,7 +68,10 @@ static void soc_wake_flow(TeslaVehicle &m,const std::string &mode) {
  // real duration is unknown): infotainment session requests are ignored for info_boot_ms after
  // the first one following a wake. 0 = answers at once (all pre-existing scenarios).
  uint32_t info_boot_ms=0,info_first=0;
- bool hold_on_hello=false,hold_replies=false; // test-only: keep a claimed automatic operation in flight
+ // test-only: keep a claimed automatic operation in flight. Armed hold triggers on the claimed
+ // operation's FIRST request frame: its session hello, or - on a link/session reused across
+ // cycles (persisted binding; no new hello) - its first VCSEC status request.
+ bool hold_on_hello=false,hold_replies=false;
  auto vcsec_awake=[&]{return car_awake||(wake_at&&!never_wakes&&millis()-wake_at>=awake_after_wake);};
  std::vector<SocRun> runs;SocRun *run=nullptr;bool auto_run=false;
  std::vector<uint8_t> wire;std::deque<Frame> replies;std::vector<uint8_t> drip;size_t drip_at=0;uint32_t vc=0,info=0;
@@ -79,6 +89,10 @@ static void soc_wake_flow(TeslaVehicle &m,const std::string &mode) {
    replies.push_back(peer.hello(s));if(hold_on_hello&&run){hold_on_hello=false;hold_replies=true;}return;}
   if(s.pair){assert(false && "no pairing in SoC contracts");return;}
   if(s.domain==Domain::Infotainment){
+   // Waking infotainment ignores the domain entirely while it boots - also requests on a
+   // session reused from before the sleep (persisted binding keeps link/session; no hello).
+   if(info_boot_ms&&wake_at){if(!info_first)info_first=millis();
+    if(millis()-info_first<info_boot_ms){if(run)++run->info_ignored;return;}}
    if(run)++run->charges;
    if(unplug_on_charge){unplug_on_charge=false;unplug();} // physical unplug while the SoC answer is in flight
    replies.push_back(peer.response(s,{controller_fixture::soc,sizeof(controller_fixture::soc)},++info));return;}
@@ -91,13 +105,22 @@ static void soc_wake_flow(TeslaVehicle &m,const std::string &mode) {
   const bool awake=vcsec_awake();
   if(!awake&&!wake_at)next_is_wake=true;
   replies.push_back(peer.response(s,{awake?awake_bytes():asleep_bytes(),sizeof(controller_fixture::awake)},++vc));
+  if(hold_on_hello&&run){hold_on_hello=false;hold_replies=true;} // reused session: first request is the status
  };
  auto feed=[&](const uint8_t *b,size_t count)->bool{ // true: frame completed by this write
   wire.insert(wire.end(),b,b+count);
   if(wire.size()<2||wire.size()!=size_t(wire[0])*256+wire[1]+2)return false;
   Frame f;f.length=wire.size()-2;memcpy(f.data.data(),wire.data()+2,f.length);wire.clear();on_frame(f);return true;
  };
+ unsigned unreachable_connects=0; // connect attempts while the vehicle is out of range
  test_submit=[&](int stage){
+  if(stage==1){
+   // Connections only ever target the persisted (adopted+paired) address/type.
+   soc_expect(test_peer.type==0&&test_peer.val[5]==1&&test_peer.val[4]==2&&test_peer.val[3]==3&&test_peer.val[2]==4&&
+    test_peer.val[1]==5&&test_peer.val[0]==6,mode,"connect target is not the stored BLE address/type");
+   if(!advertising){ // out of range: the stored address does not connect (no fallback, no adoption)
+    ++unreachable_connects;ble_gap_event e{};e.type=BLE_GAP_EVENT_CONNECT;e.connect.status=13;test_gap(&e,test_gap_arg);return;}
+  }
   if(stage!=5||test_handle==21){nimble_auto_submit(stage);return;}
   if(next_is_wake&&drop_on_wake_fragment&&!wire.size()){wake_fragments=0;}
   const bool wake_frame=next_is_wake&&drop_on_wake_fragment;
@@ -107,7 +130,7 @@ static void soc_wake_flow(TeslaVehicle &m,const std::string &mode) {
   }
   const size_t before=replies.size();
   const bool complete=feed(test_write.data(),test_write.size());
-  if(complete&&drop_on_status&&replies.size()==before+1&&run&&run->statuses&&!run->wakes){
+  if(complete&&drop_on_status&&!hold_replies&&replies.size()==before+1&&run&&run->statuses&&!run->wakes){
    // Link drops while the first status request's last fragment awaits ATT: no wake on the wire.
    replies.clear();drop_on_status=false;nimble_force_disconnect();return;
   }
@@ -127,18 +150,24 @@ static void soc_wake_flow(TeslaVehicle &m,const std::string &mode) {
   assert(snap.status==TeslaBleDiscovery::Status::Complete&&snap.count==(advertise?1U:0U));
   return snap.revision;
  };
- uint32_t served_phase_ms=UINT32_MAX;
- std::vector<uint32_t> scan_at; // firmware-initiated scans (radio) by simulated time
- bool charge_end_on_scan=false;  // test-only: EVSE reports charge end while the firmware's own scan runs
- int pulse_on=0;std::function<void()> pulse; // test-only: pause+resume while the own cycle scans (1) or selects (2)
+ // Automatic cycles by simulated time: start (Idle -> Selecting) and end (-> Idle). With the
+ // persisted binding there is no scan phase; a cycle's first observed phase is Selecting.
+ std::vector<uint32_t> cycle_at,cycle_end_at;
+ int api_scans=0;bool api_scan_active=false;const int scans0=test_scans; // explicit user scans (the only permitted scans)
+ Phase observed_phase=Phase::Idle;
+ bool charge_end_on_select=false; // test-only: EVSE reports charge end at the cycle's profile selection
+ int pulse_on=0;std::function<void()> pulse; // test-only: pause+resume at the cycle start (1) or while it selects (2)
  auto serve_auto=[&]{
   auto &ap=m.tesla->auto_poll;
-  if(ap.phase==Phase::Scanning&&served_phase_ms!=ap.phase_ms){served_phase_ms=ap.phase_ms;scan_at.push_back(millis());
+  soc_expect(api_scan_active||(!test_scanning&&test_scans-scans0==api_scans),mode,"firmware started its own radio scan");
+  if(ap.phase!=Phase::Idle&&observed_phase==Phase::Idle){cycle_at.push_back(millis());
+   soc_expect(ap.phase==Phase::Selecting,mode,"automatic cycle did not start at profile selection");
    if(mode=="soc-auto-charge-resume")soc_expect(!auto_run&&!(r&&(r->manual_poll_pending.load()||r->in_flight_started_ms!=0)),mode,
-    "no scan while another SoC operation is in flight (no parallel poll)");
+    "no cycle start while another SoC operation is in flight (no parallel poll)");
    if(pulse_on==1&&pulse){pulse_on=0;pulse();}
-   if(charge_end_on_scan){charge_end_on_scan=false;host_evse.set_charger_state(CHARGER_STATE_READY_TO_CHARGE);}
-   serve_scan(advertising);}
+   if(charge_end_on_select){charge_end_on_select=false;host_evse.set_charger_state(CHARGER_STATE_READY_TO_CHARGE);}}
+  if(ap.phase==Phase::Idle&&observed_phase!=Phase::Idle)cycle_end_at.push_back(millis());
+  observed_phase=ap.phase;
  };
  auto capture=[&](SocRun &x){
   x.finished=millis();
@@ -157,7 +186,8 @@ static void soc_wake_flow(TeslaVehicle &m,const std::string &mode) {
  auto track_auto=[&]{ // Observe firmware-initiated operations (phase Polling) without influencing them.
   const auto phase=m.tesla->auto_poll.phase;
   if(!auto_run&&phase==Phase::Polling){soc_expect(!run,mode,"automatic poll overlapped a manual request");runs.emplace_back();run=&runs.back();run->automatic=true;run->committed=millis();auto_run=true;auto_settle=0;}
-  if(auto_run&&phase!=Phase::Polling&&++auto_settle>=3){capture(*run);run=nullptr;auto_run=false;}
+  if(auto_run&&phase!=Phase::Polling&&++auto_settle==1)run->ended=millis();
+  if(auto_run&&phase!=Phase::Polling&&auto_settle>=3){capture(*run);run=nullptr;auto_run=false;}
  };
  on_task_delay=[&](uint32_t ms){
   if(before_main)before_main(); // test-only: perturb time/identity before the main task dispatches
@@ -194,8 +224,8 @@ static void soc_wake_flow(TeslaVehicle &m,const std::string &mode) {
  };
  auto api_scan_and_save=[&]{
   auto &s=m.tesla->scan_command;s.get("vin")->updateString("5YJ3E1EA7KF000001");s.get("ev_index")->updateInt(0);s.get("ev_mac")->updateString("11:22:33:44:55:00");
-  error.clear();api.commands.at("tesla_vehicle/scan")(0,error);soc_expect(error.length()==0,mode,"explicit API scan refused");
-  const auto revision=serve_scan(true);
+  api_scan_active=true;error.clear();api.commands.at("tesla_vehicle/scan")(0,error);soc_expect(error.length()==0,mode,"explicit API scan refused");
+  const auto revision=serve_scan(true);++api_scans;api_scan_active=false;
   main_pass();
   // UI saves exactly the adopted fresh revision (guided_vehicle.tsx command()).
   p->get("discovery_revision")->updateUint(revision);
@@ -226,6 +256,11 @@ static void soc_wake_flow(TeslaVehicle &m,const std::string &mode) {
  auto step=[&](std::function<void()> action){steps.push_back([action]{action();return true;});};
  auto runs_done=[&](size_t n){return [&,n]{return runs.size()>=n&&!auto_run&&!run;};};
  auto sleep_again=[&]{car_awake=false;wake_at=0;next_is_wake=false;info_first=0;};
+ // soc-auto-snapshot-retry state (function scope: used from before_main during run_task).
+ unsigned retry_fired=0,retry_hook=0;int retry_phase_during=-1;std::string retry_during;
+ auto retry_sig=[&]{auto &s=m.tesla->state;return std::string(s.get("poll_outcome")->asString().c_str())+"|"+
+  std::to_string(s.get("poll_outcome_automatic")->asBool())+"|"+s.get("poll_failure")->asString().c_str()+"|"+
+  std::to_string(s.get("poll_elapsed_ms")->asUint())+"|"+s.get("poll_trace")->asString().c_str()+"|"+s.get("auto_poll")->asString().c_str();};
  // ---- scenarios ----
  if(mode=="soc-reservation") {           // manual button repeatedly usable; wake on demand, spaced
   request([&]{car_awake=true;});                      // R1 awake: no wake on the wire
@@ -272,7 +307,7 @@ static void soc_wake_flow(TeslaVehicle &m,const std::string &mode) {
   step([&]{sleep_again();});
   until(runs_done(5));                                 // A5: asleep, >= spacing after A4's wake -> wakes again
   step([&]{sleep_again();awake_after_wake=0;});
-  until([&]{return auto_run&&runs.size()==6&&run&&run->hellos>0;}); // A6 in flight
+  until([&]{return auto_run&&runs.size()==6&&run&&run->frames>0;}); // A6 in flight (reused link: no new session hello needed)
   step([&]{ // explicit actions while the background operation owns the worker
    m.tesla->profile_command.get("ev_index")->updateInt(0);error.clear();api.commands.at("tesla_vehicle/poll")(0,error);
    soc_expect(error.length()>0,mode,"manual poll accepted concurrently with automatic poll");
@@ -287,8 +322,18 @@ static void soc_wake_flow(TeslaVehicle &m,const std::string &mode) {
  } else if(mode=="soc-auto-stop") {      // not found, unplug mid-operation, profile switch, replug, unsynced clock
   p->get("poll_interval")->updateUint(300);soc_expect(save_profile(),mode,"interval save rejected");
   car_awake=true;advertising=false;
-  // The not-found cycle runs before any worker exists (see the pre-worker loop below).
-  until(runs_done(1));                                 // S1: unplugged while the SoC answer is in flight
+  // N: the plug-in request finds the vehicle out of range: the worker tries the STORED address
+  // only, the cycle ends not_found without protocol contact, scan, adoption or binding change.
+  const auto binding_files=std::make_shared<std::map<std::string,std::vector<uint8_t>>>(LittleFS.files);
+  until([&]{return !auto_run&&!run&&m.tesla->auto_poll.phase==Phase::Idle&&m.tesla->state.get("auto_poll")->asString()=="not_found";});
+  step([&,binding_files]{soc_expect(total_frames==0&&runs.size()==1&&runs[0].frames==0&&runs[0].outcome=="failed"&&unreachable_connects>=1,mode,
+    "not-found cycle: one failed connect to the stored address, no protocol frame");
+   soc_expect(m.tesla->state.get("poll_failure")->asString()=="connect",mode,"not-found classified as connect failure");
+   for(const auto &item:*binding_files)soc_expect(LittleFS.files.count(item.first)&&LittleFS.files.at(item.first)==item.second,mode,
+    "failed stored-address connect changed key/binding material");
+   soc_expect(p->get("ble_address")->asString()=="01:02:03:04:05:06"&&p->get("enable")->asBool(),mode,"failed connect changed the profile");
+   not_found_at=runs[0].ended;advertising=true;unplug_on_charge=true;}); // anchor: the scheduler's end of the not-found cycle
+  until(runs_done(2));                                 // S1: unplugged while the SoC answer is in flight
   step([&]{mark_frames=total_frames;});
   wait_ms(150000);
   step([&]{soc_expect(total_frames==mark_frames,mode,"vehicle contact after unplug");
@@ -299,7 +344,7 @@ static void soc_wake_flow(TeslaVehicle &m,const std::string &mode) {
    // Profile 1 has a mapping but no key: the scheduler may only report it, never scan/contact.
    soc_expect(total_frames==mark_frames&&(state=="off"||state=="not_paired"),mode,"foreign EV profile polled");
    ev.index=0;ev.mac=A;++ev.generation;});            // the Tesla is plugged in again
-  until(runs_done(2));                                 // S2: normal SoC, clock unsynchronized
+  until(runs_done(3));                                 // S2: normal SoC, clock unsynchronized
  } else if(mode=="soc-auto-identity-origin") { // live review: retained BLE SoC/time bound to its identity, A -> B -> A
   rtc.base_seconds.store(1790000000);rtc.synced.store(true);
   p->get("poll_interval")->updateUint(300);soc_expect(save_profile(),mode,"interval save rejected");
@@ -308,7 +353,7 @@ static void soc_wake_flow(TeslaVehicle &m,const std::string &mode) {
   step([&]{soc_expect(std::isfinite(m.tesla->state.get("last_soc")->asFloat())&&m.tesla->state.get("last_update_unix")->asUint()>0&&
     m.tesla->state.get("profile_ev_index")->asInt()==0,mode,"A sample published with its receive time");
    ev.index=1;ev.mac=B;++ev.generation;mark_frames=total_frames; // profile B active, no B sample (shared SoC from another source)
-   explicit_scan(m,1);String e;const bool selected=m.select_profile(1,false,e);if(!selected)std::printf("SOC_ORIGIN select error=%s\n",e.c_str());
+   api_scan_active=true;explicit_scan(m,1);++api_scans;api_scan_active=false;String e;const bool selected=m.select_profile(1,false,e);if(!selected)std::printf("SOC_ORIGIN select error=%s\n",e.c_str());
    soc_expect(selected,mode,"user selection of profile B rejected");});
   wait_ms(150000);
   step([&]{std::printf("SOC_ORIGIN B profile=%d last_soc=%f unix=%u frames=%u\n",m.tesla->state.get("profile_ev_index")->asInt(),
@@ -360,7 +405,7 @@ static void soc_wake_flow(TeslaVehicle &m,const std::string &mode) {
   until(runs_done(2));                                 // I2 300 s after I1, not after the old 3600 s
   wait_ms(10000);
   step([&]{p->get("poll_interval")->updateUint(600);soc_expect(save_profile(),mode,"lengthened interval rejected");
-   lengthen_at=millis();scans_mark=scan_at.size();});
+   lengthen_at=millis();scans_mark=cycle_at.size();});
   until(runs_done(3));                                 // I3 600 s after I2, not after the old 300 s
  } else if(mode=="soc-auto-recvtime") {  // B2: receive time fixed by the worker, not at delayed dispatch
   rtc.base_seconds.store(1790000000);rtc.synced.store(true);
@@ -369,13 +414,13 @@ static void soc_wake_flow(TeslaVehicle &m,const std::string &mode) {
   // Once the worker has posted its terminal outcome (accepted SoC event queued, not yet
   // dispatched): delay main dispatch by 2 s and change wall-clock/identity in between.
   before_main=[&]{
-   if(!perturb||!r||r->poll_outcome_sequence.load()==perturb_seq0)return;
+   if(!perturb||!r||r->poll_snapshot.sequence()==perturb_seq0)return;
    const int v=perturb;perturb=0;recv_seen[v]=millis();clock_ms.fetch_add(2000);
    if(v==1)rtc.base_seconds.fetch_add(1000);           // NTP step before dispatch
    if(v==2)rtc.synced.store(true);                     // first sync before dispatch
    if(v==3)++ev.generation;                            // identity retired while queued
   };
-  auto arm=[&](int v){perturb_seq0=r->poll_outcome_sequence.load();perturb=v;};
+  auto arm=[&](int v){perturb_seq0=r->poll_snapshot.sequence();perturb=v;};
   step([&,arm]{arm(1);});
   until(runs_done(1));                                 // V1 synced, delayed + clock step
   step([&,arm]{rtc.synced.store(false);arm(2);});
@@ -393,6 +438,11 @@ static void soc_wake_flow(TeslaVehicle &m,const std::string &mode) {
     std::string(m.tesla->state.get("poll_stage")->asString().c_str()).rfind("info_auth",0)==0&&m.tesla->state.get("poll_vcsec_answered")->asBool()&&
     !m.tesla->state.get("poll_info_answered")->asBool()&&m.tesla->state.get("poll_elapsed_ms")->asUint()>0,mode,
     "structured classification published with the failed outcome");
+   {const std::string trace=m.tesla->state.has("poll_trace")?m.tesla->state.get("poll_trace")->asString().c_str():"";
+    const size_t finish=trace.rfind(' ');
+    std::printf("SOC_TRACE %s\n",trace.c_str()); std::fflush(stdout);
+    soc_expect(trace.rfind("u=",0)==0&&trace.find('|')!=std::string::npos&&finish!=std::string::npos&&trace.find(".21.",finish)!=std::string::npos&&trace.substr(trace.size()-2)==".4",mode,
+     "bounded payload-free poll_trace published, ending with Finish/challenge_cap");}
    std::printf("SOC_CLASSIFIED failure=%s stage=%s elapsed=%u attempts=%u timeouts=%u frames=%u\n",m.tesla->state.get("poll_failure")->asString().c_str(),
     m.tesla->state.get("poll_stage")->asString().c_str(),m.tesla->state.get("poll_elapsed_ms")->asUint(),m.tesla->state.get("poll_attempts")->asUint(),
     m.tesla->state.get("poll_timeouts")->asUint(),m.tesla->state.get("poll_frames")->asUint());});
@@ -403,11 +453,11 @@ static void soc_wake_flow(TeslaVehicle &m,const std::string &mode) {
   p->get("poll_interval")->updateUint(300);soc_expect(save_profile(),mode,"interval save rejected");
   car_awake=true;
   until(runs_done(1));                                 // P1 plug-in request
-  step([&]{mark_frames=total_frames;scans_mark=scan_at.size();
+  step([&]{mark_frames=total_frames;scans_mark=cycle_at.size();
    // White-box precondition: the plug-in-time scheduler denial seen live before pairing.
    m.tesla->state.get("auto_poll")->updateString("not_paired");});
   wait_ms(200000);
-  step([&]{soc_expect(runs.size()==1&&total_frames==mark_frames&&scan_at.size()==scans_mark,mode,"idle: nothing before the approval edge");
+  step([&]{soc_expect(runs.size()==1&&total_frames==mark_frames&&cycle_at.size()==scans_mark,mode,"idle: nothing before the approval edge");
    soc_expect(m.tesla->state.get("auto_poll")->asString()=="not_paired",mode,"precondition kept while idle");
    // Authenticated approval as the pairing worker publishes it (TeslaBleCommandOutcome::publish_approval
    // with a request armed on the current session); main consumes it in the real Kind::PairApproved branch.
@@ -419,16 +469,16 @@ static void soc_wake_flow(TeslaVehicle &m,const std::string &mode) {
    soc_expect(millis()-pulse_at<(TeslaBleDiscovery::SCAN_SECONDS+60)*1000,mode,"no automatic SoC request after the new authenticated pairing approval");
    return false;});
   step([&]{soc_expect(runs[1].automatic&&runs[1].committed-pulse_at<=(TeslaBleDiscovery::SCAN_SECONDS+5)*1000,mode,"post-pairing request promptly after the edge");
-   mark_frames=total_frames;scans_mark=scan_at.size();});
+   mark_frames=total_frames;scans_mark=cycle_at.size();});
   wait_ms(700000);                                     // idle: no periodic polling afterwards
-  step([&]{soc_expect(runs.size()==2&&total_frames==mark_frames&&scan_at.size()==scans_mark,mode,"post-pairing request is one-shot; no idle polling");
+  step([&]{soc_expect(runs.size()==2&&total_frames==mark_frames&&cycle_at.size()==scans_mark,mode,"post-pairing request is one-shot; no idle polling");
    soc_expect(m.tesla->state.get("auto_poll")->asString()=="not_charging",mode,"idle state after the post-pairing request");
    // Replayed approval of the already consumed request (repeated paired state): never a request.
    r->command_outcome.publish_approval(approval);main_pass();
    // Foreign identity (approval armed for a replaced plug-in session): rejected by the session gate.
    soc_expect(!r->session.arm(r->epoch,TeslaBleIdentity{ev.generation+1,ev.index,ev.mac},ev.index).request,mode,"foreign identity cannot arm");});
   wait_ms(200000);
-  step([&]{soc_expect(runs.size()==2&&total_frames==mark_frames&&scan_at.size()==scans_mark,mode,"replayed approval must not poll");
+  step([&]{soc_expect(runs.size()==2&&total_frames==mark_frames&&cycle_at.size()==scans_mark,mode,"replayed approval must not poll");
    // Plain repeated paired state without a new edge (reload): nothing.
    m.tesla->state.get("auto_poll")->updateString("not_paired");});
   request([&]{});                                      // M1 manual success supersedes a stale not_paired
@@ -440,17 +490,17 @@ static void soc_wake_flow(TeslaVehicle &m,const std::string &mode) {
   soc_expect(save_profile(),mode,"interval save rejected");
   sleep_again();awake_after_wake=0;                    // asleep at plug-in: the plug-in request may wake
   until(runs_done(1));                                 // P1: plug-in request (one permitted wake)
-  step([&]{sleep_again();mark_frames=total_frames;scans_mark=scan_at.size();});
+  step([&]{sleep_again();mark_frames=total_frames;scans_mark=cycle_at.size();});
   wait_ms(600000);                                     // two intervals while plugged in, not charging
-  step([&]{soc_expect(total_frames==mark_frames&&scan_at.size()==scans_mark&&runs.size()==1,mode,
+  step([&]{soc_expect(total_frames==mark_frames&&cycle_at.size()==scans_mark&&runs.size()==1,mode,
     "idle: no automatic request, scan or wake after the plug-in request");
    soc_expect(m.tesla->state.get("auto_poll")->asString()=="not_charging",mode,"idle shown as not charging");
    soc_expect(m.tesla->state.get("last_update_unix")->asUint()==runs[0].update_unix&&
     m.tesla->state.get("last_update")->asUptime()==runs[0].update&&ev.applied==runs[0].applied,mode,"idle: last value and receive time unchanged");});
   request([&]{sleep_again();awake_after_wake=0;});     // M1 manual while idle: wakes on demand
-  step([&]{mark_frames=total_frames;scans_mark=scan_at.size();});
+  step([&]{mark_frames=total_frames;scans_mark=cycle_at.size();});
   wait_ms(150000);
-  step([&]{soc_expect(total_frames==mark_frames&&scan_at.size()==scans_mark&&runs.size()==2,mode,
+  step([&]{soc_expect(total_frames==mark_frames&&cycle_at.size()==scans_mark&&runs.size()==2,mode,
     "manual idle request must not restart background polling");});
   request([&]{sleep_again();awake_after_wake=0;});     // M2 repeated manual, after the wake spacing
  } else if(mode=="soc-auto-charge-cycle") { // charge start, periodic, PV pause, resume, end, replug
@@ -460,15 +510,15 @@ static void soc_wake_flow(TeslaVehicle &m,const std::string &mode) {
   car_awake=true;
   until(runs_done(1));                                 // C1 plug-in request
   wait_ms(200000);
-  step([&]{soc_expect(runs.size()==1&&scan_at.size()==1&&total_frames==runs[0].frames,mode,"no request before charging starts");
+  step([&]{soc_expect(runs.size()==1&&cycle_at.size()==1&&total_frames==runs[0].frames,mode,"no request before charging starts");
    host_evse.set_charger_state(CHARGER_STATE_CHARGING);charge_at[0]=millis();});
   until(runs_done(2));                                 // C2 at the real charge start
-  until(runs_done(3));until([&]{return auto_run&&runs.size()==4&&run&&run->hellos>0;}); // C3 periodic, C4 in flight
+  until(runs_done(3));until([&]{return auto_run&&runs.size()==4&&run&&run->frames>0;}); // C3 periodic, C4 in flight (reused link: no new session hello needed)
   step([&]{host_evse.set_charger_state(CHARGER_STATE_WAITING_FOR_RELEASE);charge_at[1]=millis();}); // PV pause mid-operation
   until(runs_done(4));                                 // C4 drains, publishes its real result
-  step([&]{mark_frames=total_frames;scans_mark=scan_at.size();});
+  step([&]{mark_frames=total_frames;scans_mark=cycle_at.size();});
   wait_ms(300000);
-  step([&]{soc_expect(total_frames==mark_frames&&scan_at.size()==scans_mark&&runs.size()==4,mode,"pause: no request, scan or wake");
+  step([&]{soc_expect(total_frames==mark_frames&&cycle_at.size()==scans_mark&&runs.size()==4,mode,"pause: no request, scan or wake");
    soc_expect(m.tesla->state.get("auto_poll")->asString()=="not_charging",mode,"pause shown as not charging");
    soc_expect(m.tesla->state.get("last_update_unix")->asUint()==runs[3].update_unix&&m.tesla->state.get("last_update")->asUptime()==runs[3].update&&
     ev.applied==runs[3].applied&&m.tesla->state.get("last_soc")->asFloat()==72.0f&&m.tesla->state.get("poll_outcome")->asString()=="ok",mode,
@@ -479,19 +529,19 @@ static void soc_wake_flow(TeslaVehicle &m,const std::string &mode) {
   wait_ms(10000);
   step([&]{host_evse.set_charger_state(CHARGER_STATE_CHARGING);charge_at[3]=millis();});
   until(runs_done(6));                                 // C6: resume shortly after C5, before the interval is due
-  step([&]{charge_end_on_scan=true;mark_frames=total_frames;scans_mark=scan_at.size();});
-  until([&]{return !charge_end_on_scan&&m.tesla->auto_poll.phase==Phase::Idle;}); // charge ends during the next scan
+  step([&]{charge_end_on_select=true;mark_frames=total_frames;scans_mark=cycle_at.size();});
+  until([&]{return !charge_end_on_select&&m.tesla->auto_poll.phase==Phase::Idle;}); // charge ends during the next cycle's selection
   wait_ms(300000);
-  step([&]{soc_expect(total_frames==mark_frames&&scan_at.size()==scans_mark+1&&runs.size()==6,mode,
-    "charge end during the scan: no vehicle contact, no further scan");
+  step([&]{soc_expect(total_frames==mark_frames&&cycle_at.size()==scans_mark+1&&runs.size()==6,mode,
+    "charge end during the selection: no vehicle contact, no further cycle");
    soc_expect(m.tesla->state.get("auto_poll")->asString()=="not_charging",mode,"end shown as not charging");
    unplug();});
   wait_ms(2000);
   step([&]{ev.index=0;ev.mac=A;++ev.generation;charge_at[4]=millis();}); // replug: new physical session
   until(runs_done(7));                                 // C7 plug-in request of the new session
-  step([&]{scans_mark=scan_at.size();mark_frames=total_frames;});
+  step([&]{scans_mark=cycle_at.size();mark_frames=total_frames;});
   wait_ms(200000);
-  step([&]{soc_expect(total_frames==mark_frames&&scan_at.size()==scans_mark&&runs.size()==7,mode,"replug: exactly one plug-in request");});
+  step([&]{soc_expect(total_frames==mark_frames&&cycle_at.size()==scans_mark&&runs.size()==7,mode,"replug: exactly one plug-in request");});
  } else if(mode=="soc-auto-charge-resume") { // charge pause+resume edges while an automatic operation is already claimed
   rtc.base_seconds.store(1790000000);rtc.synced.store(true);
   host_evse.set_charger_state(CHARGER_STATE_READY_TO_CHARGE);
@@ -507,16 +557,18 @@ static void soc_wake_flow(TeslaVehicle &m,const std::string &mode) {
      host_evse.set_charger_state(on?CHARGER_STATE_CHARGING:CHARGER_STATE_WAITING_FOR_RELEASE);});
     until([&,on]{return m.tesla->auto_poll.charging==on;});
    }
-   if(release)step([&]{hold_replies=false;});
+   // Release. On a reused session the held request already was the first status: the armed
+   // link drop happens now (before its reply), same point as after the hello on a new session.
+   if(release)step([&]{hold_replies=false;if(drop_on_status&&run&&run->statuses&&!run->wakes){drop_on_status=false;pending_drop=true;}});
   };
   auto quiet=[&](uint32_t ms,const char *what){ // no scan, no frame, no new operation
-   step([&]{mark_frames=total_frames;scans_mark=scan_at.size();quiet_runs=runs.size();});
+   step([&]{mark_frames=total_frames;scans_mark=cycle_at.size();quiet_runs=runs.size();});
    wait_ms(ms);
-   step([&,what]{soc_expect(total_frames==mark_frames&&scan_at.size()==scans_mark&&runs.size()==quiet_runs&&!auto_run,mode,what);});
+   step([&,what]{soc_expect(total_frames==mark_frames&&cycle_at.size()==scans_mark&&runs.size()==quiet_runs&&!auto_run,mode,what);});
   };
   auto next_after=[&](size_t n,uint32_t lo,uint32_t hi,const char *what){ // operation n vs. end of n-1, bounded wait
    until([&,n,hi]{return runs_done(n)()||(runs.size()==n-1&&!auto_run&&!run&&millis()-runs[n-2].finished>hi+5000);});
-   step([&,n,lo,hi,what]{const uint32_t gap=runs.size()>=n?runs[n-1].committed-runs[n-2].finished:0;
+   step([&,n,lo,hi,what]{const uint32_t gap=runs.size()>=n?runs[n-1].committed-runs[n-2].ended:0;
     std::printf("SOC_RESUME %s runs=%zu gap=%u\n",what,runs.size(),gap);std::fflush(stdout);
     soc_expect(runs.size()==n&&gap>=lo&&gap<=hi,mode,what);});
   };
@@ -545,12 +597,13 @@ static void soc_wake_flow(TeslaVehicle &m,const std::string &mode) {
     "B: prompt request at resume, succeeds");});
   next_after(5,30000,36000,"B: an operation claimed before the resume does not satisfy it: one request after the minimum gap");
   quiet(300000,"B: no re-trigger");
-  // C: pause+resume while the cycle's own scan runs (before vehicle contact): the request handed over after them serves it.
+  // C: pause+resume at the cycle start (before vehicle contact; there is no scan phase with the
+  // persisted binding): the request handed over after them serves it.
   pause_idle();
   step([&]{pulse_on=1;host_evse.set_charger_state(CHARGER_STATE_CHARGING);charge_at[1]=millis();});
   until(runs_done(6));
   step([&]{soc_expect(pulse_on==0&&pulse_at>charge_at[1]&&runs[5].committed>=pulse_at&&runs[5].committed-charge_at[1]<=40000&&runs[5].outcome=="ok",mode,
-    "C: edges during the scan: one request after them");});
+    "C: edges at the cycle start: one request after them");});
   quiet(300000,"C: exactly one request for the resume, no re-trigger");
   // D: the same while the cycle selects the profile (before the request is handed to the worker).
   pause_idle();
@@ -599,9 +652,9 @@ static void soc_wake_flow(TeslaVehicle &m,const std::string &mode) {
  p->get("poll_interval")->updateUint(3600);
  request([&]{sleep_again();awake_after_wake=1000;info_boot_ms=60000;}); // M1: woken, infotainment silent for 60 s
  until(runs_done(2));                                 // F2: firmware follow-up without wake
- step([&]{mark_frames=total_frames;scans_mark=scan_at.size();quiet_runs=runs.size();});
+ step([&]{mark_frames=total_frames;scans_mark=cycle_at.size();quiet_runs=runs.size();});
  wait_ms(300000);
- step([&]{soc_expect(total_frames==mark_frames&&scan_at.size()==scans_mark&&runs.size()==quiet_runs,mode,
+ step([&]{soc_expect(total_frames==mark_frames&&cycle_at.size()==scans_mark&&runs.size()==quiet_runs,mode,
    "follow-up consumed once: no further request, scan or wake while idle");
   soc_expect(m.tesla->state.get("auto_poll")->asString()=="not_charging",mode,"idle after the follow-up shown as not charging");});
 } else if(mode=="soc-auto-wake-followup") { // charging: woken periodic op -> follow-up; woken op then pause -> nothing
@@ -610,7 +663,7 @@ static void soc_wake_flow(TeslaVehicle &m,const std::string &mode) {
  sleep_again();awake_after_wake=1000;info_boot_ms=30000; // longer than one operation's session budget, shorter than the follow-up delay
  until(runs_done(1));                                 // W1 plug-in request while charging: wakes, infotainment silent
  until(runs_done(2));                                 // W2 follow-up: no wake, infotainment ready
- step([&]{mark_frames=total_frames;scans_mark=scan_at.size();quiet_runs=runs.size();});
+ step([&]{mark_frames=total_frames;scans_mark=cycle_at.size();quiet_runs=runs.size();});
  wait_ms(100000);
  step([&]{soc_expect(total_frames==mark_frames&&runs.size()==quiet_runs,mode,"no extra request after the follow-up");
   host_evse.set_charger_state(CHARGER_STATE_WAITING_FOR_RELEASE);});
@@ -618,35 +671,77 @@ static void soc_wake_flow(TeslaVehicle &m,const std::string &mode) {
  step([&]{sleep_again();info_boot_ms=60000;host_evse.set_charger_state(CHARGER_STATE_CHARGING);charge_at[0]=millis();});
  until(runs_done(3));                                 // W3 at resume: wakes (spacing elapsed), infotainment silent
  step([&]{host_evse.set_charger_state(CHARGER_STATE_WAITING_FOR_RELEASE);}); // PV pause right after the woken op
- step([&]{mark_frames=total_frames;scans_mark=scan_at.size();quiet_runs=runs.size();});
+ step([&]{mark_frames=total_frames;scans_mark=cycle_at.size();quiet_runs=runs.size();});
  wait_ms(300000);
- step([&]{soc_expect(total_frames==mark_frames&&scan_at.size()==scans_mark&&runs.size()==quiet_runs,mode,
+ step([&]{soc_expect(total_frames==mark_frames&&cycle_at.size()==scans_mark&&runs.size()==quiet_runs,mode,
    "pause: no follow-up, request, scan or wake after an automatic woken operation");
   soc_expect(m.tesla->state.get("auto_poll")->asString()=="not_charging",mode,"pause shown as not charging");});
- } else if(mode=="soc-auto-initial-retry") {
-  // Handled below without a worker: the vehicle is never found, so none starts.
- } else { assert(false && "unknown soc mode"); }
- if(mode=="soc-auto-initial-retry") { // bounded plug-in retries, then silence until charging starts
+ } else if(mode=="soc-auto-snapshot-retry") {
+  // Polling-phase gate (tesla_auto_poll.inc): a failed bounded snapshot read must
+  // decide nothing (no end_cycle, nothing marked seen) and the next main pass must
+  // decide from one coherent completed publication. The real worker publishes the
+  // automatic plug-in outcome N+1 (awake car: ok) and releases the request; before
+  // main consumes it, the worker (test, in its own OS delay = writer context)
+  // starts a further synthetic automatic ok publication N+2 and main runs one full
+  // pass from inside the writer after the odd marker (every read attempt odd).
+  // A failed read treated as retryable would schedule the 30 s plug-in retry
+  // instead of the 300 s interval (checked below).
+  rtc.base_seconds.store(1790000000);rtc.synced.store(true);
+  p->get("poll_interval")->updateUint(300);soc_expect(save_profile(),mode,"interval save rejected");
+  car_awake=true;
+  before_main=[&]{
+   auto &ap=m.tesla->auto_poll;
+   if(retry_fired||!r||ap.phase!=Phase::Polling||r->auto_poll_requested.load()||r->manual_poll_pending.load()||
+      r->poll_snapshot.sequence()==ap.outcome_sequence0)return;
+   ++retry_fired;
+   tesla_clean::VehicleDiagnostics d;d.failure=tesla_clean::VehicleFailure::None;d.stage=tesla_clean::VehicleStage::WaitCharge;
+   d.elapsed_ms=4242;d.attempts=1;d.frames=4;
+   const std::string before=retry_sig();
+   host_snapshot_write_hook()=[&]{++retry_hook;main_pass();retry_during=retry_sig();retry_phase_during=int(m.tesla->auto_poll.phase);};
+   set_poll_diagnostics(r,uint8_t(d.failure),&d);TeslaVehicle::set_poll_outcome(r,TeslaVehicle::PollOutcome::Ok,true);
+   host_snapshot_write_hook()=nullptr;
+   std::printf("SOC_SNAPSHOT_RETRY hook=%u during_phase=%d before='%s' during='%s'\n",retry_hook,retry_phase_during,before.c_str(),retry_during.c_str());
+   soc_expect(retry_hook==1,mode,"production writer exposes its write-begin point once");
+   soc_expect(retry_phase_during==int(Phase::Polling),mode,"failed snapshot read in the Polling phase decides nothing (cycle still polling)");
+   soc_expect(retry_during==before,mode,"failed snapshot read publishes nothing and marks nothing seen");
+   main_pass();
+   const std::string after=retry_sig();std::printf("SOC_SNAPSHOT_RETRY after='%s'\n",after.c_str());std::fflush(stdout);
+   soc_expect(m.tesla->auto_poll.phase!=Phase::Polling,mode,"next pass after the completed publication ends the cycle");
+   soc_expect(m.tesla->state.get("poll_outcome")->asString()=="ok"&&m.tesla->state.get("poll_outcome_automatic")->asBool()&&
+    m.tesla->state.get("poll_elapsed_ms")->asUint()==4242&&m.tesla->state.get("poll_failure")->asString()=="none",mode,
+    "next pass publishes the completed publication N+2 coherently");
+  };
+  until(runs_done(2));
+ } else if(mode=="soc-auto-initial-retry") { // bounded plug-in retries, then silence until charging starts
+  // Vehicle out of range for the whole scenario: every cycle is one connect attempt to the
+  // STORED address through the real worker; never a scan, an adoption or a binding change.
   host_evse.set_charger_state(CHARGER_STATE_READY_TO_CHARGE);advertising=false;
   p->get("poll_interval")->updateUint(300);soc_expect(save_profile(),mode,"interval save rejected");
-  auto_t0=millis();
-  auto run_main=[&](uint32_t ms){const uint32_t end=millis()+ms;while(int32_t(millis()-end)<0){clock_ms.fetch_add(20);m.loop();serve_auto();}};
-  run_main(900000);
-  std::printf("SOC_RETRY scans=%zu first=%u gap1=%u gap2=%u\n",scan_at.size(),scan_at.size()?scan_at[0]-auto_t0:0,
-   scan_at.size()>1?scan_at[1]-scan_at[0]:0,scan_at.size()>2?scan_at[2]-scan_at[1]:0);
-  soc_expect(scan_at.size()==3,mode,"plug-in request: exactly three bounded attempts, no endless retry");
-  soc_expect(scan_at[0]-auto_t0>=15000&&scan_at[0]-auto_t0<=25000,mode,"first attempt after the plug-in settle delay");
-  soc_expect(scan_at[1]-scan_at[0]>=30000&&scan_at[1]-scan_at[0]<=31000,mode,"first backoff 30 s");
-  soc_expect(scan_at[2]-scan_at[1]>=120000&&scan_at[2]-scan_at[1]<=121000,mode,"second backoff 120 s");
-  host_evse.set_charger_state(CHARGER_STATE_CHARGING);const uint32_t charge_on=millis();
-  run_main(310000);                                     // charge start + one interval
-  soc_expect(scan_at.size()==5&&scan_at[3]-charge_on>=5000&&scan_at[3]-charge_on<=6000&&scan_at[4]-scan_at[3]>=300000&&scan_at[4]-scan_at[3]<=301000,
-   mode,"charging: prompt request at charge start (not delayed by the 300 s minimum), then the configured interval");
-  soc_expect(total_frames==0&&runs.empty()&&!m.tesla->runtime_owner.get(),mode,"not found: no vehicle contact, no worker");
-  assert_charging_untouched();std::printf("SOC_WAKE_PASS %s\n",mode.c_str());return;
- }
+  const auto binding_files=std::make_shared<std::map<std::string,std::vector<uint8_t>>>(LittleFS.files);
+  const auto charge_on=std::make_shared<uint32_t>(0);
+  until([&]{return millis()-auto_t0>=900000;});
+  step([&,charge_on]{
+   std::printf("SOC_RETRY cycles=%zu first=%u gap1=%u gap2=%u connects=%u\n",cycle_at.size(),cycle_at.size()?cycle_at[0]-auto_t0:0,
+    cycle_at.size()>1?cycle_at[1]-cycle_end_at[0]:0,cycle_at.size()>2?cycle_at[2]-cycle_end_at[1]:0,unreachable_connects);std::fflush(stdout);
+   soc_expect(cycle_at.size()==3&&cycle_end_at.size()==3,mode,"plug-in request: exactly three bounded attempts, no endless retry");
+   soc_expect(cycle_at[0]-auto_t0>=15000&&cycle_at[0]-auto_t0<=25000,mode,"first attempt after the plug-in settle delay");
+   soc_expect(cycle_at[1]-cycle_end_at[0]>=30000&&cycle_at[1]-cycle_end_at[0]<=31000,mode,"first backoff 30 s");
+   soc_expect(cycle_at[2]-cycle_end_at[1]>=120000&&cycle_at[2]-cycle_end_at[1]<=121000,mode,"second backoff 120 s");
+   soc_expect(m.tesla->state.get("auto_poll")->asString()=="not_found",mode,"out of range shown as not found");
+   host_evse.set_charger_state(CHARGER_STATE_CHARGING);*charge_on=millis();});
+  until([&,charge_on]{return millis()-*charge_on>=310000;}); // charge start + one interval
+  step([&,charge_on,binding_files]{
+   soc_expect(cycle_at.size()==5&&cycle_at[3]-*charge_on>=5000&&cycle_at[3]-*charge_on<=6000&&cycle_end_at.size()>=4&&
+    cycle_at[4]-cycle_end_at[3]>=300000&&cycle_at[4]-cycle_end_at[3]<=301000,
+    mode,"charging: prompt request at charge start (not delayed by the 300 s minimum), then the configured interval");
+   for(const auto &item:*binding_files)soc_expect(LittleFS.files.count(item.first)&&LittleFS.files.at(item.first)==item.second,mode,
+    "failed stored-address connects changed key/binding material");
+   soc_expect(p->get("ble_address")->asString()=="01:02:03:04:05:06"&&p->get("ble_address_type")->asUint()==0&&p->get("enable")->asBool(),mode,
+    "failed connects changed the profile binding");});
+ } else { assert(false && "unknown soc mode"); }
  // Manual modes: the first preparation from the API thread starts the worker.
- // Automatic modes: only the main loop runs until the firmware itself starts the worker.
+ // Automatic modes: only the main loop runs until the firmware itself starts the worker
+ // (select_profile(persisted) at the first cycle's start; no scan, no adoption).
  if(!automatic_mode) {
   const auto first=std::move(steps.front());steps.pop_front();assert(first());
  } else {
@@ -654,10 +749,6 @@ static void soc_wake_flow(TeslaVehicle &m,const std::string &mode) {
   for(unsigned guard=0;!m.tesla->runtime_owner.get();++guard){
    soc_expect(guard<20000,mode,"firmware never started its own poll worker");
    clock_ms.fetch_add(20);m.loop();serve_auto();
-   if(mode=="soc-auto-stop"&&!advertising&&m.tesla->state.get("auto_poll")->asString()=="not_found"){
-    soc_expect(total_frames==0&&runs.empty()&&!m.tesla->runtime_owner.get(),mode,"not-found cycle contacted the vehicle or started a worker");
-    not_found_at=millis();advertising=true;unplug_on_charge=true;
-   }
   }
   soc_expect(millis()-auto_t0>=15000,mode,"first automatic cycle before the plug-in settle delay");
  }
@@ -741,8 +832,11 @@ static void soc_wake_flow(TeslaVehicle &m,const std::string &mode) {
   soc_expect(runs.size()==6,mode,"six automatic operations");
   for(const auto &x:runs)soc_expect(x.automatic&&x.outcome_automatic,mode,"all operations firmware-initiated");
   soc_expect(runs[0].committed-auto_t0>=15000&&runs[0].committed-auto_t0<=15000+5000,mode,"first automatic poll after the plug-in settle delay");
-  for(int i=1;i<6;++i){const auto gap=runs[i].committed-runs[i-1].finished;
+  for(int i=1;i<6;++i){const auto gap=runs[i].committed-runs[i-1].ended;
    soc_expect(gap>=300000&&gap<=300000+5000,mode,"configured 300 s profile interval between operations");}
+  // Exact anchor: no radio cycle starts before one full interval after the previous end_cycle.
+  soc_expect(cycle_at.size()==runs.size(),mode,"one cycle per automatic operation");
+  for(size_t i=1;i<runs.size();++i)soc_expect(cycle_at[i]-runs[i-1].ended>=300000,mode,"cycle start not before the full 300 s after the previous operation's end");
   expect_soc(runs[0],nullptr,"A1 SoC");soc_expect(runs[0].wakes==0,mode,"A1 awake: no wake");
   soc_expect(runs[0].update_unix>=1790000000+runs[0].committed/1000&&runs[0].update_unix<=1790000000+runs[0].finished/1000,mode,"A1 receive time is the synchronized wall clock at reception");
   expect_soc(runs[1],&runs[0],"A2 SoC");soc_expect(runs[1].update_unix>runs[0].update_unix,mode,"A2 newer receive time");
@@ -757,12 +851,12 @@ static void soc_wake_flow(TeslaVehicle &m,const std::string &mode) {
    expect_soc(runs[i],&runs[i-1],"A4-A6 SoC after wake");}
   for(const auto &x:runs)soc_expect(x.wakes+x.wake_partial<=1,mode,"at most one wake per operation");
  } else if(mode=="soc-auto-stop") {
-  soc_expect(runs.size()==2&&not_found_at!=0,mode,"not-found cycle, then two automatic operations");
+  soc_expect(runs.size()==3&&not_found_at!=0,mode,"not-found cycle, then two automatic operations");
   // The not-found cycle was the plug-in request: bounded retry after the first 30 s backoff.
-  soc_expect(runs[0].committed-not_found_at>=30000&&runs[0].committed-not_found_at<=35000,mode,"plug-in retry after not-found waits the 30 s backoff");
-  soc_expect(runs[0].charges==1&&runs[0].applied==0&&runs[0].update==0&&runs[0].update_unix==0&&runs[0].outcome!="ok",mode,"S1 result after unplug never published as new");
-  expect_soc(runs[1],nullptr,"S2 SoC after replug");
-  soc_expect(runs[1].update>0&&runs[1].update_unix==0,mode,"S2 unsynchronized clock: no invented wall-clock time");
+  soc_expect(runs[1].committed-not_found_at>=30000&&runs[1].committed-not_found_at<=35000,mode,"plug-in retry after not-found waits the 30 s backoff");
+  soc_expect(runs[1].charges==1&&runs[1].applied==0&&runs[1].update==0&&runs[1].update_unix==0&&runs[1].outcome!="ok",mode,"S1 result after unplug never published as new");
+  expect_soc(runs[2],nullptr,"S2 SoC after replug");
+  soc_expect(runs[2].update>0&&runs[2].update_unix==0,mode,"S2 unsynchronized clock: no invented wall-clock time");
  } else if(mode=="soc-auto-identity-origin") {
   soc_expect(runs.size()==2,mode,"A, then A again after B");
   expect_soc(runs[0],nullptr,"O1 SoC");expect_soc(runs[1],&runs[0],"O2 SoC after A -> B -> A");
@@ -773,13 +867,14 @@ static void soc_wake_flow(TeslaVehicle &m,const std::string &mode) {
   for(const auto &x:runs)soc_expect(x.automatic&&x.wakes==0,mode,"firmware-initiated, awake, no wake");
   expect_soc(runs[0],nullptr,"I1 SoC");expect_soc(runs[1],&runs[0],"I2 SoC");expect_soc(runs[2],&runs[1],"I3 SoC");
   soc_expect(runs[0].committed-auto_t0>=15000&&runs[0].committed-auto_t0<=20000,mode,"first cycle keeps the plug-in settle delay");
-  const auto gap1=runs[1].committed-runs[0].finished,gap2=runs[2].committed-runs[1].finished;
-  std::printf("SOC_INTERVAL gap_after_shorten=%u gap_after_lengthen=%u scans=%zu\n",gap1,gap2,scan_at.size());
+  const auto gap1=runs[1].committed-runs[0].ended,gap2=runs[2].committed-runs[1].ended;
+  std::printf("SOC_INTERVAL gap_after_shorten=%u gap_after_lengthen=%u cycles=%zu\n",gap1,gap2,cycle_at.size());
   soc_expect(shorten_at>=runs[0].finished&&gap1>=300000&&gap1<=300000+5000,mode,"shortened 3600->300 s must apply without waiting for the old 3600 s");
   soc_expect(lengthen_at>runs[1].finished&&gap2>=600000&&gap2<=600000+5000,mode,"lengthened 300->600 s must hold the new interval");
-  for(size_t i=scans_mark;i<scan_at.size();++i)
-   soc_expect(scan_at[i]>=runs[1].finished+600000-1000,mode,"no radio scan before the lengthened interval is due");
-  soc_expect(scan_at.size()==3,mode,"exactly one scan per cycle, no extra radio contact");
+  for(size_t i=scans_mark;i<cycle_at.size();++i)
+   soc_expect(cycle_at[i]>=runs[1].finished+600000-1000,mode,"no automatic cycle (radio contact) before the lengthened interval is due");
+  soc_expect(cycle_at.size()==3,mode,"exactly one cycle per operation, no extra radio contact");
+  soc_expect(cycle_at[1]-runs[0].ended>=300000&&cycle_at[2]-runs[1].ended>=600000,mode,"cycle start not before the full (new) interval after the previous end");
  } else if(mode=="soc-auto-recvtime") {
   soc_expect(runs.size()==3&&recv_seen[1]&&recv_seen[2]&&recv_seen[3],mode,"three perturbed automatic operations");
   expect_soc(runs[0],nullptr,"V1 SoC");expect_soc(runs[1],&runs[0],"V2 SoC");
@@ -817,14 +912,14 @@ static void soc_wake_flow(TeslaVehicle &m,const std::string &mode) {
   for(const auto &x:runs)soc_expect(x.automatic&&x.wakes==0,mode,"firmware-initiated, awake, no wake");
   for(int i=0;i<7;++i)expect_soc(runs[i],i?&runs[i-1]:nullptr,"charge-cycle SoC");
   std::printf("SOC_CHARGE c1=%u c2=%u c3gap=%u c4gap=%u c5=%u c6gap=%u c7=%u\n",runs[0].committed-auto_t0,runs[1].committed-charge_at[0],
-   runs[2].committed-runs[1].finished,runs[3].committed-runs[2].finished,runs[4].committed-charge_at[2],runs[5].committed-runs[4].finished,runs[6].committed-charge_at[4]);
+   runs[2].committed-runs[1].ended,runs[3].committed-runs[2].ended,runs[4].committed-charge_at[2],runs[5].committed-runs[4].ended,runs[6].committed-charge_at[4]);
   soc_expect(runs[0].committed-auto_t0>=15000&&runs[0].committed-auto_t0<=20000,mode,"C1 plug-in request after the settle delay");
   soc_expect(runs[1].committed-charge_at[0]>=5000&&runs[1].committed-charge_at[0]<=10000,mode,"C2 prompt at the real charge start");
-  for(int i=2;i<4;++i){const auto gap=runs[i].committed-runs[i-1].finished;
+  for(int i=2;i<4;++i){const auto gap=runs[i].committed-runs[i-1].ended;
    soc_expect(gap>=300000&&gap<=305000,mode,"configured 300 s interval during active charging");}
   soc_expect(charge_at[1]>runs[3].committed&&charge_at[1]<runs[3].finished,mode,"C4 paused while in flight and drained");
   soc_expect(runs[4].committed-charge_at[2]>=5000&&runs[4].committed-charge_at[2]<=10000,mode,"C5 prompt at resume");
-  const auto c6=runs[5].committed-runs[4].finished;
+  const auto c6=runs[5].committed-runs[4].ended;
   soc_expect(charge_at[3]>runs[4].finished&&c6>=30000&&c6<=35000,mode,"C6 resume before the 300 s interval, after the unchanged 30 s minimum gap");
   soc_expect(runs[6].committed-charge_at[4]>=15000&&runs[6].committed-charge_at[4]<=20000,mode,"C7 replug: new plug-in request");
  } else if(mode=="soc-auto-charge-resume") {
@@ -844,10 +939,23 @@ static void soc_wake_flow(TeslaVehicle &m,const std::string &mode) {
   for(const auto &x:runs)soc_expect(x.automatic&&x.wakes+x.wake_partial<=1,mode,"automatic, at most one wake per operation");
   soc_expect(runs[0].wakes==1&&runs[0].outcome=="woken_no_soc"&&runs[0].charges==0,mode,"W1 wakes while charging (stored wake_once=false), woken without SoC");
   soc_expect(runs[1].wakes==0,mode,"W2 follow-up never wakes");expect_soc(runs[1],&runs[0],"W2 follow-up SoC");
-  const auto gap=runs[1].committed-runs[0].finished;std::printf("SOC_AUTO_FOLLOWUP gap=%u\n",gap);
+  const auto gap=runs[1].committed-runs[0].ended;std::printf("SOC_AUTO_FOLLOWUP gap=%u\n",gap);
   soc_expect(gap>=30000&&gap<=30000+(TeslaBleDiscovery::SCAN_SECONDS+10)*1000,mode,"W2 after the post-wake delay");
   soc_expect(runs[2].wakes==1&&runs[2].outcome=="woken_no_soc"&&runs[2].committed-charge_at[0]>=5000,mode,"W3 resume request wakes once");
   expect_no_new_soc(runs[2],runs[1],"W3 keeps W2's SoC and receive time");
+  } else if(mode=="soc-auto-snapshot-retry") {
+  soc_expect(retry_fired==1&&retry_hook==1,mode,"snapshot read-failure interleaving executed exactly once");
+  soc_expect(runs.size()==2,mode,"plug-in request, then one periodic request");
+  for(const auto &x:runs)soc_expect(x.automatic&&x.wakes==0,mode,"firmware-initiated, awake, no wake");
+  expect_soc(runs[0],nullptr,"P1 SoC");expect_soc(runs[1],&runs[0],"P2 SoC");
+  const auto gap=runs[1].committed-runs[0].ended;std::printf("SOC_SNAPSHOT_RETRY gap=%u\n",gap);
+  soc_expect(gap>=300000&&gap<=305000,mode,"coherent automatic ok after the retried read: next request after the 300 s interval, not a plug-in retry backoff");
+  soc_expect(cycle_at.size()==2&&cycle_at[1]-runs[0].ended>=300000,mode,"P2 cycle start not before the full 300 s after P1's end");
+  } else if(mode=="soc-auto-initial-retry") {
+  soc_expect(runs.size()==5&&unreachable_connects>=5,mode,"five automatic cycles, each a connect attempt to the stored address");
+  for(const auto &x:runs)soc_expect(x.automatic&&x.frames==0&&x.wakes==0&&x.outcome=="failed"&&x.applied==0,mode,
+   "not found: no vehicle protocol contact, nothing published");
+  soc_expect(total_frames==0&&ev.applied==0,mode,"not found: no vehicle contact");
   }
  std::printf("SOC_WAKE_PASS %s\n",mode.c_str());
 }

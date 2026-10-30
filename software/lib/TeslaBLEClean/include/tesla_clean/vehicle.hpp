@@ -14,6 +14,23 @@ enum class VehicleFailure : uint8_t { None, Deadline, AttemptCap, WakePollCap, C
 enum class VehicleStage : uint8_t { VcsecAuth, WaitVcsecAuth, Status, WaitStatus, Wake, WaitWake, InfoAuth, WaitInfoAuth, Charge, WaitCharge, Pair };
 const char *vehicle_failure_name(VehicleFailure failure);
 const char *vehicle_stage_name(VehicleStage stage);
+// Bounded, payload-free per-command event trace (diagnostics only, never authority).
+// Each word: offset ms from command start (17 bits, saturating) << 15 | event << 10 |
+// stage at the event << 6 | detail (6 bits). Detail per event:
+//   SessionNew/SessionReplay/SessionTxRefused/SessionExhausted/SessionOk/SessionUpdated/
+//     SessionDeferred: domain (2 VCSEC, 3 Infotainment)
+//   SessionRejected/SessionLate: SessionRejection | 32 for Infotainment
+//   Response: VCSEC sleep status (0 unknown, 1 awake, 2 asleep, 63 not a vehicle status;
+//     0 for charge state)
+//   ResponseIgnored: ResponseRejection; ResponseUnmatched: 1 undecodable, 2 no armed
+//     request, 3 other domain; Unrelated: consecutive count (coalesced, max 63)
+//   Phase: 1 wake exposed, 2 authenticated awake, 3 session refresh; Fault: fault (max 63)
+//   Finish: VehicleFailure. Request/RequestTxRefused/Timeout: 0 (see stage).
+enum class VehicleTraceEvent : uint8_t { None, SessionNew, SessionReplay, SessionTxRefused, SessionExhausted, Request,
+    RequestTxRefused, Timeout, SessionOk, SessionRejected, SessionLate, SessionUpdated, SessionDeferred, Response,
+    ResponseIgnored, ResponseUnmatched, Unrelated, PhaseClosed, Phase, Fault, DeferredOverflow, Finish };
+inline constexpr size_t vehicle_trace_capacity=32;
+inline constexpr uint32_t vehicle_trace_max_offset_ms=(1u<<17)-1;
 // Saturating per-command counts; no payload, key, VIN or address material.
 struct VehicleDiagnostics {
     VehicleFailure failure=VehicleFailure::None;
@@ -30,7 +47,34 @@ struct VehicleDiagnostics {
     bool vcsec_reused=false,info_reused=false;
     // An authenticated reply (session established/updated or response accepted) per domain.
     bool vcsec_answered=false,info_answered=false;
+    // Complete frames that cannot be a reply (no signature_data, e.g. unsolicited VCSEC
+    // status broadcasts); session-reply-shaped frames refused because no session
+    // request of that domain was armed or its request window had ended (subset of
+    // rejected_replies; classified by state/window only, never authenticated, so
+    // not proof of a duplicate answer); deferral overflow.
+    uint8_t unrelated_frames=0,late_session_replies=0;
+    bool deferred_overflow=false;
+    // Ring of the latest vehicle_trace_capacity events. trace_head is the next slot
+    // and always wraps; trace_total is a saturating diagnostic count, never an index.
+    uint16_t trace_total=0;
+    uint8_t trace_head=0;
+    std::array<uint32_t,vehicle_trace_capacity> trace{};
 };
+// Appends one encoded event word to the ring (oldest overwritten).
+inline void vehicle_trace_push(VehicleDiagnostics &d,uint32_t word)
+{
+    d.trace[d.trace_head%vehicle_trace_capacity]=word;
+    d.trace_head=static_cast<uint8_t>((d.trace_head+1u)%vehicle_trace_capacity);
+    if(d.trace_total!=UINT16_MAX) { ++d.trace_total; }
+}
+// Most recent event word, or nullptr if none was recorded.
+inline uint32_t *vehicle_trace_last(VehicleDiagnostics &d)
+{
+    return d.trace_total ? &d.trace[(d.trace_head+vehicle_trace_capacity-1u)%vehicle_trace_capacity] : nullptr;
+}
+// Compact text "u=<unrelated> l=<late> o=<overflow> n=<total>|ms.event.stage.detail ..."
+// (oldest first). Returns false if truncated. No payload, key, VIN or address material.
+bool format_vehicle_trace(const VehicleDiagnostics &d,char *out,size_t size);
 struct VehicleResult {
     uint64_t context=0,generation=0;
     VehicleResultCode code=VehicleResultCode::Failed;
@@ -177,6 +221,9 @@ class Vehicle {
     static bool transmit_challenge(void *,const ChallengeView &);
     static void emitted(void *,const Frame &);
     void frame(const Frame &,uint32_t now);
+    static bool reply_shaped(const Frame &frame);
+    void trace(Command &c,VehicleTraceEvent event,uint8_t detail,uint32_t now);
+    void unrelated(Command &c,uint32_t now);
     bool authenticate(Domain d,Stage waiting,Stage next,uint32_t now);
     void encrypted(Domain d,Bytes payload,Stage waiting,uint32_t now);
 public:

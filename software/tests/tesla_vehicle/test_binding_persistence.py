@@ -41,7 +41,10 @@ inline void tesla_identity_publication_hook()
     tesla_binding_cv.wait(lock, [] { return tesla_binding_release; });
 }
 '''
-FLOW_MODES = ('binding-republish', 'binding-first', 'binding-change', 'binding-faults')
+FLOW_MODES = ('binding-republish', 'binding-first', 'binding-change', 'binding-faults', 'binding-restore')
+# Persisted trusted binding restored into a new Runtime without rediscovery (new contract):
+# RED (RED_RESTORE, rc 3) on a production root that still requires a fresh scan.
+RESTORE_MODES = ('binding-restore',)
 RED_MODES = ('binding-republish', 'binding-first')
 
 
@@ -103,6 +106,11 @@ def main():
                     failures.append(f'{mode}: expected fail-closed control then mechanism RED, got rc={p.returncode}')
                 else:
                     print(f'EXPECTED_RED {mode} (control attempt 1 failed closed)', flush=True)
+            elif a.expect_red and mode in RESTORE_MODES:
+                if not (p.returncode == 3 and 'RED_RESTORE' in p.stderr):
+                    failures.append(f'{mode}: expected RED_RESTORE, got rc={p.returncode}')
+                else:
+                    print(f'EXPECTED_RED {mode}', flush=True)
             elif a.expect_red and mode in RED_MODES:
                 if not red:
                     failures.append(f'{mode}: expected mechanism RED, got rc={p.returncode}')

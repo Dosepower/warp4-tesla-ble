@@ -81,6 +81,25 @@ bool TeslaVehicle::fresh_binding(int index,uint64_t mac,const char *vin,const ch
         ev.get_profile_mac(index)==mac && bluetooth.discovery_matches(scope,revision,record+19,type);
 }
 
+bool TeslaVehicle::persisted_binding(int index,uint64_t mac,const char *vin,const char *address,uint8_t type)
+{
+    // Read-only; callers hold the idle gate (discovery_allowed) like publish_guidance.
+    // No scan evidence: the trusted binding was established once by the user's
+    // explicit search/adoption and the authenticated pairing of this exact key.
+    if (index < 0 || index >= EV_MAX_EVS || !mac || ev.get_profile_mac(index) != mac) { return false; }
+    TeslaBleStorageAdapter store;
+    return store.select_profile(index,mac) && profile_material_authorized(store,vin,mac) &&
+        profile_transport_matches(store,vin,address,type);
+}
+
+bool TeslaVehicle::persisted_runtime_ready(int index)
+{
+    auto *r=tesla->runtime_owner.get();
+    return r && !r->stop_requested.load() && !r->profile_pending.load() && r->profile_ready.load() &&
+        r->profile_actionable.load() && r->configured_ev_index.load()==index && r->authorized.load() &&
+        r->transport_bound.load() && r->profile_key_present.load() && live_profile(index) && runtime_binding_matches();
+}
+
 bool TeslaVehicle::runtime_binding_matches(bool worker)
 {
     auto *r=tesla->runtime_owner.get();
@@ -97,7 +116,14 @@ bool TeslaVehicle::runtime_binding_matches(bool worker)
     const auto authority = r->command_outcome.pair_binding_current(millis(), *identity,
             tesla->config_revision, r->binding_revision, worker);
     if (authority) { return *authority && bluetooth.discovery_authority_current(r->binding_revision); }
-    // Stored authorization reuses the key, never an expired radio discovery.
+    // Persisted trusted binding (SoC polling): the worker verified at profile
+    // apply that the committed transport record equals this runtime's
+    // VIN/address/type, and the key is authorized for this VIN/WARP EV MAC.
+    // Identity/profile/config gates above still apply. Never admits pairing:
+    // request_pair rejects an authorized profile, and an in-flight pairing
+    // uses the command-owned discovery authority above.
+    if (r->authorized.load() && r->transport_bound.load()) { return true; }
+    // Otherwise only a fresh exact discovery (first assignment / pairing).
     TeslaBleDiscovery::Scope scope;scope.index=r->configured_ev_index;scope.mac=r->profile_mac;
     scope.generation=identity->generation;
     return tesla_ble_vehicle_name(r->vin.c_str(),scope.name) &&
@@ -239,12 +265,12 @@ bool TeslaVehicle::live_profile(int index) const
         ev.get_active_ev_mac() != 0 && ev.get_active_ev_mac() == r->profile_mac && ev.get_profile_mac(index) == r->profile_mac;
 }
 
-bool TeslaVehicle::select_profile(int index, bool deleting, String &errmsg, uint32_t revision_override)
+bool TeslaVehicle::select_profile(int index, bool deleting, String &errmsg, uint32_t revision_override, bool persisted)
 {
     if (!discovery_allowed()) { errmsg = checked_error_string("Bluetooth inactive, restart pending, migration blocked or action busy"); return false; }
     auto *p = find_profile(index);
     if (!p) { errmsg = checked_error_string("No Tesla mapping for selected WARP profile"); return false; }
-    if (deleting && revision_override) { errmsg = checked_error_string("Invalid profile selection"); return false; }
+    if (deleting && (revision_override || persisted)) { errmsg = checked_error_string("Invalid profile selection"); return false; }
     const uint32_t revision = revision_override ? revision_override : p->get("discovery_revision")->asUint();
     const uint64_t mac = profile_mac_value(p->get("ev_mac")->asString().c_str());
     // Deletion may clean an orphan after an EV profile edit; its recorded
@@ -271,10 +297,20 @@ bool TeslaVehicle::select_profile(int index, bool deleting, String &errmsg, uint
         clear_guided();
         tesla->guidance_refresh = true;
     }
+    bool use_persisted = false;
     if (!deleting) {
-        if (!fresh_binding(index,mac,p->get("vin")->asString().c_str(),p->get("ble_address")->asString().c_str(),
-                p->get("ble_address_type")->asUint(),revision)) {
-            errmsg=checked_error_string("Search this VIN again and select its exact match before loading or pairing");return false;
+        const char *vin=p->get("vin")->asString().c_str(), *address=p->get("ble_address")->asString().c_str();
+        const uint8_t type=p->get("ble_address_type")->asUint();
+        if (!fresh_binding(index,mac,vin,address,type,revision)) {
+            // Normal SoC refresh is not pairing: the persisted trusted binding
+            // connects the stored address directly. Never adopts a scan match.
+            use_persisted = persisted && persisted_binding(index,mac,vin,address,type);
+            if (!use_persisted) {
+                errmsg=checked_error_string(persisted ?
+                    "No paired saved Tesla assignment for this VIN/address/profile; pair it, or search this VIN again to reassign" :
+                    "Search this VIN again and select its exact match before loading or pairing");
+                return false;
+            }
         }
     }
     auto *r = tesla->runtime_owner.get();
@@ -290,6 +326,7 @@ bool TeslaVehicle::select_profile(int index, bool deleting, String &errmsg, uint
     Runtime::ProfileRequest request;
     request.index = index; request.mac = mac; request.deleting = deleting;
     request.discovery_revision=revision;request.address_type=p->get("ble_address_type")->asUint();
+    request.persisted=use_persisted;
     request.poll_interval=p->get("poll_interval")->asUint();request.wake=p->get("wake_once")->asBool();
     strlcpy(request.vin, p->get("vin")->asString().c_str(), sizeof(request.vin));
     strlcpy(request.address, p->get("ble_address")->asString().c_str(), sizeof(request.address));
@@ -316,7 +353,7 @@ void TeslaVehicle::apply_profile()
     r->deleting_profile = request.deleting;
     xQueueReset(r->queues.events());
     r->manual_poll_pending.store(false); r->poll_requested.store(false); r->pair_requested.store(false);
-    r->bound_vehicle_mac.store(0); r->session.bind(0); r->authorized.store(false);
+    r->bound_vehicle_mac.store(0); r->session.bind(0); r->authorized.store(false); r->transport_bound.store(false);
     r->vin.assign(request.vin); r->configured_ev_index.store(request.index); r->profile_mac = request.mac;
     r->binding_revision=request.discovery_revision;r->remote_address_type=request.address_type;
     r->poll_interval_seconds=request.poll_interval;r->wake_once=request.wake;
@@ -350,12 +387,15 @@ void TeslaVehicle::apply_profile()
         const auto live=ev.get_live_identity();
         const bool fresh=live.index==request.index && live.mac==request.mac &&
             fresh_binding(request.index,request.mac,request.vin,request.address,request.address_type,request.discovery_revision);
-        if (!fresh) { ok=false; }
+        // Persisted path: exactly the saved, authorized binding; nothing is written.
+        const bool persisted=request.persisted && saved && live.index==request.index && live.mac==request.mac;
+        if (!fresh && !persisted) { ok=false; }
         if (ok && !saved) {
             uint8_t record[26]{};
             ok=profile_transport_record(request.vin,request.address,request.address_type,record) &&
                 tesla_clean::KeyStorage::committed(r->storage->save_transaction("ble_binding",record,sizeof(record)));
         }
+        r->transport_bound.store(ok);
     }
     if (!ok || (!request.deleting && !create_vehicle())) {
         post_event(EventType::Error, "Profile storage inconsistent or VIN changed; retained untouched; delete only this profile to reset");
@@ -574,7 +614,13 @@ void TeslaVehicle::guided_command(String &errmsg)
             p->get("wake_once")->asBool() != saved->get("wake_once")->asBool()) {
             errmsg = checked_error_string("Saved permission changed; confirm again"); return;
         }
-        if (!select_profile(index, false, errmsg)) { return; }
+        // A SoC refresh is not pairing: reuse this profile's already prepared
+        // persisted runtime (no reload, scan or reconnect), otherwise load the
+        // persisted trusted binding (stored address, no scan). Pairing keeps
+        // the fresh exact-VIN discovery gate.
+        if (pair || !discovery_allowed() || !persisted_runtime_ready(index)) {
+            if (!select_profile(index, false, errmsg, 0, !pair)) { return; }
+        }
         auto &g = tesla->guided;
         strlcpy(g.request, request.c_str(), sizeof(g.request));
         g.identity = {live.generation, live.index, live.mac};
@@ -670,6 +716,10 @@ void TeslaVehicle::publish_guidance()
         row->get("ev_index")->updateInt(index); row->get("paired")->updateBool(paired);
         row->get("binding_fresh")->updateBool(p && fresh_binding(index, mac, p->get("vin")->asString().c_str(),
             p->get("ble_address")->asString().c_str(), p->get("ble_address_type")->asUint(), p->get("discovery_revision")->asUint()));
+        // Persisted trusted binding for SoC refresh (no scan); never pairing evidence.
+        row->get("binding_persisted")->updateBool(p && paired && ev.get_profile_mac(index) == mac &&
+            profile_transport_matches(store, p->get("vin")->asString().c_str(), p->get("ble_address")->asString().c_str(),
+                p->get("ble_address_type")->asUint()));
         const char *key_presence = presence == TeslaBleStorageAdapter::KeyPresence::Present ? "present" :
             presence == TeslaBleStorageAdapter::KeyPresence::Absent ? "absent" :
             presence == TeslaBleStorageAdapter::KeyPresence::CleanupRequired ? "cleanup" : "unknown";

@@ -90,7 +90,18 @@ struct TeslaBleModuleTest {
     scan(m,p);error.clear();assert(m.validate_profiles(update,ConfigSource::API).empty());
    }
    assert(m.select_profile(0,false,error));auto *r=m.tesla->runtime_owner.get();m.apply_profile();m.refresh_live_session();m.publish_profile();
-   assert(r->authorized.load()&&m.runtime_binding_matches());clock_ms.fetch_add(TeslaBleDiscovery::RESULT_TTL_MS+1);assert(!m.runtime_binding_matches());
+   assert(r->authorized.load()&&m.runtime_binding_matches());clock_ms.fetch_add(TeslaBleDiscovery::RESULT_TTL_MS+1);
+   // Persisted trusted binding: the authorized key + committed transport record of exactly
+   // this VIN/address/type survive the discovery TTL (normal refresh needs no rediscovery).
+   assert(r->transport_bound.load()&&m.runtime_binding_matches()&&m.runtime_binding_matches(true));
+   // Negative controls after TTL: each missing element falls back to the fresh-discovery gate.
+   r->transport_bound.store(false);assert(!m.runtime_binding_matches()&&!m.runtime_binding_matches(true)); // no transport record
+   r->transport_bound.store(true);r->authorized.store(false);assert(!m.runtime_binding_matches()); // not authorized (pairing path)
+   r->authorized.store(true);assert(m.runtime_binding_matches());
+   {const uint64_t mac=ev.mac;const auto generation=ev.generation;++ev.generation;ev.mac=B;m.refresh_live_session(); // different physical PEV
+    assert(!m.runtime_binding_matches()&&!m.runtime_binding_matches(true));
+    ev.mac=mac;ev.generation=generation;m.refresh_live_session();assert(m.runtime_binding_matches());
+   }
    for(const auto &item:original)if(item.first.find("ble_binding")==std::string::npos)assert(LittleFS.files.at(item.first)==item.second);
    assert(!peer_open_calls);if(mode=="authorized")assert(LittleFS.files==original && scan_start_calls==1);
    assert(profile_transport_matches(*r->storage,"5YJ3E1EA7KF000001",p->get("ble_address")->asString().c_str(),1));

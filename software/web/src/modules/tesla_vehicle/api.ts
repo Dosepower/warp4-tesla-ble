@@ -83,6 +83,7 @@ export interface state {
     poll_session_reused?: boolean;
     poll_vcsec_answered?: boolean;
     poll_info_answered?: boolean;
+    poll_trace?: string;
     action_kind?: 'none' | 'soc' | 'pair' | 'other';
     // Firmware background scheduler (works without an open browser).
     auto_poll: 'off' | 'initial' | 'waiting' | 'not_charging' | 'not_paired' | 'searching' | 'polling' | 'not_found' | 'failed' | 'after_wake';
@@ -93,7 +94,7 @@ export interface guidance {
     revision: number;
     request: string;
     ready: boolean;
-    profiles: {ev_index: number; ev_mac: string; namespace_clean: boolean; paired: boolean; key_presence: state['key_presence']; binding_fresh: boolean}[];
+    profiles: {ev_index: number; ev_mac: string; namespace_clean: boolean; paired: boolean; key_presence: state['key_presence']; binding_fresh: boolean; binding_persisted: boolean}[];
 }
 export type guided = {phase: 'prepare_pair' | 'prepare_poll' | 'commit' | 'cancel' | 'reset' | 'unpair' | 'cleanup'; request: string; generation: string; revision: number; profile: TeslaProfile};
 export type start = {ev_index: number};

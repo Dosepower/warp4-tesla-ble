@@ -22,6 +22,8 @@ struct Response {
     GcmPacket packet;
 };
 struct VerifiedReply { uint64_t context=0; uint32_t counter=0, fault=0; size_t length=0; };
+// Nonsecret gate that refused the latest accept() (diagnostics only, never authority).
+enum class ResponseRejection : uint8_t { None, Inactive, Route, Uuid, Deadline, Window, Metadata, Decrypt, Payload, Replay };
 bool response_aad(Domain domain, Bytes vin, Bytes identifier, uint32_t counter, uint32_t flags,
                   uint32_t fault, std::array<uint8_t,32> &output);
 class ResponseGuard {
@@ -34,6 +36,7 @@ public:
     // UUID/hash establishes a new window; changing caller context is not enough.
     void cancel() { active_ = false; }
     bool pending_request(Request &output) const { output = active_ ? request_ : Request{}; return active_; }
+    ResponseRejection last_rejection() const { return rejection_; }
     bool accept(const Response &response, uint32_t now, uint64_t generation,
                 std::array<uint8_t,1024> &plaintext, VerifiedReply &reply,
                 bool (*validate_payload)(Bytes,void *)=nullptr, void *validation_context=nullptr);
@@ -46,5 +49,6 @@ private:
     bool valid_ = false, active_ = false;
     Request request_;
     ReplayWindow replay_;
+    ResponseRejection rejection_ = ResponseRejection::None;
 };
 }

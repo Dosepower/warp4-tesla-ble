@@ -350,6 +350,8 @@ inline int esp_ble_gattc_register_callback(void (*handler)(esp_gattc_cb_event_t,
 inline bool defer_gatt_registration = false;
 inline unsigned app_register_calls = 0, peer_open_calls = 0;
 inline esp_ble_addr_type_t peer_open_type = 255;
+inline bool peer_open_fail = false;   // stored address unreachable (persisted-binding contracts)
+inline uint8_t peer_open_address[6]{}; // last address passed to the open call
 #if defined(TESLA_BLE_R13_MASTER_BENCH) && TESLA_BLE_R13_MASTER_BENCH
 #include "../../../src/modules/tesla_vehicle/bluetooth_master_teardown.h"
 inline int master_cleanup_fail_bit = 0;
@@ -378,6 +380,8 @@ inline int esp_ble_gattc_app_register(uint16_t app) {
 inline int esp_ble_gattc_open(esp_gatt_if_t interface, uint8_t *address, esp_ble_addr_type_t type, bool) {
     ++peer_open_calls;
     peer_open_type=type;
+    std::memcpy(peer_open_address,address,6);
+    if(peer_open_fail)return -1;
     if(!host_gatt_success)return -1;
     if(host_single_link_enforced) { assert(host_physical_links==0); ++host_physical_links; }
     esp_ble_gattc_cb_param_t p;p.open.conn_id=4;std::memcpy(p.open.remote_bda,address,6);host_gatt_handler(ESP_GATTC_OPEN_EVT,interface,&p);
