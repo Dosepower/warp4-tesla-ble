@@ -33,7 +33,7 @@ Der Kandidat ist auf dem Testgerät gestartet. Host-/Frontend-Tests einschließl
 
 - Aktuelle Entwicklung: **`main`**.
 - Quellcode und Tests: [`software/`](software).
-- Build-/Installationshinweise: [`software/WARP4_INSTALLER.md`](software/WARP4_INSTALLER.md).
+- Installation und Bedienung: [bebilderte Kurzanleitung](docs/guide/WARP4-Tesla-BLE-Kurzanleitung-2.13.6-6ae4a299.pdf). Lokale Provisionierungs-/Installerunterlagen sind keine allgemeine Installationsfreigabe.
 - Einschränkungen: [`software/TESLA_BLE_EXPERIMENTAL.md`](software/TESLA_BLE_EXPERIMENTAL.md).
 - Frühere WIP-, Preview- und Checkpoint-Berichte: **[Dokumentationsarchiv](docs/history/README.md)**. Git-Historie, Tags und alte Release-Dateien bleiben zur Nachvollziehbarkeit erhalten; sie sind keine Empfehlung für eine Neuinstallation.
 
