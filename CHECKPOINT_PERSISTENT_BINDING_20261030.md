@@ -18,6 +18,6 @@ This checkpoint contains the reviewed source and tests for WARP4 firmware `2.13.
 - OTA SHA-256: `97dc24305165359775f07536f34d66d6fe3d63bba7a57b19e9ca44bdad910372`.
 - Full local build-input manifest SHA-256: `3b58682e6f7968abab07ca0c57620c709036a7bacd7f9149b6b84e82d4336e20`.
 
-At checkpoint creation device installation is still in progress. Boot validation and real-vehicle reliability are not yet claimed. A successful synthetic regression does not establish the historical field-failure cause.
+Installed and independently read back as `2.13.6+6ae4a299`; the running partition is boot-valid, the original firmware remains valid in the fallback slot, and security flags are unchanged. Vehicle and MQTT configuration comparisons passed. Real-vehicle wake/SoC reliability and runtime stack/heap measurements remain unverified. A successful synthetic regression does not establish the historical field-failure cause.
 
 This publication includes reviewed product source, tests and public package descriptors. Private device logs, identifiers, keys, build artifacts and local installer identity/runtime locks are excluded. The full local build manifest is a qualification reference, not a claim that private/local installer material is published or usable as a general provisioning release. No unsigned firmware binary is published here.
