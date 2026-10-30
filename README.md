@@ -4,7 +4,15 @@ Tesla-BLE-Integration für WARP4 auf Basis der Tinkerforge-Firmware.
 
 ## Aktueller Stand
 
-**Installierter Teststand · Firmware `2.13.6+6ae39075`**
+**Erreichter Zwischenstand · installierte Firmware `2.13.6+6ae4a299`**
+
+Die Entwicklung pausiert an diesem Meilenstein. Installation und automatische Bootvalidierung sind bestätigt; eine vollständige Langzeitabnahme am Fahrzeug bleibt offen. Kein offizielles Tinkerforge-Release und keine allgemeine Stable-Freigabe.
+
+- **[Kurzanleitung als PDF mit Bildern](docs/guide/WARP4-Tesla-BLE-Kurzanleitung-2.13.6-6ae4a299.pdf)**
+- **[Prüfstand, Firmware-Prüfsumme und bestätigte Installation](CHECKPOINT_PERSISTENT_BINDING_20261030.md)**
+- **[Diskussion und Firmware-Anhang im Tinkerunity-Thread](https://www.tinkerunity.org/topic/13975-warp4-tesla-ladezustand-lokal-%C3%BCber-bluetooth-experimentelles-projekt/)**
+
+Experimentell und überwiegend KI-gestützt entwickelt und geprüft. Nur für WARP4; kein Fullflash und keine Änderung von Bootloader oder Partitionstabelle. Alte Preview-Releases unten auf GitHub sind nicht dieser aktuelle Installationsstand.
 
 Basis: offizieller Quellstand WARP4 2.13.6 (`afa5c782`). Eigenes SDK auf ESP-IDF 5.5.6 / Arduino 3.3.12 neu gebaut und geprüft; keine Behauptung identischer offizieller Binärdateien. Installation und automatische Boot-Validierung am Testgerät bestätigt, bestehende Tesla-Kopplung erhalten.
 
@@ -14,6 +22,7 @@ Der Kandidat ist auf dem Testgerät gestartet. Host-/Frontend-Tests einschließl
 
 ### Funktionen
 
+- Einmalige Suche und feste Fahrzeugzuordnung; danach Abruf über die gespeicherte autorisierte BLE-Bindung ohne erneuten Pflicht-Suchlauf. Bestehende passende Verbindung wird wiederverwendet, keine automatische Neuzuordnung.
 - Geführte Tesla-Kopplung mit kryptographisch bestätigtem Erfolg und getrennten Fahrzeugschlüsseln.
 - Automatischer SoC-Abruf beim Anstecken und Ladebeginn; periodische Aktualisierung nur während aktiver Ladung.
 - Intervalle ab **5 Minuten**; bei Pause/Ende bleibt der letzte Wert mit echter Empfangsuhrzeit sichtbar.
@@ -23,10 +32,10 @@ Der Kandidat ist auf dem Testgerät gestartet. Host-/Frontend-Tests einschließl
 ## Orientierung
 
 - Aktuelle Entwicklung: **`main`**.
-- Quellcode und Tests: [`software/`](software/).
+- Quellcode und Tests: [`software/`](software).
 - Build-/Installationshinweise: [`software/WARP4_INSTALLER.md`](software/WARP4_INSTALLER.md).
-- Einschränkungen: [`software/TESLA_BLE_EXPERIMENTAL.md`](software/TESLA_BLE_EXPERIMENTAL.md) sowie die historischen `CHECKPOINT_*.md`-Berichte.
-- Frühere Entwicklungsstände bleiben unter **`archive/*`-Tags** erhalten. Alte Preview-Releases sind historische Artefakte, nicht der aktuelle Installationsstand.
+- Einschränkungen: [`software/TESLA_BLE_EXPERIMENTAL.md`](software/TESLA_BLE_EXPERIMENTAL.md).
+- Frühere WIP-, Preview- und Checkpoint-Berichte: **[Dokumentationsarchiv](docs/history/README.md)**. Git-Historie, Tags und alte Release-Dateien bleiben zur Nachvollziehbarkeit erhalten; sie sind keine Empfehlung für eine Neuinstallation.
 
 ## Sicherheit und Build
 
