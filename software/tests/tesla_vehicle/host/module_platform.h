@@ -27,12 +27,28 @@ inline size_t strlcpy(char *to, const char *from, size_t size) {
 }
 enum class ConfigSource { File, API };
 using Language = int;
-inline bool fail_checked_string = false;
+// Host OOM model for String(const char *) candidates (host String in LittleFS.h).
+inline bool &fail_checked_string = host_string_alloc_fail;
 inline bool host_restore_service_enabled = false;
 inline unsigned host_restore_calls = 0;
 inline unsigned host_config_objects = 0;
 class Config {
 public:
+    // Official public Config surface used by the Tesla-owned checked string
+    // helper (tesla_config_string.h): Config::Wrap (operator-> plus explicit
+    // operator Config*), value.val.s.getVal() and value.updated. The removed
+    // T1 core member updateStringChecked() is deliberately NOT modelled, so a
+    // production call to it fails to compile on the host as on the target.
+    struct Wrap {
+        Config *target;
+        Wrap(Config *c) : target(c) {}
+        Config *operator->() const { return target; }
+        explicit operator Config *() const { return target; }
+    };
+    struct HostConfString { String text; String *getVal() { return &text; } const String *getVal() const { return &text; } };
+    struct HostConfVariant { HostConfString s; };
+    struct HostConfValue { HostConfVariant val; uint8_t updated = 0; };
+    HostConfValue value;
     Config() = default;
     template <typename F> Config(Config other, F) : children(std::move(other.children)) {}
     static Config Object(std::initializer_list<std::pair<std::string, Config>> values) {
@@ -43,7 +59,7 @@ public:
     static Config Int(int v, int, int) { Config c; c.integer = v; return c; }
     static Config Uint(uint32_t v, uint32_t, uint32_t) { Config c; c.integer = v; return c; }
     void updateUint(uint32_t value) { integer = value; }
-    static Config Str(const char *v, int, int) { Config c; c.text = v; return c; }
+    static Config Str(const char *v, int, int) { Config c; c.value.val.s.text = v; return c; }
     static Config Float(float v) { Config c; c.floating = v; return c; }
     static Config Uptime() { return {}; }
     static Config Array(std::initializer_list<Config>,const Config *prototype,unsigned,unsigned max) {
@@ -62,20 +78,13 @@ public:
     bool asBool() const { return boolean; }
     int asInt() const { return integer; }
     uint32_t asUint() const { return integer; }
-    const String &asString() const { return text; }
+    const String &asString() const { return value.val.s.text; }
     void updateBool(bool v) { boolean = v; }
     void updateString(const String &v) {
 #ifdef TESLA_BLE_ALLOCATION_PROBE
         AllocationProbe::PlatformBoundary boundary;
 #endif
-        text = v;
-    }
-    bool updateStringChecked(const char *v) {
-        if (fail_checked_string) { return false; }
-#ifdef TESLA_BLE_ALLOCATION_PROBE
-        AllocationProbe::PlatformBoundary boundary;
-#endif
-        text = v; return true;
+        value.val.s.text = v;
     }
     void updateFloat(float v) { floating = v; }
     void updateUptime(uint64_t v) { uptime = v; }
@@ -88,7 +97,6 @@ private:
     int integer = 0;
     float floating = NAN;
     uint64_t uptime = 0;
-    String text;
     const Config *prototype=nullptr;
     unsigned array_max=0;
     std::vector<Config> elements;
@@ -98,9 +106,10 @@ private:
     }
 };
 using ConfigRoot = Config;
+using CoolString = String;
 struct IModule {
     virtual ~IModule() = default;
-    virtual void pre_setup() {} virtual void setup() {} virtual void register_urls() {} virtual void loop() {}
+    virtual void pre_setup() {} virtual void pre_reboot() {} virtual void setup() {} virtual void register_urls() {} virtual void loop() {}
     bool initialized = false;
 };
 constexpr int EV_MAX_EVS = 16;

@@ -612,9 +612,6 @@ void ISO15118::register_events()
 
             cancel_pending_tasks();
 
-            // Physical identity ends even if PLC was disabled before unplugging.
-            common.reset_evcc_vendor();
-
             if (!is_enabled()) {
                 return EventResult::OK;
             }

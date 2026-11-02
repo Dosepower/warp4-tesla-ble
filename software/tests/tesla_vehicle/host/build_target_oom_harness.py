@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
 """Compile unchanged target WString + exact Config/UUID definitions natively.
-Only unrelated SDK/platform/Config slot storage is shimmed; allocator behavior
-and Config update method bodies are production. Never write framework inputs.
+Only unrelated SDK/platform/Config slot storage is shimmed; allocator behavior,
+Config::asString/updateString/update_value, the official Config::Wrap class and
+the Tesla-owned tesla_update_string_checked (tesla_config_string.h) are
+production. The checked helper resolves `#include "config.h"` to a generated
+minimal target-OOM Config adapter in the scratch output directory (never the
+general host/config.h shim and never src/config.h, which needs FS.h/ESP-IDF).
+Never write framework inputs.
 """
 from pathlib import Path
 import os, re, subprocess, json, hashlib, sys
@@ -39,28 +44,54 @@ def definition(text, marker):
 (out/'stdlib_noniso.h').write_text('#pragma once\nchar *utoa(unsigned int,char *,int); char *itoa(int,char *,int); char *ltoa(long,char *,int); char *ultoa(unsigned long,char *,int); char *lltoa(long long,char *,int); char *ulltoa(unsigned long long,char *,int); char *dtostrf(double,signed char,unsigned char,char *);\n')
 config_cpp=(repo/'software/src/config.cpp').read_text()
 config_h=(repo/'software/src/config.h').read_text()
-header='''#include <WString.h>
+checked_helper=repo/'software/src/modules/tesla_vehicle/tesla_config_string.h'
+# The core checked member was moved to the Tesla-owned helper; config.* must
+# stay official. Fail loudly instead of silently testing a removed core body.
+assert 'updateStringChecked' not in config_cpp and 'updateStringChecked' not in config_h
+assert checked_helper.exists()
+# Quoted `#include "config.h"` from the helper must reach the adapter below,
+# not a sibling file: the helper directory is searched before -I paths.
+assert not (checked_helper.parent/'config.h').exists()
+wrap='class Wrap\n'
+assert config_h.count(wrap)==1
+adapter='''#pragma once
+// GENERATED HOST TARGET-OOM ADAPTER (scratch only, never on a firmware path).
+// Minimal Config exposing exactly the public members tesla_config_string.h
+// uses: value.updated, value.val.s.getVal(), asString() and Config::Wrap.
+// ConfString slot storage is shimmed inline; the update bodies, asString and
+// Wrap are copied verbatim from src/config.{h,cpp}.
+#define TESLA_TARGET_OOM_CONFIG_ADAPTER 1
+#include <WString.h>
 #include "cool_string.h"
 #include <cassert>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <utility>
 inline void esp_system_abort(const char *) { std::abort(); }
+// Type-error diagnostics are an unexercised wrong-type path; preserve body.
+inline void config_abort_on_type_error(const char *, const void *, const char *, const String * = nullptr) { std::abort(); }
 struct Config {
- struct ConfString { CoolString text; CoolString *getVal(){return &text;} };
- struct { unsigned char updated=0; } value;
- ConfString slot;
+ struct ConfString { CoolString text; CoolString *getVal(){return &text;} const CoolString *getVal() const {return &text;} };
+ struct ConfVariant { uint8_t updated=0; struct Val { ConfString s; } val; } value;
  template<class T> bool is() const {return true;}
- template<class T> T *get() {return &slot;}
- bool updateString(const String &);
+ template<class T> T *get() {return &value.val.s;}
+ template<class T> const T *get() const {return &value.val.s;}
+ // Declared only so the verbatim Wrap compiles; never defined or called.
+ Config *begin(); Config *end();
 '''
-checked='bool Config::updateStringChecked' in config_cpp
-if checked: header+='bool updateStringChecked(const char *);\n'
-header+=definition(config_h,'template<typename T, typename ConfigT>\n    bool update_value')+'\n};\n'
-# Type-error diagnostics are an unexercised wrong-type path; preserve body.
-header=header.replace('struct Config {','inline void config_abort_on_type_error(const char *, const void *, const char *, const String * = nullptr) { std::abort(); }\nstruct Config {')
-header+=definition(config_cpp,'bool Config::updateString(const String &val)')+'\n'
-if checked: header+=definition(config_cpp,'bool Config::updateStringChecked')+'\n'
+adapter+=definition(config_h,wrap)+';\n'
+adapter+=' const CoolString &asString() const;\n bool updateString(const String &);\n'
+adapter+=definition(config_h,'template<typename T, typename ConfigT>\n    bool update_value')+'\n};\n'
+adapter+=definition(config_cpp,'const CoolString &Config::asString() const')+'\n'
+adapter+=definition(config_cpp,'bool Config::updateString(const String &val)')+'\n'
+(out/'config.h').write_text(adapter)
+header=f'''#include "config.h"
+#ifndef TESLA_TARGET_OOM_CONFIG_ADAPTER
+#error "target-OOM harness must resolve config.h to its generated adapter"
+#endif
+#include "{checked_helper}"
+'''
 uuid=(fw/'libraries/BLE/src/BLEUUID.cpp').read_text()
 header+='''struct esp_bt_uuid_t { uint16_t len; union {uint16_t uuid16;uint32_t uuid32;uint8_t uuid128[16];} uuid; };
 #define ESP_UUID_LEN_128 16
@@ -86,7 +117,6 @@ assert len(lines)==3
 header+='esp_bt_uuid_t operational_uuid(unsigned which) {\n'+'\n'.join(lines)+'\nreturn which==0?service_uuid:which==1?write_uuid:notify_uuid;\n}\n'
 (out/'target_oom_definitions.inc').write_text(header)
 if presence_probe:
-    header=header.replace('CoolString *getVal(){return &text;}','CoolString *getVal(){return &text;} const CoolString *getVal() const {return &text;}')
     header += '#include <ArduinoJson.h>\n'
     visitors=repo/'software/src/config/visitors.h'
     header += 'struct PresenceVisitor { JsonVariant insertHere;\n'+definition(visitors.read_text(),'void operator()(const Config::ConfString &x)')+'\n};\n'
@@ -96,7 +126,7 @@ if presence_probe:
         assert module.count('tesla_ble_publish_presence(tesla->state.get("key_presence")') == 3
         assert 'Config::Str("unknown", 0, TESLA_BLE_PRESENCE_MAX_LENGTH)' in module
         header += f'#include "{helper}"\n'
-        header += 'void presence_site(Config &c,bool present,bool known,bool cleanup) { tesla_ble_publish_presence(&c,present,known,cleanup); }\n'
+        header += 'void presence_site(Config &c,bool present,bool known,bool cleanup) { tesla_ble_publish_presence(Config::Wrap(&c),present,known,cleanup); }\n'
     else:
         module=(repo/'software/src/modules/tesla_vehicle/tesla_vehicle.cpp').read_text()
         expressions=re.findall(r'state.get\("key_presence"\)->updateString\(((?:outcome|pair)->cleanup_required.*?absent".*?)\);',module,re.S)
@@ -110,12 +140,12 @@ if presence_probe:
         assert len(set(normalized))==1
         header += 'void presence_site(Config &c,bool present,bool known,bool cleanup) { c.updateString('+normalized[0]+'); }\n'
     (out/'target_oom_definitions.inc').write_text(header)
-inputs=[core/'WString.cpp',core/'WString.h',fw/'libraries/BLE/src/BLEUUID.cpp',repo/'software/src/config.cpp',repo/'software/src/config.h',repo/'software/src/modules/tesla_vehicle/tesla_ble_gatt.cpp']
+inputs=[core/'WString.cpp',core/'WString.h',fw/'libraries/BLE/src/BLEUUID.cpp',repo/'software/src/config.cpp',repo/'software/src/config.h',checked_helper,repo/'software/src/modules/tesla_vehicle/tesla_ble_gatt.cpp']
 if presence_probe:
     inputs += [repo/'software/src/modules/tesla_vehicle/tesla_vehicle.cpp']
     inputs += [repo/'software/src/config/visitors.h',arduinojson/'src/ArduinoJson.h']
     if helper.exists(): inputs += [helper]
-    (out/'layout-adaptation.json').write_text(json.dumps({'SSOSIZE':15,'capacity':14,'sizeof_String':16,'flag_offset':15,'adaptation':'ESP32 SSO geometry only; native heap pointers retained; original WString.cpp and Config update method bodies unmodified','schema_max_length':7,'presence_sites':3},indent=2))
+    (out/'layout-adaptation.json').write_text(json.dumps({'SSOSIZE':15,'capacity':14,'sizeof_String':16,'flag_offset':15,'adaptation':'ESP32 SSO geometry only; native heap pointers retained; original WString.cpp, Config asString/updateString/update_value/Wrap and Tesla tesla_update_string_checked unmodified','schema_max_length':7,'presence_sites':3},indent=2))
 (out/'source-hashes.json').write_text(json.dumps({str(p):hashlib.sha256(p.read_bytes()).hexdigest() for p in inputs},indent=2)+'\n')
 probe=Path(os.environ.get('TESLA_CLEAN_TARGET_OOM_TEST',str(repo/'software/tests/tesla_vehicle/test_tesla_ble_target_oom.cpp')))
 instrument=['-fsanitize=address,undefined','-fno-omit-frame-pointer','-g','-no-pie'] if os.environ.get('TESLA_CLEAN_HARNESS_SANITIZE')=='1' else []

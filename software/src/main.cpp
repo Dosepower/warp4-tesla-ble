@@ -34,6 +34,9 @@
 #include "tools/fs.h"
 #include "tools/memory.h"
 #include "tools/bricklets.h"
+#if defined(WARP_HEAP_ARENA_PROBE)
+#include "tools/heap_arena_probe.h"
+#endif
 
 #include "gcc_warnings.h"
 
@@ -337,6 +340,12 @@ void setup()
 #if MODULE_IO_SCHEDULER_AVAILABLE()
     // Hand over HAL ownership from the main task to the IO task.
     io_scheduler.start_task();
+#endif
+
+#if defined(WARP_HEAP_ARENA_PROBE)
+    // HAP1 boot snapshot (main thread; fixes the probe thread). Emitted after the walk.
+    hap_probe_capture("boot");
+    hap_probe_emit();
 #endif
 
     logger.printfln("Initialization done");

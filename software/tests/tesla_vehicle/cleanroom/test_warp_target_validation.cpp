@@ -8,8 +8,8 @@ struct Input {
     std::array<Config,6> leaf; Config root;
     explicit Input(unsigned invalid=3) {
         root.leaves=leaf.data(); leaf[0].boolean=true;
-        assert(leaf[1].updateStringChecked(invalid==0?"invalid":"5yj3e1ea7kf000001"));
-        assert(leaf[2].updateStringChecked(invalid==1?"invalid":"aa:bb:cc:dd:ee:ff"));
+        assert(tesla_update_string_checked(&leaf[1],invalid==0?"invalid":"5yj3e1ea7kf000001"));
+        assert(tesla_update_string_checked(&leaf[2],invalid==1?"invalid":"aa:bb:cc:dd:ee:ff"));
         leaf[3].integer=invalid==2?-1:2; leaf[4].integer=300;
     }
 };

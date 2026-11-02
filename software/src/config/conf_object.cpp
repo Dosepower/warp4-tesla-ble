@@ -154,7 +154,7 @@ Config::ConfObject::ConfObject(std::vector<std::pair<const char *, Config>> &&va
 {
     const size_t len = val.size();
 
-    auto schema = static_cast<ConfObjectSchema *>(perm_aligned_alloc_prefer(4, sizeof(ConfObjectSchema) + len * sizeof(ConfObjectSchema::Key), IRAM, PSRAM, DRAM));
+    auto schema = static_cast<ConfObjectSchema *>(perm_aligned_alloc_prefer(4, sizeof(ConfObjectSchema) + len * sizeof(ConfObjectSchema::Key), PSRAM, IRAM, DRAM));
     schema->length = len;
 
     for (size_t i = 0; i < len; ++i) {

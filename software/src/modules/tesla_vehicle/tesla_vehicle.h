@@ -21,6 +21,7 @@
 #include "module.h"
 #endif
 #include <tesla_clean/vehicle.hpp>
+#include "tesla_psram.h"
 #include "tesla_ble_clean_platform.h"
 #include "tesla_ble_soc_policy.h"
 #include "tesla_ble_pairing_policy.h"
@@ -53,6 +54,7 @@ public:
     void setup() override;
     void register_urls() override;
     void loop() override;
+    void pre_reboot() override;
 
     bool transport_write(const std::vector<uint8_t> &data) { return transport_write_bytes(data.data(), data.size()); }
     bool transport_write_bytes(const uint8_t *data, size_t size);
@@ -187,6 +189,8 @@ private:
     bool bluetooth_boot_enabled = false;
     bool bluetooth_commit_ok = true;
     void publish_bluetooth_state();
+    void consume_dispatch_quarantine();
+    bool dispatch_quarantine_reported = false;
     void register_bluetooth_urls();
     bool save_bluetooth(bool desired, String &errmsg);
     bool restart_bluetooth(String &errmsg);
@@ -248,12 +252,17 @@ private:
     // RAII aggregate, not in the permanent module. Vehicle's adapter pointers
     // alias the embedded adapters: no independent shared_ptr control blocks.
     struct Runtime {
+        TESLA_PSRAM_OPERATORS(Runtime) // T1r8 LAB: whole runtime aggregate in PSRAM (no-op otherwise)
         explicit Runtime(TeslaVehicle *owner)
             : transport_adapter(owner),
               storage(std::shared_ptr<TeslaBleStorageAdapter>{}, &storage_adapter),
               transport(std::shared_ptr<TeslaBleTransportAdapter>{}, &transport_adapter) {}
 
+#if defined(TESLA_PSRAM_PLACEMENT) && TESLA_PSRAM_PLACEMENT
+        TeslaBleQueues<QueueHandle_t, vQueueDeleteWithCaps> queues; // created with xQueueCreateWithCaps(SPIRAM)
+#else
         TeslaBleQueues<QueueHandle_t, vQueueDelete> queues;
+#endif
         TaskHandle_t task_handle = nullptr;
         TaskHandle_t teardown_handle = nullptr;
         TeslaBleTeardown teardown;
@@ -274,9 +283,9 @@ private:
         TeslaBleTransportAdapter transport_adapter;
         std::shared_ptr<TeslaBleStorageAdapter> storage;
         std::shared_ptr<TeslaBleTransportAdapter> transport;
-        std::unique_ptr<tesla_clean::IdentityStore> keys;
+        tesla_psram::Owned<tesla_clean::IdentityStore> keys; // == std::unique_ptr unless TESLA_PSRAM_PLACEMENT
         std::array<uint8_t, 16> routing_address{};
-        std::unique_ptr<tesla_clean::Vehicle> vehicle;
+        tesla_psram::Owned<tesla_clean::Vehicle> vehicle;
         TeslaBleOperation operation;
         TeslaBleOperation retirement_operation;
         TeslaBleWorkWatch worker_watch;
@@ -530,6 +539,7 @@ private:
     };
 
     struct Tesla {
+        TESLA_PSRAM_OPERATORS(TeslaRoot) // T1r8 LAB: module-owned Tesla aggregate in PSRAM (no-op otherwise)
         ConfigRoot config, state;
 #if TESLA_BLE_MANUAL_VEHICLE_UI
         Config profile;

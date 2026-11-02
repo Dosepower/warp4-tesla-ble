@@ -316,7 +316,7 @@ bool TeslaVehicle::select_profile(int index, bool deleting, String &errmsg, uint
     auto *r = tesla->runtime_owner.get();
     if (!r) {
         for (const char *key : {"vin", "ble_address", "ev_mac"}) {
-            if (!tesla->config.get(key)->updateStringChecked(p->get(key)->asString().c_str())) { errmsg = "OOM"; return false; }
+            if (!tesla_update_string_checked(tesla->config.get(key), p->get(key)->asString().c_str())) { errmsg = "OOM"; return false; }
         }
         tesla->config.get("enable")->updateBool(true);
         tesla->config.get("ev_index")->updateInt(index);
@@ -649,13 +649,13 @@ void TeslaVehicle::publish_guidance()
     tesla->guidance.get("revision")->updateUint(tesla->config_revision);
     const auto live = ev.get_live_identity();
     char generation[21]; snprintf(generation, sizeof(generation), "%llu", static_cast<unsigned long long>(live.generation));
-    tesla->guidance.get("generation")->updateStringChecked(generation);
+    tesla_update_string_checked(tesla->guidance.get("generation"), generation);
     auto *r = tesla->runtime_owner.get();
     if (tesla->guided.request[0] && !guided_current()) { clear_guided(); }
     const bool ready = guided_current() && r && !r->profile_pending.load() && r->profile_ready.load() &&
         live_profile(tesla->guided.identity.index) && runtime_binding_matches();
     tesla->guidance.get("ready")->updateBool(ready);
-    tesla->guidance.get("request")->updateStringChecked(tesla->guided.request);
+    tesla_update_string_checked(tesla->guidance.get("request"), tesla->guided.request);
     auto freshness_rows = tesla->guidance.get("profiles");
     // WARP additions/edits do not necessarily change Tesla configuration.
     // Bind bootstrap evidence to the exact namespace, not the selected index.
@@ -710,7 +710,7 @@ void TeslaVehicle::publish_guidance()
         snprintf(mac_text, sizeof(mac_text), "%02X:%02X:%02X:%02X:%02X:%02X",
             unsigned((mac >> 40) & 255), unsigned((mac >> 32) & 255), unsigned((mac >> 24) & 255),
             unsigned((mac >> 16) & 255), unsigned((mac >> 8) & 255), unsigned(mac & 255));
-        if (!row->get("ev_mac")->updateStringChecked(mac_text)) { return; }
+        if (!tesla_update_string_checked(row->get("ev_mac"), mac_text)) { return; }
         row->get("namespace_clean")->updateBool(!p && current_mac == mac && ev.get_profile_mac(index) == mac &&
             presence == TeslaBleStorageAdapter::KeyPresence::Absent);
         row->get("ev_index")->updateInt(index); row->get("paired")->updateBool(paired);
@@ -723,7 +723,7 @@ void TeslaVehicle::publish_guidance()
         const char *key_presence = presence == TeslaBleStorageAdapter::KeyPresence::Present ? "present" :
             presence == TeslaBleStorageAdapter::KeyPresence::Absent ? "absent" :
             presence == TeslaBleStorageAdapter::KeyPresence::CleanupRequired ? "cleanup" : "unknown";
-        if (!row->get("key_presence")->updateStringChecked(key_presence)) { return; }
+        if (!tesla_update_string_checked(row->get("key_presence"), key_presence)) { return; }
         // State is the selected profile's UI authority, even after its runtime
         // was retired or a legitimate mapping save invalidated profile_ready.
         // Reconcile only inside this serialized idle storage probe, never from

@@ -127,6 +127,12 @@ private:
     void reconfigure();
     void subscribe_automation_triggers();
 
+    // MQR1 diagnostic: observed esp_mqtt_client_start(), returns the SDK rc unchanged.
+    esp_err_t mqr1_start_client(const char *trigger);
+    bool mqr1_line_allowed();
+    bool mqr1_running = false;
+    uint8_t mqr1_lines = 0;
+
     esp_mqtt_client_handle_t client = nullptr;
     micros_t send_interval;
 

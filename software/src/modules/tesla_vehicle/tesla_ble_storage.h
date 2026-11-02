@@ -1,4 +1,5 @@
 #pragma once
+#include "tesla_psram.h"
 
 #include <tesla_clean/storage.hpp>
 #include <string>
@@ -30,7 +31,7 @@ public:
     static bool legacy_material_present();
     static bool profiles_config_present();
     static constexpr unsigned MAX_PROFILES = 16; // Checked against WARP's EV_MAX_EVS at integration boundary.
-    template<typename F> bool set_mutation_guard(F &&guard) { return mutation_guard.assign(std::forward<F>(guard)); }
+    template<typename F> bool set_mutation_guard(F &&guard) { return mutation_guard.assign(std::forward<F>(guard), tesla_psram::allocation(tesla_psram::Callback)); }
 
 private:
     const char *path_for_key(std::string_view key) const;

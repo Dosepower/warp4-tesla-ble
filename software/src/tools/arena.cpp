@@ -30,6 +30,10 @@
 
 #include "gcc_warnings.h"
 
+#if defined(WARP_HEAP_ARENA_PROBE)
+#include "heap_arena_probe.h"
+#endif
+
 Arena::Arena(aligned_alloc_fn_t *aligned_alloc_function,
                                  size_t minimum_alignment,
                                  size_t initial_capacity,
@@ -198,7 +202,17 @@ void *Arena::aligned_alloc(size_t align, size_t size)
 
         // alloc_size is more than what fits into one block.
         // Because we never free anyway, we can just allocate this directly (i.e. without BlockHeader etc.)
+#if defined(WARP_HEAP_ARENA_PROBE)
+        {
+            // HAP1: observe only; same call, same size, pointer returned unchanged.
+            const size_t direct_size = size + get_padding(size, align);
+            void *direct = aligned_alloc_fn(align, direct_size);
+            hap_arena_note_direct(this, direct, direct_size);
+            return direct;
+        }
+#else
         return aligned_alloc_fn(align, size + get_padding(size, align));
+#endif
     }
 
 #ifdef DEBUG_FS_ENABLE

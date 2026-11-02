@@ -27,6 +27,10 @@
 #include "build.h"
 #include "tools.h"
 #include "matchTopicFilter.h"
+#include "mqtt_start_diag.h"
+#if defined(WARP_HEAP_ARENA_PROBE)
+#include "tools/heap_arena_probe.h"
+#endif
 
 #include "options.h"
 
@@ -277,9 +281,6 @@ void Mqtt::refresh_state(const char *path)
 
 bool Mqtt::pushStateUpdate(size_t stateIdx, const String &payload, const String &path)
 {
-    // Nearby radio identifiers are ephemeral browser setup data, not telemetry.
-    // Never copy them into retained broker state or an offline MQTT outbox.
-    if(path=="tesla_vehicle/discovery") { return true; }
     auto &last_send = this->state_last_send[stateIdx];
 
     if (!deadline_elapsed(last_send + this->send_interval)) {
@@ -297,12 +298,10 @@ bool Mqtt::pushStateUpdate(size_t stateIdx, const String &payload, const String 
 
 bool Mqtt::pushRawStateUpdate(const String &payload, const String &path)
 {
-    if(path=="tesla_vehicle/discovery") { return true; }
     return this->publish_with_prefix(path, payload);
 }
 
 IAPIBackend::WantsStateUpdate Mqtt::wantsStateUpdate(size_t stateIdx) {
-    if(strcmp(api.states[stateIdx].path,"tesla_vehicle/discovery")==0) { return IAPIBackend::WantsStateUpdate::No; }
     auto state = this->state.get("connection_state")->asEnum<MqttConnectionState>();
     if (state != MqttConnectionState::Connected) {
         return IAPIBackend::WantsStateUpdate::No;
@@ -842,8 +841,55 @@ bool Mqtt::create_client()
         return false;
     }
 
+    mqr1_running = false;
+    if (mqr1_line_allowed()) {
+        logger.printfln("MQR1 client_init ok stack=%u", MQTT_TASK_STACK_SIZE);
+    }
+
     esp_mqtt_client_register_event(client, (esp_mqtt_event_id_t)ESP_EVENT_ANY_ID, mqtt_event_handler, this);
     return true;
+}
+
+bool Mqtt::mqr1_line_allowed()
+{
+    if (mqr1_lines < MQR1_MAX_LINES) {
+        ++mqr1_lines;
+        return true;
+    }
+    if (mqr1_lines == MQR1_MAX_LINES) {
+        ++mqr1_lines;
+        logger.printfln("MQR1 line cap %u reached, further MQR1 lines suppressed", MQR1_MAX_LINES);
+    }
+    return false;
+}
+
+esp_err_t Mqtt::mqr1_start_client(const char *trigger)
+{
+    Mqr1StartRecord rec;
+    const bool running_before = mqr1_running;
+#if defined(WARP_HEAP_ARENA_PROBE)
+    // HAP1: walk/arena capture before the MQR1 window (no allocation); emitted after the MQR1 line.
+    const bool hap_captured = hap_probe_capture("mqr1");
+#endif
+    const esp_err_t rc = mqr1_start_observed(client, &rec);
+
+    if (rc == ESP_OK) {
+        mqr1_running = true;
+    }
+
+    if (mqr1_line_allowed()) {
+        char buf[224];
+        mqr1_format_start(buf, sizeof(buf), trigger, running_before, MQTT_TASK_STACK_SIZE, &rec);
+        logger.printfln("%s", buf);
+    }
+
+#if defined(WARP_HEAP_ARENA_PROBE)
+    if (hap_captured) {
+        hap_probe_emit();
+    }
+#endif
+
+    return rc;
 }
 
 void Mqtt::stop_and_destroy_client()
@@ -861,6 +907,7 @@ void Mqtt::stop_and_destroy_client()
     esp_mqtt_client_stop(client);
     esp_mqtt_client_destroy(client);
     client = nullptr;
+    mqr1_running = false;
     initial_network_event_seen = false;
 
     // Free certificate/key buffers that were allocated in create_client().
@@ -967,12 +1014,17 @@ void Mqtt::register_events()
     // reconfigure() will create the client and start it via esp_mqtt_client_start().
     // The callback guards on client != nullptr for safety.
     network.on_network_connected([this](const Config *connected) {
+        if (mqr1_line_allowed()) {
+            logger.printfln("MQR1 net_event connected=%u client=%u running=%u first=%u",
+                            connected->asBool() ? 1U : 0U, client != nullptr ? 1U : 0U, mqr1_running ? 1U : 0U, this->initial_network_event_seen ? 0U : 1U);
+        }
+
         if (client == nullptr) {
             return EventResult::OK;
         }
 
         if (connected->asBool()) {
-            if (esp_mqtt_client_start(client) == ESP_OK) {
+            if (mqr1_start_client("network") == ESP_OK) {
 #if MODULE_DEBUG_AVAILABLE()
                 debug.register_task("mqtt_task", MQTT_TASK_STACK_SIZE);
 #endif
@@ -988,12 +1040,17 @@ void Mqtt::register_events()
             }
 #endif
             esp_mqtt_client_stop(client);
+            mqr1_running = false;
         }
 
         this->initial_network_event_seen = true;
 
         return EventResult::OK;
     });
+
+    if (mqr1_line_allowed()) {
+        logger.printfln("MQR1 net_cb registered enable=%u client=%u", config.get("enable_mqtt")->asBool() ? 1U : 0U, client != nullptr ? 1U : 0U);
+    }
 }
 
 void Mqtt::pre_reboot()
@@ -1048,12 +1105,15 @@ void Mqtt::reconfigure()
 
     // Start the client immediately if the network is already up.
     if (network.is_connected()) {
-        if (esp_mqtt_client_start(client) == ESP_OK) {
+        if (mqr1_start_client("reconfigure") == ESP_OK) {
 #if MODULE_DEBUG_AVAILABLE()
             debug.register_task("mqtt_task", MQTT_TASK_STACK_SIZE);
 #endif
         }
         initial_network_event_seen = true;
+    }
+    else if (mqr1_line_allowed()) {
+        logger.printfln("MQR1 reconfigure start deferred network=0");
     }
 }
 

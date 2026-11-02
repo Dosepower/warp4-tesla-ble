@@ -11,13 +11,20 @@
 #define TESLA_BLE_HOST_FILESYSTEM
 #endif
 #ifdef TESLA_BLE_MODULE_HOST_TEST
+// Host-only allocation-failure model: while set, a String constructed from a C
+// string is invalid like an Arduino WString whose buffer allocation failed.
+// Real WString OOM is tested separately; this only drives production branches.
+inline bool host_string_alloc_fail = false;
 class String : public std::string {
 public:
     using std::string::string;
     String() = default;
+    String(const char *s) : std::string(s), host_valid(!host_string_alloc_fail) {}
     String(const std::string &s) : std::string(s) {}
-    explicit operator bool() const { return true; } // Real WString OOM tested separately.
+    explicit operator bool() const { return host_valid; }
     void toUpperCase() { std::transform(begin(), end(), begin(), [](unsigned char c) { return std::toupper(c); }); }
+private:
+    bool host_valid = true;
 };
 #else
 using String = std::string;

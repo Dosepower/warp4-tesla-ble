@@ -25,6 +25,10 @@
 
 #include "arena.h"
 
+#if defined(WARP_HEAP_ARENA_PROBE)
+#include "heap_arena_probe.h"
+#endif
+
 Arena dram_arena{
     [](size_t alignment, size_t size){return heap_caps_aligned_alloc(alignment, size, MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL);},
     1, 8192, 1024};
@@ -39,6 +43,9 @@ Arena psram_arena{
 #endif
 
 void tools_malloc_pre_setup() {
+#if defined(WARP_HEAP_ARENA_PROBE)
+    hap_probe_pre_setup(); // PSRAM-only state; counters armed before the first arena use in setup()
+#endif
     dram_arena.setup({
 #if defined(MANUALLY_RESERVED_6432B_AT_0x3FFAE6E0_DRAM)
         {reinterpret_cast<void *>(0x3FFAE6E0),  6432},

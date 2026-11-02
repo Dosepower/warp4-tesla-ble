@@ -6,6 +6,13 @@
 #ifdef ESP_PLATFORM
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
+#if defined(TESLA_PSRAM_PLACEMENT) && TESLA_PSRAM_PLACEMENT
+#include <atomic>
+#include <freertos/idf_additions.h>
+#include <esp_heap_caps.h>
+#include <esp_memory_utils.h>
+#define TESLA_CHECKED_MUTEX_PSRAM 1
+#endif
 #else
 #include <mutex>
 #endif
@@ -13,6 +20,11 @@
 // Independently authored WARP boundary utilities. The core remains single-worker;
 // module publications use a native mutex, not the core's single-owner lock state.
 namespace tesla_warp {
+#if defined(TESLA_CHECKED_MUTEX_PSRAM)
+// T1r11 LAB: placement proof for CheckedMutex FreeRTOS objects (read from the real handle address).
+struct MutexProof { std::atomic<uint32_t> created{0}, external{0}, non_external{0}, failures{0}, deleted{0}; };
+inline MutexProof mutex_proof;
+#endif
 template<typename Signature> class FunctionRef;
 template<typename R,typename... A> class FunctionRef<R(A...)> {
     void *context_;
@@ -24,7 +36,21 @@ public:
 };
 class CheckedMutex {
 #ifdef ESP_PLATFORM
+#if defined(TESLA_CHECKED_MUTEX_PSRAM)
+    // T1r11 LAB: StaticQueue_t of the mutex in PSRAM (xSemaphoreCreateMutexWithCaps). Task context only (Guard uses 0 or
+    // portMAX_DELAY, no ISR give/take); its spinlock uses the esp_cpu_compare_and_set external-RAM path. No fallback:
+    // failure leaves handle_ null, so lock() fails exactly like the previous internal allocation failure.
+    SemaphoreHandle_t handle_=create_psram();
+    static SemaphoreHandle_t create_psram() {
+        SemaphoreHandle_t h=xSemaphoreCreateMutexWithCaps(MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);
+        if(!h) { mutex_proof.failures.fetch_add(1); return nullptr; }
+        mutex_proof.created.fetch_add(1);
+        (esp_ptr_external_ram(h)?mutex_proof.external:mutex_proof.non_external).fetch_add(1);
+        return h;
+    }
+#else
     SemaphoreHandle_t handle_=xSemaphoreCreateMutex();
+#endif
     bool lock(bool try_only) { return handle_ && xSemaphoreTake(handle_,try_only?0:portMAX_DELAY)==pdTRUE; }
     void unlock() { xSemaphoreGive(handle_); }
 #else
@@ -38,7 +64,9 @@ public:
     CheckedMutex &operator=(const CheckedMutex &)=delete;
     bool initialized() const { return handle_!=nullptr; }
     ~CheckedMutex() {
-#ifdef ESP_PLATFORM
+#if defined(TESLA_CHECKED_MUTEX_PSRAM)
+        if(handle_) { vSemaphoreDeleteWithCaps(handle_); mutex_proof.deleted.fetch_add(1); }
+#elif defined(ESP_PLATFORM)
         if(handle_) { vSemaphoreDelete(handle_); }
 #else
         delete handle_;

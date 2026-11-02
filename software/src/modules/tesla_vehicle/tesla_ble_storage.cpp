@@ -14,6 +14,7 @@
 
 #include "tesla_ble_key_validation.h"
 #include "tesla_ble_storage_io.h"
+#include "tesla_psram.h"
 #include "tesla_ble_validation.h"
 #include <mbedtls/platform_util.h>
 
@@ -183,6 +184,10 @@ TeslaBleStorageAdapter::LoadResult TeslaBleStorageAdapter::load_into(const char 
     if (!key) { return LoadResult::Error; }
     const char *path = path_for_key(key);
     if (!path || !buffer || capacity == 0) { return LoadResult::Error; }
+    // LAB (T1r7): the raw POSIX read below was the one unguarded worker flash path
+    // (T1r6EXT stop panic: private_key_presence -> load_into -> open -> LittleFS).
+    // Error, never Absent: callers then report key presence UNKNOWN.
+    TESLA_PSRAM_FLASH_GUARD(LoadResult::Error);
 #ifdef TESLA_BLE_HOST_FILESYSTEM
     // Host filesystem boundary only; protocol/load policy remains production.
     return tesla_ble_host_read_into(path, buffer, capacity, size);
@@ -192,16 +197,16 @@ TeslaBleStorageAdapter::LoadResult TeslaBleStorageAdapter::load_into(const char 
     // The data partition is mounted at /data by tools/fs.cpp.
     TeslaBleStorageIO::Paths paths;
     if (!paths.initialize(path)) { return LoadResult::Error; }
-    int fd = ::open(paths.canonical, O_RDONLY);
+    int fd = tesla_storage_fs::fs_open(paths.canonical, O_RDONLY);
     if (fd < 0 && errno == ENOENT) {
-        fd = ::open(paths.backup, O_RDONLY);
+        fd = tesla_storage_fs::fs_open(paths.backup, O_RDONLY);
     }
     if (fd < 0) { return errno == ENOENT ? LoadResult::Absent : LoadResult::Error; }
     struct stat info{};
-    bool ok = ::fstat(fd, &info) == 0 && S_ISREG(info.st_mode) && info.st_size > 0 &&
+    bool ok = tesla_storage_fs::fs_fstat(fd, &info) == 0 && S_ISREG(info.st_mode) && info.st_size > 0 &&
               static_cast<size_t>(info.st_size) <= capacity;
     while (ok && size < static_cast<size_t>(info.st_size)) {
-        const ssize_t count = ::read(fd, buffer + size, static_cast<size_t>(info.st_size) - size);
+        const ssize_t count = tesla_storage_fs::fs_read(fd, buffer + size, static_cast<size_t>(info.st_size) - size);
         if (count < 0 && errno == EINTR) { continue; }
         if (count <= 0) { ok = false; break; }
         size += static_cast<size_t>(count);
@@ -293,7 +298,11 @@ TeslaBleStorageAdapter::KeyPresence TeslaBleStorageAdapter::private_key_presence
     // LittleFS, encrypted flash and FreeRTOS locking before an interrupt frame.
     // Allocation failure is indeterminate, never evidence of an absent identity.
     constexpr size_t capacity = 4096;
+#if defined(TESLA_PSRAM_PLACEMENT) && TESLA_PSRAM_PLACEMENT
+    auto *key = static_cast<uint8_t *>(tesla_psram::alloc(capacity, tesla_psram::KeyScratch)); // zeroed; zeroize+free below
+#else
     auto *key = static_cast<uint8_t *>(std::calloc(capacity, sizeof(uint8_t)));
+#endif
     if (!key) { return KeyPresence::Unknown; }
     size_t size = 0;
     const auto loaded = load_into("private_key", key, capacity, size);
@@ -317,7 +326,11 @@ TeslaBleStorageAdapter::KeyPresence TeslaBleStorageAdapter::private_key_presence
     if (loaded == LoadResult::Loaded &&
         tesla_ble_valid_private_key(std::string_view(reinterpret_cast<const char *>(key), size))) { presence = KeyPresence::Present; }
     mbedtls_platform_zeroize(key, capacity);
+#if defined(TESLA_PSRAM_PLACEMENT) && TESLA_PSRAM_PLACEMENT
+    tesla_psram::release(key);
+#else
     std::free(key);
+#endif
     return presence;
 }
 

@@ -52,6 +52,72 @@ struct TeslaBleModuleTest {
  auto old=gen-1;TeslaVehicle::gatt_callback({TeslaNimbleEvent::Disconnected,old,4,0,0,nullptr,0});TeslaVehicle::gatt_callback({TeslaNimbleEvent::Rx,old,4,20,0,raw,sizeof(raw)});assert(r.connected.load()&&xQueueReceive(r.queues.rx(),&fragment,0)!=pdTRUE);
  e={};e.type=BLE_GAP_EVENT_ENC_CHANGE;e.enc_change.conn_handle=4;e.enc_change.status=23;test_gap(&e,test_gap_arg);assert(!r.connected.load()&&r.connection_generation.load()!=gen);nimble_force_disconnect();m.process_disconnect();assert(!r.connected.load());
  }
+#ifdef TESLA_NIMBLE_DISPATCH_HOST_BINDING
+ // Production integration of the dispatcher quarantine: real TeslaVehicle main loop/admissions, real lifecycle,
+ // real TeslaNimbleCentral and the real tesla_nimble_dispatch.cpp binding + helper thread. Test boundaries only:
+ // the SDK CONNECT submission is held in flight (unknown outcome) and the caller is classified as a PSRAM stack.
+ static void dispatch_quarantine(TeslaVehicle &m,bool runtime){
+  seed(0);BluetoothLifecycle &bt=m.bluetooth;controller_status=test_status=0;async_bluetooth=true;std::thread lifecycle,host;
+  host_task_created=[&](TaskHandle_t t){if(t->name=="nimble_host")host=std::thread([t]{run_task(t);});};
+  assert(bt.start(TeslaVehicle::gatt_callback));auto*lt=tasks.back().get();lifecycle=std::thread([lt]{run_task(lt);});
+  {auto end=std::chrono::steady_clock::now()+std::chrono::seconds(3);while(!bt.active()&&!bt.failed()&&std::chrono::steady_clock::now()<end)std::this_thread::yield();}
+  assert(bt.active());ev.index=0;ev.mac=A;String error;
+  // Positive control: before quarantine the real internal scan path and admissions work.
+  assert(!tesla_nimble_dispatch_quarantined()&&m.discovery_allowed());explicit_scan(m,0);
+  TeslaVehicle::Runtime *r=nullptr;
+  if(runtime){assert(m.select_profile(0,false,error));r=m.tesla->runtime_owner.get();assert(r);}
+  m.loop();assert(!m.tesla->state.get("restart_required")->asBool()&&!m.tesla->runtime_owner.restart_required());
+  assert(tesla_nimble_dispatch::start());
+  std::mutex mx;std::condition_variable cv;std::atomic<bool> hold{true},entered{false};test_api_rc=0;test_unannounced_handle=-1;
+  test_submit=[&](int stage){if(stage==1&&hold.load()){entered=true;std::unique_lock<std::mutex> l(mx);cv.wait(l,[&]{return !hold.load();});}};
+  const int connects=test_connects,scans=test_scans,terminates=test_terminates;const auto reboots=reboot_calls;
+  auto *c=bt.central();assert(c);const uint8_t address[]={1,2,3,4,5,6};
+  tesla_dispatch_host_external_stack=true; // worker submission from its PSRAM stack -> bounced to the helper
+  const auto t0=std::chrono::steady_clock::now();const bool opened=c->open(address,0,1);tesla_dispatch_host_external_stack=false;
+  const auto waited=std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now()-t0).count();
+  assert(entered.load()&&!opened&&waited>=2900&&tesla_nimble_dispatch::restart_required());
+  // Central saw an ordinary submit failure; nothing but the consumer may latch restart.
+  assert(!m.tesla->runtime_owner.restart_required()&&!m.tesla->state.get("restart_required")->asBool());
+  m.loop();m.publish_bluetooth_state();
+  assert(m.tesla->state.get("restart_required")->asBool()&&"dispatch quarantine must latch runtime restart");
+  assert(m.tesla->runtime_owner.restart_required()&&strstr(m.tesla->state.get("last_error")->asString().c_str(),"outcome unknown"));
+  assert(m.bluetooth_state.get("restart_required")->asBool()&&m.bluetooth_state.get("phase")->asString()=="error");
+  if(runtime)assert(m.tesla->state.get("timeout_cause")->asString()=="controller_call_unknown"&&r->supervision_failed&&r->stop_requested.load());
+  // Every admission fails closed: main gates, lifecycle discovery wrapper, API commands, internal-stack submits.
+  assert(!m.discovery_allowed()&&!m.accepts_commands());
+  TeslaBleDiscovery::Scope scope{};scope.index=0;scope.mac=A;scope.generation=ev.generation;assert(tesla_ble_vehicle_name("5YJ3E1EA7KF000001",scope.name));
+  assert(!bt.request_discovery(scope)&&!bt.request_discovery());
+  m.tesla->scan_command.get("vin")->updateString("5YJ3E1EA7KF000001");m.tesla->scan_command.get("ev_mac")->updateString("11:22:33:44:55:00");m.tesla->scan_command.get("ev_index")->updateInt(0);
+  error="";api.commands.at("tesla_vehicle/scan")(0,error);assert(strstr(error.c_str(),"unavailable"));
+  for(auto name:{"tesla_vehicle/start","tesla_vehicle/pair","tesla_vehicle/poll","tesla_vehicle/guided"}){m.tesla->profile_command.get("ev_index")->updateInt(0);error="";api.commands.at(name)(0,error);if(error.empty())std::fprintf(stderr,"admitted %s\n",name);assert(!error.empty());}
+  ble_gap_disc_params dp{};uint8_t byte=0;ble_addr_t peer{};
+  assert(tesla_nimble_dispatch::gap_disc(0,1000,&dp,nullptr,nullptr)!=0&&tesla_nimble_dispatch::gap_connect(0,&peer,1000,nullptr,nullptr,nullptr)!=0);
+  assert(tesla_nimble_dispatch::gattc_write_flat(4,20,&byte,1,nullptr,nullptr)!=0&&!c->open(address,0,2));
+  for(int i=0;i<5;++i){m.loop();std::this_thread::sleep_for(std::chrono::milliseconds(2));}
+  assert(test_connects==connects+1&&test_scans==scans&&reboot_calls==reboots&&"no automatic retry/new scan/connect/reboot");
+  // Safe conditional stop: the existing teardown path runs; the dispatcher refuses host stop -> ownership retained.
+  if(runtime){r->controller_used=true;run_task(r->task_handle);m.loop();assert(r->teardown_handle);run_task(r->teardown_handle);m.loop();m.loop();
+   assert(m.tesla->runtime_owner.get()==r&&"runtime ownership retained after refused host stop");}
+  else{// Production precondition: Bluetooth was enabled at boot from a committed config file (the fixture sets
+   // bluetooth_boot_enabled directly), so commit the same value through the real save path before the user restart.
+   error="";if(!m.save_bluetooth(true,error)||!m.restart_bluetooth(error))std::fprintf(stderr,"restart refused: %s\n",error.c_str());
+   assert(m.bluetooth_restart_pending);for(int i=0;i<2000&&!bt.failed();++i){m.loop();std::this_thread::sleep_for(std::chrono::milliseconds(1));}}
+  lifecycle.join();bt.supervise();m.loop();
+  assert(bt.failed()&&!bt.stopped()&&test_run_host.load()&&controller_status==2&&reboot_calls==reboots&&"host stop refused; no auto reboot");
+  // Late completion: the SDK call finally returns success; helper owns and retires it, cookie/context stay valid.
+  // Link already established by the controller: ble_gap_conn_cancel() reports EALREADY (as in connect_repeat_contracts),
+  // so the core's late_cleanup (cancel first, terminate only on cancel failure) must terminate the unannounced link.
+  test_unannounced_handle=4;test_cancel_rc=BLE_HS_EALREADY;{std::lock_guard<std::mutex> l(mx);hold=false;}cv.notify_all();
+  {auto end=std::chrono::steady_clock::now()+std::chrono::seconds(5);while(test_terminates==terminates&&std::chrono::steady_clock::now()<end)std::this_thread::sleep_for(std::chrono::milliseconds(1));}
+  assert(test_terminates==terminates+1&&"late accepted CONNECT retired by the helper");
+  ble_gap_event e{};e.type=BLE_GAP_EVENT_CONNECT;e.connect.conn_handle=4;test_gap(&e,test_gap_arg);
+  e={};e.type=BLE_GAP_EVENT_DISCONNECT;e.disconnect.conn.conn_handle=4;test_gap(&e,test_gap_arg);m.loop();
+  assert(tesla_nimble_dispatch::restart_required()&&m.tesla->state.get("restart_required")->asBool()&&bt.failed()&&!bt.stopped());
+  assert(test_connects==connects+1&&test_scans==scans&&reboot_calls==reboots&&(!runtime||m.tesla->runtime_owner.get()==r));
+  test_run_host=false;if(host.joinable())host.join();host_task_created={};async_bluetooth=false;
+  std::printf("DISPATCH_QUARANTINE PASS %s: helper in-flight unknown %lldms -> main latch, terminal state, all admissions denied, host stop refused/ownership retained, late completion retired, no retry/reboot\n",runtime?"runtime":"idle",static_cast<long long>(waited));
+ }
+#endif
  static void pairing(TeslaVehicle &m,bool generating,bool delayed=false,const std::string &scenario="") {
   using namespace controller_fixture;
   Harness peer;
@@ -485,6 +551,9 @@ struct TeslaBleModuleTest {
   if(mode=="pairing"||mode=="generate"||mode=="notify-only"||mode=="indicate-and-notify"||mode=="delayed-pair"||mode=="connect-timeout"||mode=="no-card"||mode=="decline"||mode=="link-drop"||mode=="profile-switch"||mode=="partial-pair"||mode=="late-response"){
     host_rx_properties=mode=="notify-only"?16:mode=="indicate-and-notify"?48:32;pairing(m,mode=="generate",mode=="delayed-pair",mode);return;
   }
+#ifdef TESLA_NIMBLE_DISPATCH_HOST_BINDING
+  if(mode=="dispatch-quarantine"||mode=="dispatch-quarantine-runtime"){dispatch_quarantine(m,mode=="dispatch-quarantine-runtime");return;}
+#endif
   if(mode=="delete-first") {
    seed(0);seed(1);const auto before=LittleFS.files;
    entries->get(1)->get("enable")->updateBool(false);entries->get(1)->get("vin")->updateString("");entries->get(1)->get("ble_address")->updateString("");

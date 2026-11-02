@@ -28,5 +28,5 @@ assert(!guided.includes('bench_'));assert(!guided.includes('__(`'));
 const ev=source('web/src/modules/ev/main.tsx');
 assert(ev.indexOf('{vehicleExtension ? h(vehicleExtension, {})')>ev.indexOf('ev.content.ev_profiles'));
 assert(source('src/modules/tesla_vehicle/module.ini').includes('           Ev'));
-assert.equal((source('warp4_tesla_ble.ini').match(/Tesla Vehicle/g)??[]).length,3);
+assert.equal((source('warp4_tesla.ini').match(/Tesla Vehicle/g)??[]).length,3);
 console.log('Tesla BLE guided integration/schema/translation/inline placement PASS; old independent Start and duplicate-SoC prohibitions intentionally superseded by approved UX.');

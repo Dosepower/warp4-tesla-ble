@@ -187,7 +187,11 @@ private:
         sealed=true;phase=Phase::Failed;view.status=Status::Error;view.error=reason;
         view.count=0;view.truncated=false;for(auto &target:view.targets) { target={}; }view.revision=++revision;
     }
-#ifdef ESP_PLATFORM
+#if defined(ESP_PLATFORM) && defined(TESLA_PSRAM_PLACEMENT) && TESLA_PSRAM_PLACEMENT
+    // T1r9 LAB: the owning lifecycle Context lives in PSRAM; the spinlock must stay internal. Exactly one
+    // TeslaBleDiscovery exists (BluetoothLifecycle::owner CAS), so a static internal .bss lock is equivalent.
+    static inline portMUX_TYPE mutex=portMUX_INITIALIZER_UNLOCKED;
+#elif defined(ESP_PLATFORM)
     portMUX_TYPE mutex=portMUX_INITIALIZER_UNLOCKED;
 #else
     std::mutex mutex;

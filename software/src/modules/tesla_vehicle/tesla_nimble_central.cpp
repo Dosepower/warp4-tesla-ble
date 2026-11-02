@@ -1,14 +1,35 @@
 #if defined(TESLA_BLE_USE_NIMBLE) && TESLA_BLE_USE_NIMBLE
 #include "tesla_nimble_central.h"
 #include "bluetooth_memory.h"
+#include "lifecycle_stack_probe.h" // LSP1: empty unless TESLA_LIFECYCLE_STACK_PROBE=1
 #include <cstring>
 #ifndef TESLA_NIMBLE_HOST_TEST
 #include <esp_bt.h>
 #endif
+#if !defined(TESLA_NIMBLE_HOST_TEST) || defined(TESLA_NIMBLE_DISPATCH_HOST_BINDING)
+#include "tesla_nimble_dispatch.h"
+#if defined(TESLA_NIMBLE_DISPATCH_BOUND)
+// Production routing: submits from the PSRAM-stack worker run on the internal-stack dispatcher helper;
+// host stop/deinit are interlocked with abandoned/quarantined bounced calls (tesla_nimble_dispatch.cpp).
+#define ble_gap_connect tesla_nimble_dispatch::gap_connect
+#define ble_gap_terminate tesla_nimble_dispatch::gap_terminate
+#define ble_gap_conn_cancel tesla_nimble_dispatch::gap_conn_cancel
+#define ble_gattc_write_flat tesla_nimble_dispatch::gattc_write_flat
+#define ble_gattc_disc_svc_by_uuid tesla_nimble_dispatch::gattc_disc_svc_by_uuid
+#define ble_gap_disc tesla_nimble_dispatch::gap_disc
+#define ble_gap_disc_cancel tesla_nimble_dispatch::gap_disc_cancel
+#define ble_gattc_disc_all_chrs tesla_nimble_dispatch::gattc_disc_all_chrs
+#define ble_gattc_disc_all_dscs tesla_nimble_dispatch::gattc_disc_all_dscs
+#define nimble_port_stop tesla_nimble_dispatch::port_stop
+#define nimble_port_deinit tesla_nimble_dispatch::port_deinit
+#endif
+#endif
 std::atomic<TeslaNimbleCentral *> TeslaNimbleCentral::owner{nullptr};
 namespace {
-ble_uuid128_t uuid(uint8_t suffix){ble_uuid128_t u{};u.u.type=BLE_UUID_TYPE_128;const uint8_t a[16]={0x1e,0xb9,0xf8,0xeb,0x0c,0x96,0x88,0x9b,0xf0,0x43,0xd1,0xb2,suffix,0x02,0,0};memcpy(u.value,a,16);return u;}
-const auto service_uuid=uuid(0x11),write_uuid=uuid(0x12),notify_uuid=uuid(0x13);
+// Constant initialization keeps the unchanged UUID bytes in flash rodata.
+constexpr ble_uuid128_t uuid(uint8_t suffix){return {{BLE_UUID_TYPE_128},{0x1e,0xb9,0xf8,0xeb,0x0c,0x96,0x88,0x9b,0xf0,0x43,0xd1,0xb2,suffix,0x02,0,0}};}
+constexpr auto service_uuid=uuid(0x11),write_uuid=uuid(0x12),notify_uuid=uuid(0x13);
+static_assert(service_uuid.value[12]==0x11 && write_uuid.value[12]==0x12 && notify_uuid.value[12]==0x13, "Tesla UUID suffixes must not change");
 }
 bool TeslaNimbleCentral::initialize(Handler h){
  TeslaNimbleCentral *expected=nullptr;if(!owner.compare_exchange_strong(expected,this))return false;
@@ -215,11 +236,11 @@ int TeslaNimbleCentral::gap(ble_gap_event *e,void *arg){
  }return 0;
 }
 bool TeslaNimbleCentral::scan_tick(uint32_t now){
- using D=TeslaBleDiscovery;auto a=discovery.step(now);if(a==D::Action::Retire){failed=true;return false;}
- if(a==D::Action::Params){for(auto &ad:advertisements)ad={};next_advertisement=0;for(auto &ad:scannable)ad={};next_scannable=0;discovery.event(D::Event::Params,ready());}
+ using D=TeslaBleDiscovery;auto a=discovery.step(now);if(a==D::Action::Retire){failed=true;lifecycle_stack_probe::self(lifecycle_stack_probe::Stage::ScanRetire);return false;}
+ if(a==D::Action::Params){for(auto &ad:advertisements)ad={};next_advertisement=0;for(auto &ad:scannable)ad={};next_scannable=0;discovery.event(D::Event::Params,ready());lifecycle_stack_probe::self(lifecycle_stack_probe::Stage::ScanParams);}
  if(a==D::Action::Start){ble_gap_disc_params p{};p.itvl=0x50;p.window=0x30;p.passive=0;p.filter_duplicates=1;
-  int rc=ble_gap_disc(own_type,D::SCAN_SECONDS*1000,&p,scan,this);discovery.submitted(a,rc==0);discovery.event(D::Event::Start,rc==0);}
- if(a==D::Action::Stop){int rc=ble_gap_disc_cancel();discovery.submitted(a,rc==0);discovery.event(D::Event::Stop,rc==0);}
+  int rc=ble_gap_disc(own_type,D::SCAN_SECONDS*1000,&p,scan,this);discovery.submitted(a,rc==0);discovery.event(D::Event::Start,rc==0);lifecycle_stack_probe::self(lifecycle_stack_probe::Stage::ScanStart);}
+ if(a==D::Action::Stop){int rc=ble_gap_disc_cancel();discovery.submitted(a,rc==0);discovery.event(D::Event::Stop,rc==0);lifecycle_stack_probe::self(lifecycle_stack_probe::Stage::ScanStop);}
  return true;
 }
 int TeslaNimbleCentral::scan(ble_gap_event *e,void *arg){

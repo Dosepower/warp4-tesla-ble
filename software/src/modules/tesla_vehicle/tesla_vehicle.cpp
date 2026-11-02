@@ -1,5 +1,9 @@
 #include "tesla_vehicle.h"
+#include "tesla_nimble_dispatch.h"
+#include "tesla_worker_psram.h"
+#include "tesla_worker_start.h"
 #include "bluetooth_memory.h"
+#include "lifecycle_stack_probe.h"
 
 #include <algorithm>
 #include <cmath>
@@ -37,6 +41,7 @@ extern WebServer server;
 #include "tesla_ble_config_policy.h"
 #include "tesla_ble_result.h"
 #include "tesla_ble_key_command.h"
+#include "tesla_config_string.h"
 #include "tesla_ble_presence.h"
 
 
@@ -87,10 +92,34 @@ static std::array<uint8_t, 6> encode_vehicle_mac(uint64_t mac)
 #include "tesla_auto_poll.inc"
 #endif
 
+#if TESLA_LIFECYCLE_STACK_PROBE
+// LSP1 publisher sink: formatting/logging happens only here, on the main loop stack (never on the measured tasks).
+#ifdef TESLA_BLE_MODULE_HOST_TEST
+// Host module test only (same pattern as host_pair_trace_log): no Logger in the host model; count + stdout.
+static unsigned lsp_host_sink_lines = 0;
+#define LSP_SINK_PRINTFLN(...) (++lsp_host_sink_lines, std::printf(__VA_ARGS__), std::printf("\n"))
+#else
+#define LSP_SINK_PRINTFLN(...) logger.printfln(__VA_ARGS__)
+#endif
+static void lsp_log(int kind, const char *what, uint32_t a, uint32_t b, uint32_t c, uint32_t d)
+{
+    if (kind == 1) { LSP_SINK_PRINTFLN("LSP1 stage=%s n=%lu last=%lu min=%lu of=%lu", what, (unsigned long)a, (unsigned long)b, (unsigned long)c, (unsigned long)d); }
+    else if (kind == 2) { LSP_SINK_PRINTFLN("LSP1 summary at=%s lifecycle_min=%lu host_min=%lu pre_delete=%lu dropped=%lu", what, (unsigned long)a, (unsigned long)b, (unsigned long)c, (unsigned long)d); }
+    else if (kind == 0) { LSP_SINK_PRINTFLN("LSP1 table=%s state=%lu external=%lu bytes=%lu dropped=%lu", what, (unsigned long)a, (unsigned long)b, (unsigned long)c, (unsigned long)d); }
+    else { LSP_SINK_PRINTFLN("LSP1 budget exhausted lines=%lu dropped=%lu", (unsigned long)a, (unsigned long)b); }
+}
+#endif
+
 
 void TeslaVehicle::pre_setup()
 {
+#if BLUETOOTH_MEMORY_EXTERNAL_TABLE
+    // T1r10 LAB: one-time PSRAM sample-table allocation before the Boot sample and before any sampling task exists.
+    // Failure is non-fatal for Tesla: diagnostics report state=failed and samples are dropped/counted.
+    bluetooth_memory::init();
+#endif
     bluetooth_memory::sample(bluetooth_memory::Stage::Boot);
+    lifecycle_stack_probe::init(); // LSP1: one PSRAM block before any lifecycle/host task exists; no-op when off
     bluetooth_config = Config::Object({{"enable", Config::Bool(false)}});
     bluetooth_update = Config::Object({{"enable", Config::Bool(false)}});
     bluetooth_state = Config::Object({
@@ -159,7 +188,7 @@ bool TeslaVehicle::prepare_tesla()
         strlcpy(address, address_text.c_str(), sizeof(address));
         for (char &c : vin) { c = static_cast<char>(std::toupper(static_cast<unsigned char>(c))); }
         for (char &c : address) { c = static_cast<char>(std::toupper(static_cast<unsigned char>(c))); }
-        if (!update.get("vin")->updateStringChecked(vin) || !update.get("ble_address")->updateStringChecked(address)) {
+        if (!tesla_update_string_checked(update.get("vin"), vin) || !tesla_update_string_checked(update.get("ble_address"), address)) {
             return String("OOM");
         }
 
@@ -416,8 +445,20 @@ void TeslaVehicle::register_bluetooth_urls()
 #if WARP_TESLA_MEMORY_PHASES && !defined(TESLA_BLE_MODULE_HOST_TEST)
     server.on_HTTPThread("/bluetooth/memory", HTTP_GET, [](WebServerRequest request) {
         request.beginChunkedResponse_json(200);
-        request.sendChunk("{\"version\":1,\"stack_unit\":\"bytes\",\"samples\":[");
         char buffer[512];
+#if BLUETOOTH_MEMORY_EXTERNAL_TABLE
+        const auto table=bluetooth_memory::status();
+        snprintf(buffer,sizeof(buffer),"{\"version\":1,\"stack_unit\":\"bytes\",\"table\":{\"state\":\"%s\",\"ready\":%s,"
+                 "\"external\":%s,\"bytes\":%lu,\"dropped\":%lu},\"samples\":[",bluetooth_memory::state_name(table.state),
+                 table.ready?"true":"false",table.external?"true":"false",(unsigned long)table.bytes,(unsigned long)table.dropped);
+        request.sendChunk(buffer);
+        if(!table.ready) { // Fail closed: diagnostics explicitly unavailable, never partial or fabricated rows.
+            request.sendChunk("]}");
+            return request.endChunkedResponse();
+        }
+#else
+        request.sendChunk("{\"version\":1,\"stack_unit\":\"bytes\",\"samples\":[");
+#endif
         for(unsigned i=0;i<static_cast<unsigned>(bluetooth_memory::Stage::Count);++i) {
             if(!bluetooth_memory::json(static_cast<bluetooth_memory::Stage>(i),buffer,sizeof(buffer))) {
                 return request.endChunkedResponse(); // Fixed maximum row, truncation never serialized.
@@ -741,7 +782,7 @@ void TeslaVehicle::publish_discovery()
             if(!strcmp(t.name,s.scope.name)) { (t.connectable ? vin_connectable : vin_not_connectable)=true; }
             snprintf(address,sizeof(address),"%02X:%02X:%02X:%02X:%02X:%02X",t.address[0],t.address[1],t.address[2],t.address[3],t.address[4],t.address[5]);
             auto row=rows->get(i);
-            ok=row->get("name")->updateStringChecked(t.name) && row->get("ble_address")->updateStringChecked(address);
+            ok=tesla_update_string_checked(row->get("name"), t.name) && tesla_update_string_checked(row->get("ble_address"), address);
             row->get("rssi")->updateInt(t.rssi);
             row->get("ble_address_type")->updateUint(t.address_type);
             row->get("matches_vin")->updateBool(bluetooth.discovery_matches(s.scope,s.revision,t.address,t.address_type));
@@ -811,7 +852,14 @@ bool TeslaVehicle::start_runtime(bool storage_only)
                 const size_t size = rx ? sizeof(RxFragment) : sizeof(ModuleEvent);
                 const size_t depth = rx ? RX_QUEUE_DEPTH : 8;
                 rx = false;
+#if defined(TESLA_PSRAM_PLACEMENT) && TESLA_PSRAM_PLACEMENT
+                const QueueHandle_t q = xQueueCreateWithCaps(depth, size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+                if (q) { tesla_psram::note(depth == RX_QUEUE_DEPTH ? tesla_psram::RxQueue : tesla_psram::EventQueue, q, depth * size); }
+                else { tesla_psram::stats.failures.fetch_add(1); }
+                return q;
+#else
                 return xQueueCreate(depth, size);
+#endif
             })) {
             publish_error("Failed to allocate BLE queues");
             return nullptr;
@@ -853,7 +901,15 @@ bool TeslaVehicle::start_runtime(bool storage_only)
         r.epoch = tesla->runtime_owner.epoch();
         r.session.publish(current_ev_identity());
         tesla->callback_gate.open();
+#if defined(TESLA_WORKER_PSRAM_STACK) && TESLA_WORKER_PSRAM_STACK
+#if defined(TESLA_STORAGE_EXECUTOR) && TESLA_STORAGE_EXECUTOR
+        if (tesla_worker_start::start(task_entry, this, &r.task_handle) != pdPASS) {
+#else
+        if (tesla_worker_psram::create(task_entry, this, &r.task_handle) != pdPASS) {
+#endif
+#else
         if (xTaskCreatePinnedToCore(task_entry, "tesla_ble", 12288, this, 1, &r.task_handle, 0) != pdPASS) {
+#endif
             tesla->callback_gate.close();
             r.task_handle = nullptr;
             publish_error("Failed to start Tesla BLE task");
@@ -869,12 +925,12 @@ bool TeslaVehicle::create_vehicle()
 {
     Runtime *r = tesla->runtime_owner.get();
     r->vehicle.reset();
-    r->keys.reset(new (std::nothrow) tesla_clean::IdentityStore);
+    r->keys.reset(tesla_psram::create<tesla_clean::IdentityStore>(tesla_psram::Keys, tesla_psram::allocation(tesla_psram::KeyMaterial)));
     if (!r->keys || !r->storage->initialize_identity(*r->keys, {TeslaBleTransportAdapter::random, nullptr}, false) ||
         TeslaBleTransportAdapter::random(nullptr, r->routing_address.data(), r->routing_address.size()) != 0) { return false; }
-    r->vehicle.reset(new (std::nothrow) tesla_clean::Vehicle(*r->keys,
-        {reinterpret_cast<const uint8_t *>(r->vin.c_str()), 17},
-        {r->routing_address.data(), r->routing_address.size()}, r->transport_adapter.ports()));
+    r->vehicle.reset(tesla_psram::create<tesla_clean::Vehicle>(tesla_psram::Vehicle, *r->keys,
+        tesla_clean::Bytes{reinterpret_cast<const uint8_t *>(r->vin.c_str()), 17},
+        tesla_clean::Bytes{r->routing_address.data(), r->routing_address.size()}, r->transport_adapter.ports()));
     bluetooth_memory::sample(bluetooth_memory::Stage::ProtocolReady,true);
     return r->vehicle != nullptr;
 }
@@ -887,6 +943,9 @@ void TeslaVehicle::task_entry(void *context)
 void TeslaVehicle::task_loop()
 {
     bluetooth_memory::sample(bluetooth_memory::Stage::WorkerBegin,true);
+#if defined(TESLA_WORKER_PSRAM_STACK) && TESLA_WORKER_PSRAM_STACK
+    tesla_worker_psram::worker_begin();
+#endif
     Runtime *r = tesla->runtime_owner.get();
     if (!r->stop_requested.load()) {
         r->worker_watch.begin(millis());
@@ -1049,6 +1108,9 @@ bool TeslaVehicle::release_bluetooth(Runtime &r)
 void TeslaVehicle::teardown_entry(void *context)
 {
     auto *owner = static_cast<TeslaVehicle *>(context);
+#if defined(TESLA_WORKER_PSRAM_STACK) && TESLA_WORKER_PSRAM_STACK && defined(TESLA_PSRAM_PLACEMENT) && TESLA_PSRAM_PLACEMENT
+    tesla_worker_psram::teardown_begin(); // records live SP region (proof only)
+#endif
     Runtime *r = owner->tesla->runtime_owner.get();
     const bool ok = owner->release_bluetooth(*r);
     bluetooth_memory::sample(bluetooth_memory::Stage::TeardownStopped,true);
@@ -1114,10 +1176,22 @@ void TeslaVehicle::stop_runtime()
         }
     }
     const auto completion = r->teardown.poll(millis(), stopped, tesla->callback_gate.drained(), [this, r]() {
+#if defined(TESLA_WORKER_PSRAM_STACK) && TESLA_WORKER_PSRAM_STACK
+#if defined(TESLA_STORAGE_EXECUTOR) && TESLA_STORAGE_EXECUTOR
+        tesla_worker_start::destroy(r->task_handle);
+#else
+        tesla_worker_psram::destroy(r->task_handle);
+#endif
+#else
         vTaskDelete(r->task_handle);
+#endif
         r->task_handle = nullptr;
+#if defined(TESLA_WORKER_PSRAM_STACK) && TESLA_WORKER_PSRAM_STACK && defined(TESLA_PSRAM_PLACEMENT) && TESLA_PSRAM_PLACEMENT
+        return tesla_worker_psram::create_teardown(teardown_entry, this, &r->teardown_handle) == pdPASS; // T1r11 PSRAM stack
+#else
         return xTaskCreatePinnedToCore(teardown_entry, "tesla_teardown", 4096, this, 1,
                                        &r->teardown_handle, 0) == pdPASS;
+#endif
     });
     if (completion == TeslaBleTeardown::Result::Failed) {
         tesla->runtime_owner.require_restart();
@@ -1139,7 +1213,11 @@ void TeslaVehicle::stop_runtime()
     if (completion != TeslaBleTeardown::Result::Succeeded) { return; }
     if (!stop_state) { return; } // Retain ownership; retry classification without waiting.
     if (r->teardown_handle != nullptr) {
+#if defined(TESLA_WORKER_PSRAM_STACK) && TESLA_WORKER_PSRAM_STACK && defined(TESLA_PSRAM_PLACEMENT) && TESLA_PSRAM_PLACEMENT
+        tesla_worker_psram::destroy_teardown(r->teardown_handle); // matches create_teardown (WithCaps)
+#else
         vTaskDelete(r->teardown_handle);
+#endif
         r->teardown_handle = nullptr;
     }
     if (tesla->runtime_owner.finish_stop(stopped, tesla->callback_gate.drained(), r->controller_used || r->supervision_failed,
@@ -1300,7 +1378,7 @@ void TeslaVehicle::process_commands()
                     r->trace_stage(Runtime::TraceStage::Verifying);
                     queue_pair_trace(command, "sent");
                 } else { cancel_pairing("Tesla pairing transmission failed; approval not authenticated", command); }
-            });
+            }, tesla_psram::allocation(tesla_psram::Callback));
             r->pair_sending = ready &&
 #if TESLA_BLE_MANUAL_VEHICLE_UI
                 runtime_binding_matches(true) &&
@@ -1517,7 +1595,7 @@ void TeslaVehicle::request_soc(bool manual)
         }
         r->in_flight_started_ms = 0;
         r->manual_poll_pending.store(false);
-    });
+    }, tesla_psram::allocation(tesla_psram::Callback));
     const bool accepted = ready && r->vehicle->charge_state_poll(decision.allow_wake ? tesla_clean::WakePolicy::WakeIfNeeded
                                                    : tesla_clean::WakePolicy::NoWakeSkip, r->in_flight.request, std::move(completion),
                                                    SOC_POLL_TIMING);
@@ -1616,7 +1694,7 @@ void TeslaVehicle::process_pair_verification()
             // yet. Keep the original pairing deadline; never re-send PRESENT_KEY.
             r->pair_next_ms = millis() + 1000;
         }
-    })) {
+    }, tesla_psram::allocation(tesla_psram::Callback))) {
         r->pair_next_ms = millis() + 1000;
         return;
     }
@@ -1950,7 +2028,7 @@ void TeslaVehicle::publish_error(const char *message)
 
 void TeslaVehicle::flush_error()
 {
-    if (tesla->error_pending && tesla->state.get("last_error")->updateStringChecked(tesla->pending_error)) { tesla->error_pending = false; }
+    if (tesla->error_pending && tesla_update_string_checked(tesla->state.get("last_error"), tesla->pending_error)) { tesla->error_pending = false; }
 }
 
 void TeslaVehicle::loop()
@@ -1979,6 +2057,9 @@ void TeslaVehicle::loop()
     return; // No Tesla runtime, EV/session, key/storage or old bench operations.
 #endif
     bluetooth.supervise();
+#if TESLA_LIFECYCLE_STACK_PROBE
+    lifecycle_stack_probe::publish(lsp_log); // LSP1: main-loop logger, bounded
+#endif
 #if TESLA_BLE_MANUAL_VEHICLE_UI
     publish_discovery();
 #endif
@@ -1995,11 +2076,15 @@ void TeslaVehicle::loop()
         bluetooth.request_stop();
         if (bluetooth.stopped()) {
             bluetooth_restart_pending = false;
+#if TESLA_LIFECYCLE_STACK_PROBE
+            lifecycle_stack_probe::publish(lsp_log); // LSP1: main-loop logger, bounded
+#endif
             trigger_reboot("Bluetooth verified teardown");
         }
         return; // Failure/timeout retains ownership, never acknowledges reboot.
     }
     if (!tesla) { return; }
+    consume_dispatch_quarantine();
     flush_error();
 #if TESLA_BLE_MANUAL_VEHICLE_UI
     publish_profile();
@@ -2088,6 +2173,33 @@ void TeslaVehicle::loop()
     }
     r->session.publish(current_ev_identity());
     process_module_events();
+}
+
+// A bounced NimBLE call whose dispatcher deadline expired has an UNKNOWN controller outcome; the dispatcher keeps the
+// helper/job, refuses further submits and refuses host stop/deinit for the rest of the boot. The central reports that
+// rc as an ordinary submit failure, so main mirrors the latch here: permanent runtime restart latch, truthful terminal
+// state/error, and a stop request through the existing teardown (which retains ownership when the host stop is refused).
+// Never retries, scans, pairs, polls, connects, reboots, aborts the helper or releases cookie/context.
+void TeslaVehicle::consume_dispatch_quarantine()
+{
+    if (!tesla || !tesla_nimble_dispatch_quarantined()) { return; }
+    tesla->runtime_owner.require_restart();
+    tesla->state.get("restart_required")->updateBool(true);
+    Runtime *r = tesla->runtime_owner.get();
+    const bool first_cause = r == nullptr || !r->supervision_failed;
+    if (r != nullptr) {
+        if (!r->supervision_failed) {
+            tesla->state.get("timeout_cause")->updateString("controller_call_unknown");
+            tesla->state.get("timeout_operation")->updateUint(0);
+            tesla->state.get("timeout_elapsed_ms")->updateUint(0);
+        }
+        r->supervision_failed = true;
+        r->stop_requested.store(true);
+    }
+    if (!dispatch_quarantine_reported) {
+        dispatch_quarantine_reported = true;
+        if (first_cause) { publish_error("Tesla BLE controller call outcome unknown; ownership retained; reboot required"); }
+    }
 }
 
 void TeslaVehicle::publish_bluetooth_state()
@@ -2350,4 +2462,15 @@ void TeslaVehicle::process_module_events()
         tesla->state.get("paired")->updateBool(r->authorized.load());
     }
 #endif
+}
+
+// Official IModule lifecycle event (main.cpp pre_reboot, invoked for every trigger_reboot incl. "firmware update").
+// Controlled Tesla shutdown without touching firmware_update.cpp: latch restart-required (no further prepare/commit/
+// poll admission) and ask the worker to stop issuing radio/storage operations. Non-blocking; no allocation, flash,
+// NimBLE or Config access here. The chip reset that follows also resets the BT controller.
+void TeslaVehicle::pre_reboot()
+{
+    if (!tesla) { return; }
+    tesla->runtime_owner.require_restart();
+    if (Runtime *r = tesla->runtime_owner.get()) { r->stop_requested.store(true); }
 }

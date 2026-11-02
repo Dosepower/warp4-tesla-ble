@@ -1,0 +1,31 @@
+From b8b1c3ac81cc4566912ffe8ea13ee37f7731b803 Mon Sep 17 00:00:00 2001
+From: feasibility <feasibility@localhost>
+Date: Fri, 30 Oct 2026 22:37:49 +0100
+Subject: [PATCH] heap: Don't reserve manual 6432B DRAM arena at 0x3FFAE6E0
+ when BT is enabled
+
+---
+ components/heap/include/esp_heap_caps.h | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/components/heap/include/esp_heap_caps.h b/components/heap/include/esp_heap_caps.h
+index 4630c577..70ea77e6 100644
+--- a/components/heap/include/esp_heap_caps.h
++++ b/components/heap/include/esp_heap_caps.h
+@@ -54,7 +54,13 @@ extern "C" {
+ 
+ #define MALLOC_CAP_INVALID          (1<<31) ///< Memory can't be used / list end marker
+ 
++/* 0x3FFAE6E0..0x3FFAFF10 is the BT controller ROM .data region (SOC_MEM_BT_DATA_START/END,
++ * reserved as rom_bt_data by components/bt/controller/esp32/bt.c). With Bluetooth enabled,
++ * reserving it again aborts heap init (memory_layout_utils.c: equal/overlapping reserved
++ * regions). The manually managed 6432 B arena is therefore only available without BT. */
++#if !CONFIG_BT_ENABLED
+ #define MANUALLY_RESERVED_6432B_AT_0x3FFAE6E0_DRAM
++#endif
+ #define MANUALLY_RESERVED_15072B_AT_0x3FFE0440_DRAM
+ #define MANUALLY_RESERVED_8192B_AT_0x4009E000_IRAM
+ 
+-- 
+2.47.3
+

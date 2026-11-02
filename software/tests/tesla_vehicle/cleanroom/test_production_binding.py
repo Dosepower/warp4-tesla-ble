@@ -26,7 +26,7 @@ assert 'tesla_clean::Vehicle' in main
 assert 'tesla_clean::WakePolicy::NoWakeSkip' in main
 assert 'result.authenticated' in main and 'result.generation' in main
 assert 'ev.get_active_ev_mac()' in main and 'ev.set_soc(soc)' in main
-ini=(root/'software/warp4_tesla_ble.ini').read_text()
+ini=(root/'software/warp4_tesla.ini').read_text()
 assert 'lib_ignore = TeslaBLE' in ini
 assert 'TeslaBLEClean' in ini
 print('Clean production source contract passed (not interoperability evidence)')

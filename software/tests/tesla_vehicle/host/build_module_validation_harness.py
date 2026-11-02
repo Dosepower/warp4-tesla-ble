@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Exact Tesla validator/commands with actual WString and checked Config bodies.
+"""Exact Tesla validator/commands with actual WString, Config bodies and the
+Tesla-owned tesla_update_string_checked helper.
 Config tree/registration/RTOS are bounded native boundaries, not full ConfigRoot.
 The second build models the target's 14-character SSO on a 64-bit native ABI.
 Only scratch copies are adapted; framework sources are never written.
@@ -51,13 +52,15 @@ struct Config {
         for (unsigned n=0; n<6; ++n) { if (!std::strcmp(name, keys[n])) { assert(leaves); return leaves+n; } }
         std::abort();
     }
-    const String &asString() const {return string.slot.text;}
-    bool updateStringChecked(const char *s) {return string.updateStringChecked(s);}
+    const String &asString() const {return string.asString();}
     bool asBool() const {return boolean;}
     int asInt() const {return integer;}
     unsigned asUint() const {return integer;}
     void updateBool(bool v) {boolean=v;}
 };
+// Bounded tree boundary: leaf pointers route to the production helper on the
+// adapter Config (production get() returns Config::Wrap to the same helper).
+inline bool tesla_update_string_checked(Config *leaf, const char *val) { return leaf != nullptr && tesla_update_string_checked(leaf->string, val); }
 struct Runtime {
     std::atomic<bool> pair_requested{false}, poll_requested{false}, forget_requested{false}, manual_poll_pending{false};
     TeslaBleSession session;
@@ -116,7 +119,7 @@ header += definition(source, 'void TeslaVehicle::request_poll(') + '\n'
 header += definition(source, 'void TeslaVehicle::register_tesla_urls()') + '\n'
 header += definition(source, 'void TeslaVehicle::register_urls()') + '\n'
 (out / 'module_validation_definitions.inc').write_text(header)
-inputs = [module, core / 'WString.cpp', core / 'WString.h', repo / 'software/src/config.cpp', repo / 'software/src/config.h']
+inputs = [module, core / 'WString.cpp', core / 'WString.h', repo / 'software/src/config.cpp', repo / 'software/src/config.h', repo / 'software/src/modules/tesla_vehicle/tesla_config_string.h']
 (out / 'module-validation-hashes.json').write_text(json.dumps({str(p): hashlib.sha256(p.read_bytes()).hexdigest() for p in inputs}, indent=2)+'\n')
 for target_layout in (False, True):
     variant = out / ('target-sso' if target_layout else 'native-sso')
