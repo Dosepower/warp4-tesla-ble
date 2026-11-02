@@ -6,7 +6,8 @@ This development branch preserves the current minimal WARP 2.13.6 Tesla work sep
 
 - **Wallbox target:** `warp4_tesla`. Physical vehicle/session/profile checks remain required. This branch does not authorize installation on a secured production charger.
 - **Brick laboratory target:** `warp4_tesla_stack_probe`. Full WARP application with bounded heap/arena diagnostics and lifecycle measurements, intended only for a separately recoverable ESP32 Ethernet Brick without EVSE.
-- **Still pending:** an explicitly lab-only, fail-closed profile/session test facility for pairing on a brick without EVSE. The currently archived build still enforces the physical-profile gate; do not claim that standalone brick pairing already works.
+- **Brick-only pairing fixture:** `warp4_tesla_brick`, explicitly compiled with `TESLA_BRICK_SESSION_TEST=1`. The build guard rejects every definition of this macro outside that target, and rejects missing/noncanonical/duplicate definitions inside it. An explicit volatile `PUT tesla_vehicle/brick_session` selects an existing exact EV/Tesla profile without a cable. Runtime checks require `config_type=brick`, no EVSE feature, secure boot and flash encryption off, and autocharge off. Synthetic identity is never persisted or enabled at boot. VIN/BLE/key binding and authenticated pairing are unchanged. Automatic polls/wakes are disabled on this target; manual outcome publication remains. `warp4_tesla` retains the real physical-profile gate.
+- **Installed laboratory fixture:** `2.13.6+6ae8e0d7`; brick identity/profile activation, connected MQTT and active Bluetooth read back. Boot validation and actual authenticated vehicle pairing/SoC remain separate acceptance gates. This is not a production release.
 
 No vehicle keys, MQTT credentials, VINs, device backups, coredumps or compiled firmware are published here. This is a sanitized source checkpoint, not a ready-to-flash release.
 

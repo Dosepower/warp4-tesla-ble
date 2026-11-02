@@ -43,6 +43,13 @@ extern WebServer server;
 #include "tesla_ble_key_command.h"
 #include "tesla_config_string.h"
 #include "tesla_ble_presence.h"
+#if defined(TESLA_BRICK_SESSION_TEST) && TESLA_BRICK_SESSION_TEST
+#include "tesla_brick_session_policy.h"
+#include <esp_secure_boot.h>
+#include <esp_flash_encrypt.h>
+#include "modules/iso15118/iso15118.h"
+extern ISO15118 iso15118;
+#endif
 
 
 // SoC poll timing: explicit per-phase budgets inside a 90 s absolute bound
@@ -620,6 +627,35 @@ void TeslaVehicle::request_poll(int index, String &errmsg)
 void TeslaVehicle::register_tesla_urls()
 {
 #if TESLA_BLE_MANUAL_VEHICLE_UI
+#if defined(TESLA_BRICK_SESSION_TEST) && TESLA_BRICK_SESSION_TEST
+    // Explicit, volatile laboratory session only. The production target cannot
+    // compile this command. Existing VIN/BLE binding, namespaces and crypto stay intact.
+    static ConfigRoot brick_session = Config::Object({
+        {"enable", Config::Bool(false)}, {"ev_index", Config::Int(-1, -1, EV_MAX_EVS - 1)},
+    });
+    api.addFeature("tesla_brick_session_test");
+    api.addCommand("tesla_vehicle/brick_session", &brick_session, {}, [this](Language, String &errmsg) {
+        const Config *version = api.getState("info/version", false);
+        if (!version || !tesla_brick_session_allowed(version->get("config_type")->asString().c_str(),
+                api.hasFeature("evse"), api.hasFeature("evse_v2"), esp_secure_boot_enabled(),
+                esp_flash_encryption_enabled(), iso15118.is_autocharge())) {
+            errmsg = "Brick test session refused on this hardware"; return;
+        }
+        if (!discovery_allowed() || (tesla && tesla->runtime_owner.get())) {
+            errmsg = "Stop Tesla operation before changing brick test session"; return;
+        }
+        if (!brick_session.get("enable")->asBool()) { ev.on_ev_disconnected(); return; }
+        const int index = brick_session.get("ev_index")->asInt();
+        const uint64_t mac = ev.get_profile_mac(index);
+        auto *profile = find_profile(index);
+        if (index < 0 || !mac || !profile ||
+            profile_mac_value(profile->get("ev_mac")->asString().c_str()) != mac) {
+            errmsg = "Exact existing Tesla/EV profile required"; return;
+        }
+        const auto bytes = encode_vehicle_mac(mac);
+        ev.on_ev_connected(bytes.data(), false); // Simulated physical identity ONLY on guarded lab target.
+    }, true);
+#endif
     api.addPersistentConfig("tesla_vehicle/profiles", &tesla->profiles, {}, {"entries"});
 #else
     api.addPersistentConfig("tesla_vehicle/config", &tesla->config, {}, {"vin", "ble_address"});

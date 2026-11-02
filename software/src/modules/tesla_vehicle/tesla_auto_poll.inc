@@ -170,6 +170,12 @@ void TeslaVehicle::auto_poll()
             }
         }
     }
+#if defined(TESLA_BRICK_SESSION_TEST) && TESLA_BRICK_SESSION_TEST
+    // A synthetic bench session must never schedule an automatic wake/poll.
+    // Completed manual outcomes above remain published.
+    auto_poll_publish("off");
+    return;
+#endif
     const auto live = ev.get_live_identity();
     const TeslaBleIdentity id{live.generation, live.index, live.mac};
     Config *p = live.index >= 0 && live.mac ? find_profile(live.index) : nullptr;

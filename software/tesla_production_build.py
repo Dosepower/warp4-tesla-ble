@@ -8,13 +8,21 @@ for token in ('BENCH', 'CANONICAL', 'IRAM_DIAGNOSTICS', 'RADIO_SPIKE', '--wrap='
               '_LAB', 'WARP_TESLA_MEMORY_PHASES'):
     if token in flags:
         raise ValueError('Nonproduction feature in WARP4 Tesla target: ' + token)
-# LSP1: the lifecycle stack probe is allowed ONLY in the isolated measurement env, never in warp4_tesla/production.
-if 'TESLA_LIFECYCLE_STACK_PROBE' in flags and env['PIOENV'] != 'warp4_tesla_stack_probe':
+diagnostic_envs = ('warp4_tesla_stack_probe', 'warp4_tesla_brick')
+brick_macro_present = 'TESLA_BRICK_SESSION_TEST' in flags
+if env['PIOENV'] != 'warp4_tesla_brick' and brick_macro_present:
+    raise ValueError('Brick session test macro is forbidden outside warp4_tesla_brick')
+if env['PIOENV'] == 'warp4_tesla_brick' and (
+        flags.count('TESLA_BRICK_SESSION_TEST') != 1 or
+        '-DTESLA_BRICK_SESSION_TEST=1' not in flags.split()):
+    raise ValueError('Brick target requires exactly one TESLA_BRICK_SESSION_TEST=1 definition')
+# LSP1: allowed only in explicitly isolated measurement targets.
+if 'TESLA_LIFECYCLE_STACK_PROBE' in flags and env['PIOENV'] not in diagnostic_envs:
     raise ValueError('Lifecycle stack probe outside the isolated warp4_tesla_stack_probe env')
 if env['PIOENV'] == 'warp4_tesla_stack_probe' and '-DTESLA_LIFECYCLE_STACK_PROBE=1' not in flags:
     raise ValueError('warp4_tesla_stack_probe requires -DTESLA_LIFECYCLE_STACK_PROBE=1')
 # HAP1: the heap/arena walk probe is allowed ONLY in the isolated measurement env.
-if 'WARP_HEAP_ARENA_PROBE' in flags and env['PIOENV'] != 'warp4_tesla_stack_probe':
+if 'WARP_HEAP_ARENA_PROBE' in flags and env['PIOENV'] not in diagnostic_envs:
     raise ValueError('Heap/arena probe outside the isolated warp4_tesla_stack_probe env')
 EXCLUDED = ('tesla_ble_radio_spike.cpp', 'tesla_ble_iram_diagnostics.cpp', 'bluetooth_master_bench.cpp', 'r13_psram_policy.cpp')
 def source_review(env, node):
