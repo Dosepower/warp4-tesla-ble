@@ -20,6 +20,7 @@ extern std::function<int(const char *, const std::string &)> vfs_bridge_fault;
 #include "host/card_confirm_access.h"
 struct TeslaBleModuleTest {
  static void remote_ui_path(TeslaVehicle &m){
+#if WARP_FEATURE_REMOTE
   assert(api.states.count("bluetooth/remote_config"));
   assert(!m.remote_config.get("enable")->asBool());
   HostNimbleDriver driver(m.bluetooth,TeslaVehicle::gatt_callback);
@@ -46,6 +47,11 @@ struct TeslaBleModuleTest {
   m.remote_forget.get("confirmed")->updateBool(true);
   api.commands.at("bluetooth/remote_forget")(0,error);assert(!error.length()&&m.remote_store.count()==0);
   assert(m.remote_bindings.get("entries")->count()==0);
+#else
+  (void)m;
+  assert(!api.states.count("bluetooth/remote_config"));
+  assert(!api.commands.count("bluetooth/remote_start"));
+#endif
  }
  static constexpr uint64_t A=0x112233445500ULL,B=0x112233445501ULL;
  static void entry(Config *p,int index) {
@@ -70,8 +76,10 @@ struct TeslaBleModuleTest {
   auto *r=m.tesla->runtime_owner.get();r->session.connect();
   auto req=r->session.arm(r->epoch,{ev.generation,ev.index,ev.mac},ev.index);assert(req.request);
   m.post_event(TeslaVehicle::EventType::Soc,nullptr,value,req,true,true);m.process_module_events();
+#if WARP_FEATURE_REMOTE
   unsigned remote_value=0;uint32_t remote_age=0;
   assert(m.remote_soc.read(clock_ms.load(),ev.generation,ev.index,ev.mac,remote_value,remote_age)&&remote_value==(unsigned)std::lround(value)&&remote_age==0);
+#endif
  }
  static void explicit_scan(TeslaVehicle&m,int index){auto*p=m.find_profile(index);p->get("discovery_revision")->updateUint(nimble_vin_scan(m.bluetooth,p->get("vin")->asString().c_str(),index,index?B:A,index?2:1,0));}
  static void native_roundtrip(TeslaVehicle&m){

@@ -1,16 +1,18 @@
 """Execute actual native preflight body; only hardware/config boundaries shimmed."""
 from pathlib import Path
+import os
 import subprocess
 S=Path(__file__).resolve().parents[2]
 
 def test_actual_native_manager_supported_authorization_gate(tmp_path):
+ generated = Path(os.environ.get('REMOTE_TEST_GENERATED_ROOT', S))
  text=(S/'src/modules/evse_common/evse_common.cpp').read_text()
  body=text.split('uint8_t EvseCommon::get_remote_mode_capabilities()',1)[1].split('\nuint32_t EvseCommon::get_evse_version()',1)[0]
  p=tmp_path/'caps.cpp';p.write_text('''#include <cassert>
 #include <cstdint>
 #include <vector>
 #include "manager_mode_observation.h"
-#include "'''+str(S/'src/modules/cm_networking/generated/config_charge_mode.enum.h')+'''"
+#include "'''+str(generated/'src/modules/cm_networking/generated/config_charge_mode.enum.h')+'''"
 #define MODULE_CM_NETWORKING_AVAILABLE() 1
 #define CHARGER_STATE_NOT_PLUGGED_IN 0
 #define CHARGER_STATE_ERROR 4

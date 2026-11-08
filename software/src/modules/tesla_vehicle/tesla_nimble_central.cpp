@@ -7,16 +7,32 @@
 #endif
 std::atomic<TeslaNimbleCentral *> TeslaNimbleCentral::owner{nullptr};
 namespace {
+#if WARP_FEATURE_TESLA
 ble_uuid128_t uuid(uint8_t suffix){ble_uuid128_t u{};u.u.type=BLE_UUID_TYPE_128;const uint8_t a[16]={0x1e,0xb9,0xf8,0xeb,0x0c,0x96,0x88,0x9b,0xf0,0x43,0xd1,0xb2,suffix,0x02,0,0};memcpy(u.value,a,16);return u;}
+#endif
+#if WARP_FEATURE_REMOTE
 ble_uuid128_t remote_uuid(uint8_t suffix){ble_uuid128_t u{};u.u.type=BLE_UUID_TYPE_128;const uint8_t a[16]={0xde,0x53,0x42,0x9a,0xa1,0x76,0x4f,0x7c,0xa0,0x3e,0x72,0x57,suffix,1,0x65,0x9d};memcpy(u.value,a,16);return u;}
+#endif
+#if WARP_FEATURE_TESLA
 const auto service_uuid=uuid(0x11),write_uuid=uuid(0x12),notify_uuid=uuid(0x13);
+#endif
+#if WARP_FEATURE_REMOTE
 const auto remote_service_uuid=remote_uuid(0x11),remote_write_uuid=remote_uuid(0x12),remote_notify_uuid=remote_uuid(0x13);
+#endif
+#if !WARP_FEATURE_TESLA
+const auto &service_uuid=remote_service_uuid,&write_uuid=remote_write_uuid,&notify_uuid=remote_notify_uuid;
+#elif !WARP_FEATURE_REMOTE
+const auto &remote_service_uuid=service_uuid,&remote_write_uuid=write_uuid,&remote_notify_uuid=notify_uuid;
+#endif
 }
 bool TeslaNimbleCentral::initialize(Handler h){
  TeslaNimbleCentral *expected=nullptr;if(!owner.compare_exchange_strong(expected,this))return false;
  handler=h;cookie.owner=this;
  if(esp_bt_controller_get_status()!=ESP_BT_CONTROLLER_STATUS_IDLE || nimble_port_init()!=0){failed=true;return false;}
- initialized=true;ble_npl_event_init(&scan_barrier,remote_scan_barrier,this);
+ initialized=true;
+#if WARP_FEATURE_REMOTE
+ ble_npl_event_init(&scan_barrier,remote_scan_barrier,this);
+#endif
  ble_hs_cfg.sync_cb=sync;ble_hs_cfg.reset_cb=reset;
  // No automatic security initiation, no debug keys/bond deletion. Application
  // authentication/keycard is solely TeslaClean; SMP success never grants it.
@@ -31,7 +47,9 @@ bool TeslaNimbleCentral::quiesce(){
  retiring=true;synchronized=false;
  if(!initialized)return false;
  if(!busy.load())return true;
+#if WARP_FEATURE_REMOTE
  if(remote_scanning.load())return cancel_remote_scan();
+#endif
  // ble_hs_stop counts established links, not an outstanding HCI connect
  // cancel. Keep the host servicing events until that terminal callback.
  const int rc=cancel_open();
@@ -53,7 +71,10 @@ void TeslaNimbleCentral::emit(TeslaNimbleEvent::Kind kind,int status,uint16_t ha
  if(attempt_handler)attempt_handler({kind,cookie.epoch,connection.load(),handle,status,data,size});
  bluetooth_memory::sample(bluetooth_memory::Stage::GattCallback,true,1000);
 }
+#if WARP_FEATURE_TESLA
 bool TeslaNimbleCentral::open(const uint8_t *a,uint8_t type,uint64_t epoch){return !remote_lease.load()&&begin_open(a,type,epoch,false,handler);}
+#endif
+#if WARP_FEATURE_REMOTE
 bool TeslaNimbleCentral::open_remote(const uint8_t *a,uint8_t type,uint64_t epoch,Handler h){
  bool expected=false;
  if(!h||!remote_lease.compare_exchange_strong(expected,true))return false;
@@ -114,6 +135,7 @@ bool TeslaNimbleCentral::release_remote(){
  if(busy.load()||!remote_lease.load())return false;
  remote_lease=false;return true;
 }
+#endif
 bool TeslaNimbleCentral::begin_open(const uint8_t *a,uint8_t type,uint64_t epoch,bool remote,Handler h){
  if(!ready()||!a||type>1||!epoch||discovery.busy()||ble_gap_disc_active())return false;
  bool expected=false;if(!busy.compare_exchange_strong(expected,true))return false;
@@ -282,14 +304,19 @@ int TeslaNimbleCentral::gap(ble_gap_event *e,void *arg){
  }return 0;
 }
 bool TeslaNimbleCentral::scan_tick(uint32_t now){
+#if WARP_FEATURE_TESLA
  if(remote_lease.load())return true;
  using D=TeslaBleDiscovery;auto a=discovery.step(now);if(a==D::Action::Retire){failed=true;return false;}
  if(a==D::Action::Params){for(auto &ad:advertisements)ad={};next_advertisement=0;for(auto &ad:scannable)ad={};next_scannable=0;discovery.event(D::Event::Params,ready());}
  if(a==D::Action::Start){ble_gap_disc_params p{};p.itvl=0x50;p.window=0x30;p.passive=0;p.filter_duplicates=1;
   int rc=ble_gap_disc(own_type,D::SCAN_SECONDS*1000,&p,scan,this);discovery.submitted(a,rc==0);discovery.event(D::Event::Start,rc==0);}
  if(a==D::Action::Stop){int rc=ble_gap_disc_cancel();discovery.submitted(a,rc==0);discovery.event(D::Event::Stop,rc==0);}
+#else
+ (void)now;
+#endif
  return true;
 }
+#if WARP_FEATURE_TESLA
 int TeslaNimbleCentral::scan(ble_gap_event *e,void *arg){
  if(!e||!arg)return 0;auto &c=*static_cast<TeslaNimbleCentral *>(arg);using D=TeslaBleDiscovery;
  if(e->type==BLE_GAP_EVENT_DISC_COMPLETE){c.discovery.event(D::Event::Done,e->disc_complete.reason==0);return 0;}
@@ -314,4 +341,5 @@ int TeslaNimbleCentral::scan(ble_gap_event *e,void *arg){
  }
  bluetooth_memory::sample(bluetooth_memory::Stage::GapCallback,true,1000);return 0;
 }
+#endif
 #endif

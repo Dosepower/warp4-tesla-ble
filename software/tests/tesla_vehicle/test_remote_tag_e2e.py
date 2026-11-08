@@ -4,7 +4,7 @@ Only radio/RTOS/storage boundaries are synthetic; neither peer is a protocol fak
 """
 from pathlib import Path
 import subprocess,os
-S=Path(__file__).resolve().parents[2];TAG=S.parents[1]/'tag'
+S=Path(__file__).resolve().parents[2];TAG=Path(os.environ.get('REMOTE_TEST_TAG_ROOT', S.parents[1]/'tag'))
 MBED=Path(os.environ.get('REMOTE_TEST_MBEDTLS_SOURCE', '.remote-test-deps/remote_test_mbedtls_source'))
 CACHE=Path(os.environ.get('REMOTE_TEST_MBEDTLS_BUILD', '.remote-test-deps/remote_test_mbedtls_build'))
 

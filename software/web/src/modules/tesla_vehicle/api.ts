@@ -1,3 +1,5 @@
+//#include "../../options.inc"
+//#if OPTIONS_WARP_FEATURE_TESLA
 interface TeslaProfile {
     enable: boolean;
     vin: string;
@@ -119,7 +121,9 @@ export interface discovery {
     targets: {name: string; ble_address: string; ble_address_type: number; matches_vin: boolean; rssi: number}[];
 }
 
+//#endif
 //APIPath:bluetooth/
+//#if OPTIONS_WARP_FEATURE_REMOTE
 export interface remote_config___bluetooth { enable: boolean; }
 export interface remote_state___bluetooth {
     phase: 'idle'|'scanning'|'choosing'|'confirm_on_tag'|'consent_untrusted'|'paired_tofu'|'session_complete'|'failed'|'cancelled'|'draining'|'expired';
@@ -133,6 +137,7 @@ export interface remote_forget___bluetooth {id: string; confirmed: boolean;}
 export interface remote_recover___bluetooth {id: string; confirmed: boolean;}
 export interface remote_start___bluetooth {}
 export interface remote_cancel___bluetooth {}
+//#endif
 export interface config___bluetooth { enable: boolean; }
 export interface state___bluetooth {
     supported: boolean;

@@ -6,7 +6,7 @@ from pathlib import Path
 import subprocess,hashlib,json
 from test_remote_crypto import S,MBED,CACHE
 N=Path(os.environ.get('REMOTE_TEST_NCS_ROOT', '.remote-test-deps/remote_test_ncs_root'))
-TAG=S.parents[1]/'tag'
+TAG=Path(os.environ.get('REMOTE_TEST_TAG_ROOT', S.parents[1]/'tag'))
 CC=N/'toolchains/8285d8ad56/opt/zephyr-sdk/gnu/arm-zephyr-eabi/bin/arm-zephyr-eabi-gcc'
 OB=N/'v3.4.1/nrfxlib/crypto/nrf_oberon'
 

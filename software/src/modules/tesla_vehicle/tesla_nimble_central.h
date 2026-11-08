@@ -2,6 +2,7 @@
 #include <atomic>
 #include <cstdint>
 #include <cstddef>
+#include "bluetooth_features.h"
 #include "tesla_ble_discovery.h"
 #ifdef TESLA_NIMBLE_HOST_TEST
 #include "nimble_platform.h"

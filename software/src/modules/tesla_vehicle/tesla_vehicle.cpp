@@ -65,12 +65,7 @@ static TeslaBleIdentity current_ev_identity()
 #endif
 }
 
-static String checked_error_string(const char *message)
-{
-    String text(message);
-    if (!text) { return String("OOM"); } // SSO nonempty rejection.
-    return text;
-}
+
 
 static std::array<uint8_t, 6> encode_vehicle_mac(uint64_t mac)
 {
@@ -82,35 +77,14 @@ static std::array<uint8_t, 6> encode_vehicle_mac(uint64_t mac)
     return bytes;
 }
 
-#include "remote_settings.inc"
+#include "../bluetooth_core/bluetooth_core.inc"
 #include "tesla_profiles.inc"
 #if TESLA_BLE_MANUAL_VEHICLE_UI
 #include "tesla_auto_poll.inc"
 #endif
 
 
-void TeslaVehicle::pre_setup()
-{
-    bluetooth_memory::sample(bluetooth_memory::Stage::Boot);
-    bluetooth_config = Config::Object({{"enable", Config::Bool(false)}});
-    bluetooth_update = Config::Object({{"enable", Config::Bool(false)}});
-    bluetooth_state = Config::Object({
-        {"supported", Config::Bool(bluetooth_supported())},
-        {"unsupported_reason", Config::Str(bluetooth_unsupported_reason(), 0, 32)},
-        {"phase", Config::Str("disabled", 0, 8)},
-        {"restart_required", Config::Bool(false)},
-        {"restart_reason", Config::Str("", 0, 32)},
-        {"persistence_error", Config::Bool(false)},
-        {"legacy_tesla_enabled", Config::Bool(false)},
-    });
-    empty_command = Config::Object({});
-#if TESLA_BLE_USE_NIMBLE
-    remote_pre_setup();
-#endif
-#if TESLA_BLE_R13_MASTER_BENCH
-    bench_state = Config::Object({{"running", Config::Bool(false)}, {"key_presence", Config::Str("unknown", 0, 16)}});
-#endif
-}
+void TeslaVehicle::pre_setup() { BluetoothCore::pre_setup(); }
 
 bool TeslaVehicle::prepare_tesla()
 {
@@ -327,7 +301,7 @@ bool TeslaVehicle::prepare_tesla()
 void TeslaVehicle::setup()
 {
     bool desired = false;
-#if TESLA_BLE_USE_NIMBLE
+#if WARP_FEATURE_REMOTE
     remote_load();
 #endif
     bluetooth_commit_ok = load_bluetooth(desired);
@@ -415,109 +389,7 @@ void TeslaVehicle::bench_serial()
 #endif
 #endif
 
-void TeslaVehicle::register_bluetooth_urls()
-{
-    // Local transaction: addPersistentConfig's void writer cannot confirm commit.
-    api.addState("bluetooth/config", &bluetooth_config);
-    api.addState("bluetooth/state", &bluetooth_state);
-#if TESLA_BLE_USE_NIMBLE
-    remote_register_urls();
-#endif
-#if WARP_TESLA_MEMORY_PHASES && !defined(TESLA_BLE_MODULE_HOST_TEST)
-    server.on_HTTPThread("/bluetooth/memory", HTTP_GET, [](WebServerRequest request) {
-        request.beginChunkedResponse_json(200);
-        request.sendChunk("{\"version\":1,\"stack_unit\":\"bytes\",\"samples\":[");
-        char buffer[512];
-        for(unsigned i=0;i<static_cast<unsigned>(bluetooth_memory::Stage::Count);++i) {
-            if(!bluetooth_memory::json(static_cast<bluetooth_memory::Stage>(i),buffer,sizeof(buffer))) {
-                return request.endChunkedResponse(); // Fixed maximum row, truncation never serialized.
-            }
-            if(i)request.sendChunk(",");
-            request.sendChunk(buffer);
-        }
-        request.sendChunk("]}");
-        return request.endChunkedResponse();
-    });
-#endif
-    api.addCommand("bluetooth/config_update", &bluetooth_update, {}, [this](Language, String &errmsg) {
-        save_bluetooth(bluetooth_update.get("enable")->asBool(), errmsg);
-    }, false);
-    api.addCommand("bluetooth/restart", &empty_command, {}, [this](Language, String &errmsg) {
-        restart_bluetooth(errmsg);
-    }, true);
-}
 
-bool TeslaVehicle::load_bluetooth(bool &desired)
-{
-    BluetoothConfigStore store(BLUETOOTH_CONFIG_PATH, bluetooth_storage_quarantined);
-    const bool ok = store.load(desired);
-    bluetooth_storage_quarantined = store.io_quarantined();
-    return ok;
-}
-
-bool TeslaVehicle::persist_bluetooth(bool desired)
-{
-    BluetoothConfigStore store(BLUETOOTH_CONFIG_PATH, bluetooth_storage_quarantined);
-    const bool ok = store.save(desired);
-    bluetooth_storage_quarantined = store.io_quarantined();
-    return ok;
-}
-
-bool TeslaVehicle::save_bluetooth(bool desired, String &errmsg)
-{
-#if TESLA_BLE_MANUAL_VEHICLE_UI
-    if(bluetooth.discovery_busy()) { errmsg=checked_error_string("Search in progress");return false; }
-#endif
-    if (bluetooth_restart_pending) { errmsg = checked_error_string("Restart pending"); return false; }
-#if TESLA_BLE_R13_MASTER_BENCH
-    if (bench_restart_pending) { errmsg = checked_error_string("Restart pending"); return false; }
-#endif
-    if (desired && !bluetooth_supported()) {
-        errmsg = checked_error_string("Bluetooth unavailable: SDK or hardware does not support this service");
-        return false;
-    }
-    bluetooth_commit_ok = persist_bluetooth(desired);
-    if (!bluetooth_commit_ok) {
-        errmsg = checked_error_string("Bluetooth configuration commit failed; not saved; no restart permitted");
-    } else { bluetooth_config.get("enable")->updateBool(desired); }
-    publish_bluetooth_state();
-    return bluetooth_commit_ok;
-}
-
-bool TeslaVehicle::restart_bluetooth(String &errmsg)
-{
-#if TESLA_BLE_MANUAL_VEHICLE_UI
-    if(bluetooth.discovery_busy()) { errmsg=checked_error_string("Search in progress");return false; }
-#endif
-    bool saved = false;
-    publish_bluetooth_state();
-    if (!bluetooth_supported() || !bluetooth_commit_ok ||
-        !bluetooth_state.get("restart_required")->asBool() ||
-        !load_bluetooth(saved) || saved != bluetooth_config.get("enable")->asBool()) {
-        bluetooth_commit_ok = false;
-        publish_bluetooth_state();
-        errmsg = checked_error_string("No verified Bluetooth commit available for restart");
-        return false;
-    }
-#if TESLA_BLE_R13_MASTER_BENCH
-#if TESLA_BLE_MANUAL_WEB_BENCH
-    if (service_start_requested) { errmsg = checked_error_string("Bluetooth boot startup pending"); return false; }
-#endif
-    if (master_bench.failed()) { errmsg = checked_error_string("Bench lifecycle failed"); return false; }
-    if (master_bench.active()) {
-        bench_restart_pending = true; return true;
-    }
-    if (strcmp(master_bench.phase(), "disabled") != 0) {
-        errmsg = checked_error_string("Bench lifecycle not quiescent"); return false;
-    }
-#endif
-    if (bluetooth_boot_enabled && !bluetooth.stopped()) {
-        if (bluetooth.failed()) { errmsg = checked_error_string("Bluetooth lifecycle failed; ownership retained"); return false; }
-        bluetooth_restart_pending = true; service_start_requested = false; return true;
-    }
-    trigger_reboot("Bluetooth configuration");
-    return true;
-}
 
 void TeslaVehicle::register_urls()
 {
@@ -1989,7 +1861,7 @@ void TeslaVehicle::loop()
     return; // No Tesla runtime, EV/session, key/storage or old bench operations.
 #endif
     bluetooth.supervise();
-#if TESLA_BLE_USE_NIMBLE
+#if WARP_FEATURE_REMOTE
     if(bluetooth_restart_pending)remote_setup.cancel();
     remote_loop();
     if(bluetooth_restart_pending&&remote_setup.busy())return;
@@ -2245,6 +2117,7 @@ void TeslaVehicle::process_module_events()
                     [](float soc) { ev.set_soc(soc); }, &retry)) {
                 ev.session_updated(EVDataSource::Tesla);
 #if TESLA_BLE_USE_NIMBLE
+#if WARP_FEATURE_REMOTE
                 const auto remote_origin=current_ev_identity();
 #ifdef TESLA_BLE_MODULE_HOST_TEST
                 const uint64_t remote_received=(uint64_t)event.received_uptime/1000; // host Uptime stores microseconds, as does production micros_t
@@ -2252,6 +2125,7 @@ void TeslaVehicle::process_module_events()
                 const uint64_t remote_received=event.received_uptime.to<millis_t>().as<uint64_t>();
 #endif
                 remote_soc.observe(remote_received,remote_origin.generation,remote_origin.index,remote_origin.mac,event.authenticated,event.correlated,event.soc);
+#endif
 #endif
                 if (tesla_ble_publication_newer(event.order, r->pairing_order)) {
                     r->pairing_order = event.order;

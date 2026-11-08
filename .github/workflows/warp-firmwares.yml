@@ -1,55 +1,34 @@
-name: WARP Firmwares
+name: WARP variant host checks
 on:
   workflow_dispatch:
-  schedule:
-    - cron: '0 0 * * *'
+  push:
+    branches: [feature/warp-remote]
+  pull_request:
+    paths:
+      - 'software/*variants*'
+      - 'software/tesla_build_guard.py'
+      - 'software/warp4*review.ini'
+      - 'software/src/modules/bluetooth_core/**'
+      - 'software/src/modules/warp_remote/**'
+      - 'software/src/modules/tesla_vehicle/**'
+      - 'software/web/src/modules/tesla_vehicle/**'
+      - 'software/tests/tesla_vehicle/**'
+      - '.github/workflows/**'
+permissions:
+  contents: read
 jobs:
-  build:
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        env: [warp4, warp3, warp2, warp, energy_manager_v2, energy_manager, eltako, smart_energy_broker, esp32_ethernet, esp32]
-        os: [ubuntu-latest, macos-latest, windows-latest]
+  portable-host:
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - uses: actions/cache/restore@v5
+      - uses: actions/setup-python@v6
         with:
-          path: |
-            ~/.cache/uv
-            ~/.platformio
-            ./software/.pio
-            ./software/packages
-          key: ${{ matrix.os }}-${{ github.run_id }}
-          restore-keys: ${{ matrix.os }}-
-      - name: Install UV
-        uses: astral-sh/setup-uv@v7
-        with:
-          enable-cache: false
-      - name: Sync UV
-        working-directory: ./software
-        run: uv sync
-      - name: Install Node.js
-        if: matrix.os == 'windows-latest'
-        uses: actions/setup-node@v6
-        with:
-          node-version: 24
-      - name: 'Build Firmware: ${{ matrix.env }}'
-        working-directory: ./software
-        run: uv run pio run -e ${{ matrix.env }} -t clean && uv run pio run -e ${{ matrix.env }}
-      - name: Minimize UV cache
-        run: uv cache prune --ci
-      - name: 'Deleting Caches: ${{ matrix.os }}-'
-        if: matrix.env == 'warp4'
-        run: gh cache delete ${{ matrix.os }}- || true
+          python-version: '3.11'
+      - run: python -m pip install pytest
+      - name: Compile-time selection and shared radio host tests (no firmware)
         env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-      - uses: actions/cache/save@v5
-        if: matrix.env == 'warp4'
-        with:
-          path: |
-            ~/.cache/uv
-            ~/.platformio
-            ./software/.pio
-            ./software/packages
-          key: ${{ matrix.os }}-${{ github.run_id }}
+          TMPDIR: ${{ runner.temp }}
+        run: >-
+          python -m pytest -q
+          software/tests/tesla_vehicle/test_build_variants.py
+          software/tests/tesla_vehicle/test_remote_scan.py

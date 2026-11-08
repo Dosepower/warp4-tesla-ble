@@ -1,7 +1,8 @@
 from pathlib import Path
+import os
 import subprocess
 from test_remote_crypto import S,MBED,CACHE
-TAG=S.parents[1]/'tag'
+TAG=Path(os.environ.get('REMOTE_TEST_TAG_ROOT', S.parents[1]/'tag'))
 
 def test_production_peer_engines_real_stores_fault_reboot_and_transcript_matrix(tmp_path):
  p=tmp_path/'matrix.cpp';p.write_text('''#include <cassert>

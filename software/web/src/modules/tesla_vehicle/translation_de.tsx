@@ -1,8 +1,10 @@
 /** @jsxImportSource preact */
 import { h } from "preact";
 let x = {
+//#include "../../options.inc"
     "tesla_vehicle": {
         "navbar": {"tesla_vehicle": "Bluetooth"},
+        //#if OPTIONS_WARP_FEATURE_REMOTE
         "remote": {
             "enable": "WARP Fernbedienung aktivieren",
             "help": "Zusätzliche Fernbedienung; Ausschalten löscht keine Kopplungen und ändert keinen Lademodus.",
@@ -19,6 +21,7 @@ let x = {
             "crypto_pending": "Kopplung derzeit nicht verfügbar. Es werden keine Ladebefehle ausgeführt.",
             "failed": "Fernbedienungsaktion nicht bestätigt oder abgelaufen. Zustand prüfen und erneut versuchen."
         },
+        //#endif
         "bluetooth": {
             "title": "Bluetooth",
             "activate_title": "Bluetooth aktivieren?",
@@ -28,11 +31,15 @@ let x = {
             "deactivate_restart": "Deaktivieren und neu starten",
             "changed": "Bluetooth-Zustand geändert oder Speicherung nicht korrekt bestätigt. Kein Neustart; aktuellen Zustand prüfen und erneut bestätigen.",
             "unavailable": "Bluetooth-Aktion derzeit nicht verfügbar: Status, laufende Aktion oder geöffneten Dialog prüfen.",
+            //#if OPTIONS_WARP_FEATURE_TESLA
             "tesla_title": "Tesla über Bluetooth",
+            //#endif
             "enable": "Bluetooth aktiviert",
-            "desired": "Ermöglicht momentan die Abfrage des Tesla-Ladezustands über Bluetooth.",
+            "desired": "Erlaubt die in dieser Firmware enthaltenen Bluetooth-Dienste.",
             "help": "Änderungen werden erst nach Speichern und ausdrücklich bestätigtem Neustart wirksam. Ausschalten löscht keine gespeicherten Einstellungen oder Schlüssel.",
-            "active_hint": "Bluetooth ist aktiv. Tesla-Kommunikation kann unter „Fahrzeuge“ eingerichtet werden.",
+            //#if OPTIONS_WARP_FEATURE_TESLA
+            "active_hint": "Bluetooth ist aktiv. Die Tesla-Kommunikation kann unter Fahrzeuge eingerichtet werden.",
+            //#endif
             "runtime": "Bluetooth-Status",
             "disabled": "Ausgeschaltet", "starting": "Startet", "active": "Aktiv", "stopping": "Wird beendet", "error": "Fehler / Neustart erforderlich",
             "unsupported": "Bluetooth ist mit dieser SDK-/Hardware-Konfiguration nicht verfügbar. Aktivieren und Neustart sind gesperrt. Grund",
@@ -41,6 +48,7 @@ let x = {
             "restart": "Jetzt neu starten",
             "restart_confirm": "WARP jetzt neu starten und die bestätigte gespeicherte Bluetooth-Freigabe anwenden? Die Ladesteuerung wird dabei unterbrochen."
         },
+        //#if OPTIONS_WARP_FEATURE_TESLA
         "content": {
             "active_profile": "Angeschlossenes WARP-Profil",
             "loaded_profile": "Für Bluetooth vorbereitetes Profil",
@@ -244,5 +252,6 @@ let x = {
             "save_failed": "Speichern der Tesla-Bluetooth-Konfiguration fehlgeschlagen.",
             "command_failed": "Tesla-Bluetooth-Befehl fehlgeschlagen."
         }
+        //#endif
     }
 }

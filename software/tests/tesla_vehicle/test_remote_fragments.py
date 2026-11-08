@@ -1,9 +1,10 @@
 from pathlib import Path
+import os
 import subprocess
 S=Path(__file__).resolve().parents[2]
 
 def test_shared_peer_wire_and_protocol_headers_are_identical():
- tag=S.parents[1]/'tag/firmware/src'
+ tag=Path(os.environ.get('REMOTE_TEST_TAG_ROOT', S.parents[1]/'tag'))/'firmware/src'
  for name in ['remote_crypto.h','remote_enrollment.h','remote_enrollment_link.h','remote_enrollment_port.h','remote_fragments.h','remote_recovery_link.h','remote_session_link.h','remote_operation_journal.h']:
   assert (tag/name).read_bytes()==(S/'src/modules/tesla_vehicle'/name).read_bytes(),name
 

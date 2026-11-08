@@ -9,13 +9,22 @@ import { FormRow } from "../../ts/components/form_row";
 import { NavbarItem } from "../../ts/components/navbar_item";
 import { SubPage } from "../../ts/components/sub_page";
 import { Switch } from "../../ts/components/switch";
+//#include "../../options.inc"
+//#if OPTIONS_WARP_FEATURE_TESLA
 import { registerVehicleExtension } from "../ev/main";
 import { TeslaVehicle } from "./guided_vehicle";
-import { RemoteSettings } from "./remote_settings";
 export { TeslaVehicle };
+//#endif
+//#if OPTIONS_WARP_FEATURE_REMOTE
+import { RemoteSettings } from "./remote_settings";
+//#endif
 
 export function BluetoothPageNavbar() {
+    //#if OPTIONS_WARP_FEATURE_TESLA
     return <NavbarItem name="bluetooth" module="tesla_vehicle" title={__("tesla_vehicle.bluetooth.title")} symbol={<Bluetooth />} />;
+    //#else
+    return <NavbarItem name="bluetooth" module="warp_remote" title={__("tesla_vehicle.bluetooth.title")} symbol={<Bluetooth />} />;
+    //#endif
 }
 export function BluetoothPage() {
     return <SubPage name="bluetooth" title={__("tesla_vehicle.bluetooth.title")}>
@@ -67,6 +76,7 @@ export class BluetoothSettings extends Component<{}, BluetoothViewState> {
             }
             this.setState({bluetooth_state: s});
         }, {signal: this.listeners.signal});
+        //#if OPTIONS_WARP_FEATURE_TESLA
         for (const topic of ["tesla_vehicle/state", "tesla_vehicle/discovery"] as const) {
             util.addApiEventListener(topic, () => {
                 if (this.disposed) return;
@@ -74,11 +84,16 @@ export class BluetoothSettings extends Component<{}, BluetoothViewState> {
                 this.setState({});
             }, {signal: this.listeners.signal});
         }
+        //#endif
     }
     override componentWillUnmount() { this.disposed = true; ++this.revision; this.listeners.abort(); }
     private radioBusy() {
+        //#if OPTIONS_WARP_FEATURE_TESLA
         const s = API.get("tesla_vehicle/state");
         return !!(s?.action_busy || s?.pairing_pending || s?.stopping || API.get("tesla_vehicle/discovery")?.busy);
+        //#else
+        return false;
+        //#endif
     }
     private available(s: BluetoothState = this.state.bluetooth_state) {
         return !this.disposed && !!s?.supported && typeof this.state.enable === 'boolean' &&
@@ -144,7 +159,9 @@ export class BluetoothSettings extends Component<{}, BluetoothViewState> {
                 <Switch checked={state.enable} desc={__("tesla_vehicle.bluetooth.desired")}
                         disabled={!this.available() || state.busy} onClick={this.toggleBluetooth} />
             </FormRow>
+            {/*#if OPTIONS_WARP_FEATURE_REMOTE*/}
             <RemoteSettings />
+            {/*#endif*/}
             {!s?.supported ? <Alert variant="danger">{__("tesla_vehicle.bluetooth.unsupported")} ({s?.unsupported_reason})</Alert> : undefined}
             {s?.persistence_error ? <Alert variant="danger">{__("tesla_vehicle.bluetooth.save_failed")}</Alert> : undefined}
             {s?.supported && s.phase === 'error' ? <Alert variant="danger">{__("tesla_vehicle.bluetooth.error")}</Alert> : undefined}
@@ -157,5 +174,9 @@ export class BluetoothSettings extends Component<{}, BluetoothViewState> {
         </Fragment>;
     }
 }
-export function pre_init() { registerVehicleExtension(TeslaVehicle); }
+export function pre_init() {
+    //#if OPTIONS_WARP_FEATURE_TESLA
+    registerVehicleExtension(TeslaVehicle);
+    //#endif
+}
 export function init() {}
