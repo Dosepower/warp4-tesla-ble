@@ -50,6 +50,9 @@ for token in ('BENCH', 'CANONICAL', 'IRAM_DIAGNOSTICS', '--wrap=', 'RADIO_SPIKE'
 
 def source_review(env, node):
     name = Path(str(node)).name
+    if ('-DWARP_FEATURE_REMOTE=0' in flags and name.startswith('remote_') and
+            Path(str(node)).parent.name == 'tesla_vehicle'):
+        return None
     if name.startswith('tesla_ble_bench_') or name in (
             'tesla_ble_radio_spike.cpp', 'tesla_ble_iram_diagnostics.cpp',
             'bluetooth_master_bench.cpp', 'r13_psram_policy.cpp'):

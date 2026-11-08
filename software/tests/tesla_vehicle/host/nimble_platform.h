@@ -4,6 +4,7 @@
 #include <cstring>
 #include <cassert>
 #include <vector>
+#include <deque>
 #include <functional>
 #include <thread>
 #include <atomic>
@@ -70,6 +71,13 @@ controller_status=0;
 #endif
 return 0;}
 inline int ble_hs_util_ensure_addr(int){return 0;}inline int ble_hs_id_infer_auto(int,uint8_t *p){*p=0;return 0;}
+struct ble_npl_event {void(*fn)(ble_npl_event *)=nullptr;void *arg=nullptr;};
+inline std::deque<ble_npl_event *> test_npl_events;
+inline void ble_npl_event_init(ble_npl_event *e,void(*fn)(ble_npl_event *),void *arg){e->fn=fn;e->arg=arg;}
+inline void *ble_npl_event_get_arg(ble_npl_event *e){return e->arg;}
+inline void *nimble_port_get_dflt_eventq(){return nullptr;}
+inline void ble_npl_eventq_put(void *,ble_npl_event *e){test_npl_events.push_back(e);}
+inline void test_run_npl_events(){while(!test_npl_events.empty()){auto *e=test_npl_events.front();test_npl_events.pop_front();e->fn(e);}}
 inline int ble_gap_disc_active(){return test_scanning;}
 inline int ble_gap_disc_cancel(){test_scanning=false;return test_api_rc;}
 inline int ble_gap_disc(uint8_t,int32_t,const ble_gap_disc_params*p,GapFn cb,void *arg){++test_scans;

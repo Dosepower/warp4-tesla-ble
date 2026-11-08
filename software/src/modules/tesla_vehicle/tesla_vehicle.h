@@ -8,6 +8,7 @@
 
 #include <functional>
 #include "bluetooth_support.h"
+#include "../bluetooth_core/bluetooth_core.h"
 #ifdef TESLA_BLE_MODULE_HOST_TEST
 #include "module_platform.h"
 #else
@@ -35,6 +36,7 @@
 #include "bluetooth_master_bench.h"
 #include "bluetooth_lifecycle.h"
 
+
 // Pair-trace interleaving points (1 reader after cause load, 2 writer admitted,
 // 3 writer claimed). Empty in firmware; host tests may pause a task there.
 #ifndef TESLA_PAIR_TRACE_POINT
@@ -44,7 +46,7 @@
 class TeslaBleStorageAdapter;
 class TeslaBleTransportAdapter;
 
-class TeslaVehicle final : public IModule
+class TeslaVehicle final : public BluetoothCore
 {
 public:
     TeslaVehicle() = default;
@@ -175,24 +177,10 @@ private:
 #endif
     static std::atomic<TeslaVehicle *> gatt_owner;
 
-    ConfigRoot empty_command;
-    // This module remains the SOLE controller/host lifecycle owner. These are
-    // separate from the legacy Tesla service config and never grant VIN access.
-    ConfigRoot bluetooth_config, bluetooth_update, bluetooth_state;
-    // Path/transaction work buffers live on the caller stack, never in BSS.
-    // A failed close's quarantine remains permanent across those transactions.
-    bool bluetooth_storage_quarantined = false;
-    bool load_bluetooth(bool &desired);
-    bool persist_bluetooth(bool desired);
-    bool bluetooth_boot_enabled = false;
-    bool bluetooth_commit_ok = true;
-    void publish_bluetooth_state();
-    void register_bluetooth_urls();
-    bool save_bluetooth(bool desired, String &errmsg);
-    bool restart_bluetooth(String &errmsg);
-    BluetoothLifecycle bluetooth;
-    bool bluetooth_restart_pending = false;
-    bool service_start_requested = false; // Explicit action only; never restored.
+    bool feature_busy() const override {
+        return tesla && (tesla->state.get("action_busy")->asBool() || tesla->state.get("pairing_pending")->asBool() || tesla->state.get("stopping")->asBool());
+    }
+    void publish_bluetooth_state() override;
     bool prepare_tesla();
     void register_tesla_urls();
     void request_pair(int index, String &errmsg);
@@ -234,12 +222,6 @@ private:
     void clear_guided();
 #endif
 #if TESLA_BLE_R13_MASTER_BENCH
-    BluetoothMasterBench master_bench;
-    ConfigRoot bench_state;
-    bool bench_restart_pending = false;
-    char bench_line[16]{};
-    unsigned bench_line_size = 0;
-    bool bench_line_overflow = false;
     void bench_serial();
     void bench_emit(const char *request, bool ok);
 #endif

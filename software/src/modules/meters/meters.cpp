@@ -650,6 +650,17 @@ MeterLocation Meters::get_meter_location(uint32_t slot)
     return meter_slots[slot].config_union.get()->get("location")->asEnum<MeterLocation>();
 }
 
+MeterValueAvailability Meters::get_power_observation(uint32_t slot,float *power,uint64_t *received_ms,micros_t max_age)
+{
+    if(!power||!received_ms||!meter_slots||slot>=OPTIONS_METERS_MAX_SLOTS())return MeterValueAvailability::Unavailable;
+    *received_ms=0;
+    const auto stamp=meter_slots[slot].values_last_updated_at;
+    if(stamp<0_us||now_us()<stamp)return MeterValueAvailability::Stale;
+    const auto availability=get_power(slot,power,max_age);
+    if(availability==MeterValueAvailability::Fresh)*received_ms=stamp.to<millis_t>().as<uint64_t>();
+    return availability;
+}
+
 bool Meters::meter_is_fresh(uint32_t slot, micros_t max_age)
 {
     return max_age == 0_us || !deadline_elapsed(meter_slots[slot].values_last_updated_at + max_age);

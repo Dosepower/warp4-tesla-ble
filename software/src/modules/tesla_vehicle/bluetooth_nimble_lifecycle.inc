@@ -74,8 +74,8 @@ void BluetoothLifecycle::run(Context &c){
  c.error=!ok||!clean;c.phase=c.error?Context::Failed:Context::Stopped;c.done.store(true,std::memory_order_release);for(;;)vTaskSuspend(nullptr);
 }
 #if TESLA_BLE_MANUAL_VEHICLE_UI
-bool BluetoothLifecycle::request_discovery(){return active()&&context->central.discovery.request(millis());}
-bool BluetoothLifecycle::request_discovery(const TeslaBleDiscovery::Scope &s){return active()&&context->central.discovery.request(millis(),s);}
+bool BluetoothLifecycle::request_discovery(){return active()&&!context->central.remote_reserved()&&context->central.discovery.request(millis());}
+bool BluetoothLifecycle::request_discovery(const TeslaBleDiscovery::Scope &s){return active()&&!context->central.remote_reserved()&&context->central.discovery.request(millis(),s);}
 bool BluetoothLifecycle::discovery_matches(const TeslaBleDiscovery::Scope &s,uint32_t rev,const uint8_t *a,uint8_t t){return active()&&context->central.discovery.matches(millis(),s,rev,a,t);}
 bool BluetoothLifecycle::discovery_authority_current(uint32_t rev){return active()&&context->central.discovery.authority_current(rev);}
 bool BluetoothLifecycle::discovery_busy()const{return context&&context->central.discovery.busy();}

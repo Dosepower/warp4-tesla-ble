@@ -3,6 +3,8 @@
 #include <cstdio>
 #include <vector>
 std::vector<TeslaNimbleEvent> events;std::vector<uint8_t> received;std::function<void(const TeslaNimbleEvent&)> event_hook;
+std::vector<TeslaNimbleEvent> remote_events;
+void remote_receive(const TeslaNimbleEvent &e){remote_events.push_back(e);}
 void receive(const TeslaNimbleEvent &e){events.push_back(e);if(e.kind==TeslaNimbleEvent::Rx)received.assign(e.data,e.data+e.size);if(event_hook)event_hook(e);}
 ble_uuid_any_t uuid(uint8_t suffix){ble_uuid_any_t u{};u.u.type=128;const uint8_t a[16]={0x1e,0xb9,0xf8,0xeb,0x0c,0x96,0x88,0x9b,0xf0,0x43,0xd1,0xb2,suffix,2,0,0};memcpy(u.value,a,16);return u;}
 void emit_gap(ble_gap_event e){test_gap(&e,test_gap_arg);}
@@ -42,6 +44,29 @@ int main(){
  assert(c.open(address,0,9));
  event_hook=[&](const TeslaNimbleEvent&e){if(e.kind==TeslaNimbleEvent::Open&&e.status){assert(!c.idle() && "failed CONNECT terminal dispatch must finish before reuse/deinit");assert(!c.open(address,1,10));}};
  connected.connect.status=13;emit_gap(connected);event_hook={};assert(c.idle());
+ const auto tesla_count=events.size();
+ assert(c.open_remote(address,0,10,remote_receive));
+ assert(!c.open(address,0,11));assert(!c.open_remote(address,0,11,remote_receive));
+ connected.connect.status=0;emit_gap(connected);
+ assert(remote_events.back().epoch==10 && events.size()==tesla_count);
+ assert(c.discover());
+ ble_gatt_error ok{},done{BLE_HS_EDONE};ble_gatt_svc svc{1,40};
+ test_service(4,&ok,&svc,test_proc_arg);test_service(4,&done,nullptr,test_proc_arg);
+ auto remote_uuid=[](uint8_t suffix){ble_uuid_any_t u{};u.u.type=128;const uint8_t a[16]={0xde,0x53,0x42,0x9a,0xa1,0x76,0x4f,0x7c,0xa0,0x3e,0x72,0x57,suffix,1,0x65,0x9d};memcpy(u.value,a,16);return u;};
+ ble_gatt_chr tx{9,10,8,remote_uuid(0x12)},rx{19,20,16,remote_uuid(0x13)};
+ test_char(4,&ok,&tx,test_proc_arg);test_char(4,&ok,&rx,test_proc_arg);test_char(4,&done,nullptr,test_proc_arg);
+ ble_gatt_dsc d{};d.handle=21;d.uuid.u.type=16;d.uuid.value[0]=2;d.uuid.value[1]=0x29;
+ test_descriptor(4,&ok,20,&d,test_proc_arg);test_descriptor(4,&done,20,nullptr,test_proc_arg);
+ assert(remote_events.back().kind==TeslaNimbleEvent::Discover && remote_events.back().status==0);
+ assert(c.subscribe());ble_gatt_attr attr{21};test_written(4,&ok,&attr,test_proc_arg);
+ uint8_t select[17]={1};assert(c.write(select,sizeof(select)));attr.handle=10;test_written(4,&ok,&attr,test_proc_arg);
+ os_mbuf response{{2,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0}};
+ ble_gap_event rx_event{};rx_event.type=BLE_GAP_EVENT_NOTIFY_RX;rx_event.notify_rx.conn_handle=4;rx_event.notify_rx.attr_handle=20;rx_event.notify_rx.om=&response;emit_gap(rx_event);
+ assert(remote_events.back().kind==TeslaNimbleEvent::Rx && events.size()==tesla_count);
+ disconnect();assert(c.idle() && remote_events.back().kind==TeslaNimbleEvent::Disconnected);
+ assert(!c.open(address,0,11)); // remote lease remains until main drains its queue
+ assert(c.release_remote());
+ assert(c.open(address,0,11));emit_gap(connected);assert(events.back().epoch==11);disconnect();
  test_stop_rc=42;assert(!c.shutdown());test_stop_rc=0;assert(c.shutdown());test_deinit_rc=42;assert(!c.deinitialize());test_deinit_rc=0;assert(c.deinitialize());assert(test_status==0);
  puts("NATIVE NimBLE PASS scan response binding/public-random/1link/A-B-A epochs/INDICATE+NOTIFY/descriptor bounds/SDK-mbuf copy/write20/security/disconnect/deinit");
 }

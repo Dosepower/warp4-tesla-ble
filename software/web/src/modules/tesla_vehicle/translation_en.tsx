@@ -1,8 +1,27 @@
 /** @jsxImportSource preact */
 import { h } from "preact";
 let x = {
+//#include "../../options.inc"
     "tesla_vehicle": {
         "navbar": {"tesla_vehicle": "Bluetooth"},
+        //#if OPTIONS_WARP_FEATURE_REMOTE
+        "remote": {
+            "enable": "Enable WARP remote control",
+            "help": "Additional remote control; disabling never forgets bindings or changes the charging mode.",
+            "recover": "Resume enrollment",
+            "recover_confirm": "Authenticate only the saved peer. Triple-press the Tag, select it and briefly confirm again after rapid blue blinking. No charging change and no enrollment of a new peer.",
+            "pending": "Incomplete enrollment – no charging authority. Resume or explicitly remove only the local WARP record. Removal does not reset the Tag.",
+            "forget": "Forget remote control", "forget_confirm": "Really remove only this saved remote control?",
+            "pair": "Pair remote control", "window": "Pairing window", "triple": "Press the Tag button briefly three times.",
+            "candidate": "Discovered Tag", "identify": "Select and blink blue",
+            "confirm": "Briefly press only the selected, rapidly blue-blinking Tag once to confirm.",
+            "untrusted": "Button press received. Not securely paired yet; no charging authority saved.",
+            "paired": "Remote durably enrolled. Charging and status transport remain disabled in this development build.",
+            "tofu": "Initial blink/click enrollment uses trust on first use (TOFU). Without a display or comparison code, the first key exchange has no strong protection against an active man-in-the-middle.",
+            "crypto_pending": "Enrollment is currently unavailable. No charging commands are executed.",
+            "failed": "Remote action was not confirmed or expired. Check the state and try again."
+        },
+        //#endif
         "bluetooth": {
             "title": "Bluetooth",
             "activate_title": "Enable Bluetooth?",
@@ -12,11 +31,15 @@ let x = {
             "deactivate_restart": "Disable and restart",
             "changed": "Bluetooth state changed or saving was not correctly confirmed. No restart; check the current state and confirm again.",
             "unavailable": "Bluetooth action currently unavailable: check status, pending action or open dialog.",
+            //#if OPTIONS_WARP_FEATURE_TESLA
             "tesla_title": "Tesla over Bluetooth",
+            //#endif
             "enable": "Bluetooth enabled",
-            "desired": "Currently allows querying the Tesla state of charge via Bluetooth.",
+            "desired": "Allows the Bluetooth services compiled into this firmware.",
             "help": "Changes take effect only after saving and an explicitly confirmed restart. Disabling does not delete saved settings or keys.",
+            //#if OPTIONS_WARP_FEATURE_TESLA
             "active_hint": "Bluetooth is active. Tesla communication can be configured under Vehicles.",
+            //#endif
             "runtime": "Bluetooth status",
             "disabled": "Disabled", "starting": "Starting", "active": "Active", "stopping": "Stopping", "error": "Error / restart required",
             "unsupported": "Bluetooth is unavailable with this SDK/hardware configuration. Activation and restart are disabled. Reason",
@@ -25,6 +48,7 @@ let x = {
             "restart": "Restart now",
             "restart_confirm": "Restart WARP now and apply the confirmed saved Bluetooth permission? Charging control will be interrupted."
         },
+        //#if OPTIONS_WARP_FEATURE_TESLA
         "content": {
             "active_profile": "Connected WARP profile",
             "loaded_profile": "Profile prepared for Bluetooth",
@@ -228,5 +252,6 @@ let x = {
             "save_failed": "Failed to save Tesla Bluetooth configuration.",
             "command_failed": "Tesla Bluetooth command failed."
         }
+        //#endif
     }
 }

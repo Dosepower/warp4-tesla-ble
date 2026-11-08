@@ -712,7 +712,15 @@ def get_finalized_list(list_name):
 
     return entries
 
+def bluetooth_frontend_features():
+    if env is None:
+        return True, True
+    flags = ' '.join(env.GetProjectOption('build_flags', []))
+    return '-DWARP_FEATURE_TESLA=0' not in flags, '-DWARP_FEATURE_REMOTE=0' not in flags
+
 def preprocess_web(frontend_modules_under):
+    from bluetooth_variants import include_frontend
+    tesla, remote = bluetooth_frontend_features()
     with tfutil.ChangedDirectory('web'):
         try:
             shutil.rmtree('src_tfpp')
@@ -724,6 +732,9 @@ def preprocess_web(frontend_modules_under):
                 src_path = pathlib.Path(root) / name
 
                 if src_path.parts[:2] == ('src', 'modules') and src_path.parts[2] not in frontend_modules_under:
+                    continue
+
+                if not include_frontend(pathlib.PurePosixPath(*src_path.parts[1:]).as_posix(), tesla, remote):
                     continue
 
                 src_tfpp_path = pathlib.Path('src_tfpp', *src_path.parts[1:])
@@ -749,6 +760,8 @@ def verify_preprocessed_web():
     Re-evaluate directives/includes and require the complete selected tree.
     This is a guard, never a repair of generated files or embedded bytes.
     """
+    from bluetooth_variants import include_frontend
+    tesla, remote = bluetooth_frontend_features()
     with tfutil.ChangedDirectory('web'):
         receipt = pathlib.Path('src_tfpp/.tfpp-modules.json')
         try:
@@ -762,6 +775,8 @@ def verify_preprocessed_web():
             for name in files:
                 src_path = pathlib.Path(root) / name
                 if src_path.parts[:2] == ('src', 'modules') and src_path.parts[2] not in modules:
+                    continue
+                if not include_frontend(pathlib.PurePosixPath(*src_path.parts[1:]).as_posix(), tesla, remote):
                     continue
                 output = pathlib.Path('src_tfpp', *src_path.parts[1:])
                 expected_paths.add(output)
@@ -1944,6 +1959,10 @@ def main():
         update_translation(translation, collect_translation(mod_path))
         update_translation(translation, collect_translation(mod_path, override=True), override=True)
 
+    from bluetooth_variants import prune_translation
+    tesla_feature, remote_feature = bluetooth_frontend_features()
+    for language_translation in translation.values():
+        prune_translation(language_translation, tesla_feature, remote_feature)
     check_translation(translation)
 
     for path in glob.glob(os.path.join('web', 'src', 'ts', 'translation_*.ts')):

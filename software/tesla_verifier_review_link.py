@@ -9,7 +9,8 @@ def readonly_sections(text):
 def configure(env, package, targets):
     from pathlib import Path
     import hashlib, json
-    if (env["PIOENV"] not in ("warp4_tesla_ble_verifier_review", "warp4_tesla_ble_classic_review", "warp4_tesla_ble_nimble_review") or
+    if (env["PIOENV"] not in ("warp4_tesla_ble_verifier_review", "warp4_tesla_ble_classic_review", "warp4_tesla_ble_nimble_review",
+                              "warp4_ble_tesla_only_review", "warp4_ble_remote_only_review", "warp4_ble_combined_review") or
             list(targets) != ["tesla-review"] or
             env.GetProjectOption("custom_signature_preset") != "" or
             env.GetProjectOption("custom_signature_verify_preset") != "review:official-public-v1"):

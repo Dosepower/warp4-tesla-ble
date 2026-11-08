@@ -1,0 +1,30 @@
+name: Remote WIP host checks
+on:
+  push:
+    branches: [feature/warp-remote]
+  pull_request:
+    paths:
+      - 'software/src/modules/tesla_vehicle/**'
+      - 'software/src/modules/evse_common/**'
+      - 'software/tests/tesla_vehicle/test_remote*'
+      - '.github/workflows/remote-host-tests.yml'
+permissions:
+  contents: read
+jobs:
+  portable-host:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      - run: python -m pip install pytest
+      - name: Run portable production-core tests (not a firmware build)
+        env:
+          TMPDIR: ${{ runner.temp }}
+        run: >-
+          python -m pytest -q
+          software/tests/tesla_vehicle/test_remote_binding_store.py
+          software/tests/tesla_vehicle/test_remote_fragments.py::test_attempt_bound_fragmentation_rejects_interleave_truncation_and_changed_duplicate
+          software/tests/tesla_vehicle/test_remote_operation_journal.py
+          software/tests/tesla_vehicle/test_remote_manager_observation.py
