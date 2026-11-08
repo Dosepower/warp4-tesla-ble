@@ -2,6 +2,10 @@
 
 Tesla-BLE-Integration für WARP4 auf Basis der Tinkerforge-Firmware.
 
+## Fernbedienungsentwicklung auf diesem Branch
+
+**WIP, nicht installiert:** Dieser Branch ergänzt den bestehenden Fork um die Nordic-Tag-Fernbedienung. Der unten dokumentierte installierte Tesla-Meilenstein bleibt davon getrennt. [Umfang, Prüfstand, offene Schritte und geplante Buildvarianten](REMOTE_DEVELOPMENT.md). Kein neues Firmware-Release und keine Installationsfreigabe.
+
 ## Aktueller Stand
 
 **Erreichter Zwischenstand · installierte Firmware `2.13.6+6ae4a299`**

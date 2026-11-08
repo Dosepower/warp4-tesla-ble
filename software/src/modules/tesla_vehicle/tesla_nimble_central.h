@@ -18,7 +18,7 @@ extern "C" {
 #endif
 // Value-only callback boundary. No Bluedroid types or runtime-owned cookies.
 struct TeslaNimbleEvent {
- enum Kind : uint8_t { Open=2,Discover=3,Descriptor=6,Write=7,Close=8,Disconnected,Rx,Security };
+ enum Kind : uint8_t { Open=2,Discover=3,Descriptor=6,Write=7,Close=8,Disconnected,Rx,Security,RemoteCandidate,RemoteScanDone };
  Kind kind;uint64_t epoch;uint16_t connection,handle;int status;
  const uint8_t *data=nullptr;size_t size=0; // borrowed only for this synchronous dispatch
 };
@@ -34,6 +34,13 @@ public:
  bool faulted()const{return failed.load();}
  bool idle()const{return !busy.load();}
  bool open(const uint8_t *address,uint8_t type,uint64_t epoch);
+ // Same host, single admission CAS and terminal drain barrier. Remote callbacks
+ // never reach Tesla workers; this does not grant enrollment or charge authority.
+ bool open_remote(const uint8_t *address,uint8_t type,uint64_t epoch,Handler);
+ bool scan_remote(uint64_t epoch,Handler,bool normal=false); // explicit 3-second passive UUID scan
+ bool cancel_remote_scan(); // SDK cancel + host-event callback drain marker
+ bool release_remote(); // main queue drained AND SDK terminal dispatch returned
+ bool remote_reserved()const{return remote_lease.load();}
  bool discover();
  bool subscribe();
  bool write(const uint8_t *,size_t);
@@ -59,6 +66,11 @@ public:
 private:
  static std::atomic<TeslaNimbleCentral *> owner;
  static void sync();static void reset(int);
+ static int remote_scan_callback(ble_gap_event *,void *);
+ static void remote_scan_barrier(ble_npl_event *);
+ void finish_remote_scan(int);
+ ble_npl_event scan_barrier{};
+ std::atomic<bool> remote_scanning{false},scan_cancelling{false},scan_normal{false};
  static int gap(ble_gap_event *,void *);static int scan(ble_gap_event *,void *);
  static int service(uint16_t,const ble_gatt_error *,const ble_gatt_svc *,void *);
  static int characteristic(uint16_t,const ble_gatt_error *,const ble_gatt_chr *,void *);
@@ -75,7 +87,11 @@ private:
  std::atomic<bool> open_cancel_accepted{false},unannounced_terminating{false},link_terminate_accepted{false};
  ble_addr_t open_peer{};
  int retire_unannounced();
- Handler handler=nullptr;bool initialized=false;uint8_t own_type=0;
+ Handler handler=nullptr,attempt_handler=nullptr;
+ std::atomic<bool> remote_lease{false};
+ bool remote_profile=false;
+ bool begin_open(const uint8_t *,uint8_t,uint64_t,bool,Handler);
+ bool initialized=false;uint8_t own_type=0;
  uint16_t service_start=0,service_end=0,write_handle=0,notify_handle=0,descriptor_end=0,cccd=0;
  unsigned services=0,writes=0,notifies=0,descriptors=0;uint8_t properties=0;
  std::atomic<int> pending{0}; // one request, callbacks terminal before disconnect event

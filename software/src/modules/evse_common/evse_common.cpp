@@ -511,6 +511,9 @@ void EvseCommon::register_urls()
 {
 #if MODULE_CM_NETWORKING_AVAILABLE()
     cm_networking.register_client([this](uint16_t current, bool ignore_allocation, bool cp_disconnect_requested, int8_t phases_requested, ConfigChargeMode mode, ConfigChargeMode *supported_modes, size_t supported_mode_len, CMAuthFeedback auth_feedback) {
+        this->manager_mode_observation.observe(now_us().to<millis_t>().as<uint64_t>(),
+                                               static_cast<uint8_t>(mode),
+                                               this->management_enabled.get("enabled")->asBool());
         if (!this->management_enabled.get("enabled")->asBool())
             return;
 
@@ -1016,6 +1019,11 @@ uint32_t EvseCommon::get_charger_meter()
     return charger_meter_slot;
 }
 
+MeterValueAvailability EvseCommon::get_charger_meter_power_observation(float *power,uint64_t *received_ms,micros_t max_age)
+{
+    return meters.get_power_observation(this->get_charger_meter(),power,received_ms,max_age);
+}
+
 MeterValueAvailability EvseCommon::get_charger_meter_power(float *power, micros_t max_age)
 {
     return meters.get_power(this->get_charger_meter(), power, max_age);
@@ -1155,6 +1163,40 @@ ConfigRoot &EvseCommon::get_state()
 bool EvseCommon::get_management_enabled()
 {
     return management_enabled.get("enabled")->asBool();
+}
+
+uint8_t EvseCommon::get_remote_mode_capabilities()
+{
+#if MODULE_CM_NETWORKING_AVAILABLE()
+    // Read-only preflight. A mode request must STILL use the native CM path,
+    // recheck these gates and active EV, then await a NEW actual manager echo.
+    if (!backend || !backend->is_initialized() || !get_management_enabled())
+        return 0;
+    const uint32_t charger = state.get("charger_state")->asUint();
+    if (charger == CHARGER_STATE_NOT_PLUGGED_IN || charger >= CHARGER_STATE_ERROR)
+        return 0;
+    // Central authorization cannot be inferred from an LED Ack/Nag feedback.
+    // Until an authoritative grant is available, fail closed for that mode.
+    if (management_state.get("central_user_management_enabled")->asBool())
+        return 0;
+    uint16_t current = 0;
+    bool active = false;
+    if (backend->get_charging_slot(CHARGING_SLOT_USER, &current, &active, nullptr) != 0 || (active && current == 0))
+        return 0;
+    const uint64_t now = now_us().to<millis_t>().as<uint64_t>();
+    if (!manager_mode_observation.fresh(now))
+        return 0;
+    uint8_t mask = 0;
+    for (size_t i = 0; i < supported_charge_modes.count(); ++i) {
+        const auto mode = supported_charge_modes.get(i)->asEnum<ConfigChargeMode>();
+        if (mode == ConfigChargeMode::Off) mask |= 1;
+        else if (mode == ConfigChargeMode::PV) mask |= 2;
+        else if (mode == ConfigChargeMode::Fast) mask |= 4;
+    }
+    return mask;
+#else
+    return 0;
+#endif
 }
 
 uint32_t EvseCommon::get_evse_version()

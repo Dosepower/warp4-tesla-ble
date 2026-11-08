@@ -3,6 +3,22 @@ import { h } from "preact";
 let x = {
     "tesla_vehicle": {
         "navbar": {"tesla_vehicle": "Bluetooth"},
+        "remote": {
+            "enable": "Enable WARP remote control",
+            "help": "Additional remote control; disabling never forgets bindings or changes the charging mode.",
+            "recover": "Resume enrollment",
+            "recover_confirm": "Authenticate only the saved peer. Triple-press the Tag, select it and briefly confirm again after rapid blue blinking. No charging change and no enrollment of a new peer.",
+            "pending": "Incomplete enrollment – no charging authority. Resume or explicitly remove only the local WARP record. Removal does not reset the Tag.",
+            "forget": "Forget remote control", "forget_confirm": "Really remove only this saved remote control?",
+            "pair": "Pair remote control", "window": "Pairing window", "triple": "Press the Tag button briefly three times.",
+            "candidate": "Discovered Tag", "identify": "Select and blink blue",
+            "confirm": "Briefly press only the selected, rapidly blue-blinking Tag once to confirm.",
+            "untrusted": "Button press received. Not securely paired yet; no charging authority saved.",
+            "paired": "Remote durably enrolled. Charging and status transport remain disabled in this development build.",
+            "tofu": "Initial blink/click enrollment uses trust on first use (TOFU). Without a display or comparison code, the first key exchange has no strong protection against an active man-in-the-middle.",
+            "crypto_pending": "Enrollment is currently unavailable. No charging commands are executed.",
+            "failed": "Remote action was not confirmed or expired. Check the state and try again."
+        },
         "bluetooth": {
             "title": "Bluetooth",
             "activate_title": "Enable Bluetooth?",

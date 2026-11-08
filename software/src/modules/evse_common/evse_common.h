@@ -26,6 +26,7 @@
 #include "modules/debug_protocol/debug_protocol_backend.h"
 #include "tools.h"
 #include "generated/module_available.h"
+#include "manager_mode_observation.h"
 
 #if MODULE_CM_NETWORKING_AVAILABLE()
 #include "modules/cm_networking/generated/cm_auth_feedback.enum.h"
@@ -157,6 +158,7 @@ public:
     void set_modbus_enabled(bool);
 
     uint32_t get_charger_meter();
+    MeterValueAvailability get_charger_meter_power_observation(float *power,uint64_t *received_ms,micros_t max_age);
     MeterValueAvailability get_charger_meter_power(float *power, micros_t max_age = 0_us);
     MeterValueAvailability get_charger_meter_energy(float *energy, micros_t max_age = 0_us);
     bool get_use_imexsum();
@@ -194,6 +196,9 @@ public:
     ConfigRoot &get_slots();
     ConfigRoot &get_low_level_state();
     bool get_management_enabled();
+    // Main-task snapshot only: API requested charge_mode is not commit evidence.
+    ManagerModeObservation get_manager_mode_observation() const { return manager_mode_observation; }
+    uint8_t get_remote_mode_capabilities(); // read-only, main task; never authorizes a slot write
     uint32_t get_evse_version();
 
 #if MODULE_AUTOMATION_AVAILABLE()
@@ -206,6 +211,7 @@ public:
     bool shutdown_logged = false;
 
 private:
+    ManagerModeObservation manager_mode_observation;
     ConfigRoot low_level_state;
     ConfigRoot management_enabled;
     ConfigRoot management_enabled_update;

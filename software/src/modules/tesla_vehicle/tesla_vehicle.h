@@ -34,6 +34,15 @@
 #include "bluetooth_config_store.h"
 #include "bluetooth_master_bench.h"
 #include "bluetooth_lifecycle.h"
+#if TESLA_BLE_USE_NIMBLE
+#include "remote_setup.h"
+#include "remote_binding_backend.h"
+#include "remote_operation_backend.h"
+#include "remote_enrollment_link.h"
+#include "remote_recovery_link.h"
+#include "remote_session_link.h"
+#include "remote_telemetry.h"
+#endif
 
 // Pair-trace interleaving points (1 reader after cause load, 2 writer admitted,
 // 3 writer claimed). Empty in firmware; host tests may pause a task there.
@@ -179,6 +188,46 @@ private:
     // This module remains the SOLE controller/host lifecycle owner. These are
     // separate from the legacy Tesla service config and never grant VIN access.
     ConfigRoot bluetooth_config, bluetooth_update, bluetooth_state;
+#if TESLA_BLE_USE_NIMBLE
+    ConfigRoot remote_config,remote_update,remote_state,remote_candidates,remote_candidate,remote_select;
+    ConfigRoot remote_bindings,remote_binding; // public metadata only; trust requires crypto store
+    RemoteSetup remote_setup;
+    RemoteBindingStore remote_store{{nullptr,RemoteBindingBackend::read,RemoteBindingBackend::write}};
+    RemoteOperationJournal remote_operations{{nullptr,RemoteOperationBackend::read,RemoteOperationBackend::write}};
+    bool remote_operations_ok=false;
+    static bool remote_entropy(void *,uint8_t *,size_t);
+    static bool remote_enrollment_save(void *,const uint8_t *,const uint8_t *,unsigned);
+    RemoteEnrollmentLink remote_enrollment{false,{this,remote_entropy,remote_enrollment_save}};
+    static bool remote_recovery_load(void *,const uint8_t *,uint8_t *,uint8_t *,unsigned *);
+    static bool remote_recovery_save(void *,unsigned);
+    RemoteRecoveryLink remote_recovery{false,{this,remote_entropy,remote_recovery_load,remote_recovery_save}};
+    uint8_t remote_recover_id[32]{};
+    bool remote_recovering=false;
+    static bool remote_session_load(void *,const uint8_t *,uint8_t *,uint8_t *);
+    static bool remote_session_reserve(void *,const uint8_t *,uint64_t *);
+    static bool remote_session_respond(void *,const uint8_t *,uint8_t *);
+    static bool remote_session_snapshot(void *,const uint8_t *,uint8_t *);
+    static bool remote_session_pending(void *);
+    static int remote_session_finish(void *,const uint8_t *,uint8_t *);
+    static void remote_session_abort(void *);
+    static void remote_session_deliver(void *,const uint8_t *){}
+    bool remote_response_waiting=false;
+    uint64_t remote_response_until=0,remote_response_revision=0;
+    RemoteSessionLink remote_session{false,{this,remote_entropy,remote_session_load,remote_session_reserve,remote_session_respond,remote_session_deliver,remote_session_pending,remote_session_finish,remote_session_abort}};
+    RemoteSocObservation remote_soc;
+    bool remote_normal=false;
+    uint64_t remote_next_scan=0,remote_scan_until=0;
+    ConfigRoot remote_recover;
+    ConfigRoot remote_forget;
+    bool remote_bindings_ok=false;
+    void remote_publish_bindings();
+    bool remote_storage_quarantined=false,remote_commit_ok=true;
+    void remote_pre_setup();
+    void remote_load();
+    void remote_register_urls();
+    void remote_loop();
+    bool remote_available() const;
+#endif
     // Path/transaction work buffers live on the caller stack, never in BSS.
     // A failed close's quarantine remains permanent across those transactions.
     bool bluetooth_storage_quarantined = false;

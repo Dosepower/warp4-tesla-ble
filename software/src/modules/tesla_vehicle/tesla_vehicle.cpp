@@ -82,6 +82,7 @@ static std::array<uint8_t, 6> encode_vehicle_mac(uint64_t mac)
     return bytes;
 }
 
+#include "remote_settings.inc"
 #include "tesla_profiles.inc"
 #if TESLA_BLE_MANUAL_VEHICLE_UI
 #include "tesla_auto_poll.inc"
@@ -103,6 +104,9 @@ void TeslaVehicle::pre_setup()
         {"legacy_tesla_enabled", Config::Bool(false)},
     });
     empty_command = Config::Object({});
+#if TESLA_BLE_USE_NIMBLE
+    remote_pre_setup();
+#endif
 #if TESLA_BLE_R13_MASTER_BENCH
     bench_state = Config::Object({{"running", Config::Bool(false)}, {"key_presence", Config::Str("unknown", 0, 16)}});
 #endif
@@ -323,6 +327,9 @@ bool TeslaVehicle::prepare_tesla()
 void TeslaVehicle::setup()
 {
     bool desired = false;
+#if TESLA_BLE_USE_NIMBLE
+    remote_load();
+#endif
     bluetooth_commit_ok = load_bluetooth(desired);
     bluetooth_config.get("enable")->updateBool(desired);
     bluetooth_boot_enabled = bluetooth_supported() && bluetooth_commit_ok && desired;
@@ -413,6 +420,9 @@ void TeslaVehicle::register_bluetooth_urls()
     // Local transaction: addPersistentConfig's void writer cannot confirm commit.
     api.addState("bluetooth/config", &bluetooth_config);
     api.addState("bluetooth/state", &bluetooth_state);
+#if TESLA_BLE_USE_NIMBLE
+    remote_register_urls();
+#endif
 #if WARP_TESLA_MEMORY_PHASES && !defined(TESLA_BLE_MODULE_HOST_TEST)
     server.on_HTTPThread("/bluetooth/memory", HTTP_GET, [](WebServerRequest request) {
         request.beginChunkedResponse_json(200);
@@ -1979,6 +1989,11 @@ void TeslaVehicle::loop()
     return; // No Tesla runtime, EV/session, key/storage or old bench operations.
 #endif
     bluetooth.supervise();
+#if TESLA_BLE_USE_NIMBLE
+    if(bluetooth_restart_pending)remote_setup.cancel();
+    remote_loop();
+    if(bluetooth_restart_pending&&remote_setup.busy())return;
+#endif
 #if TESLA_BLE_MANUAL_VEHICLE_UI
     publish_discovery();
 #endif
@@ -2229,6 +2244,15 @@ void TeslaVehicle::process_module_events()
                     r->configured_ev_index, event.authenticated, event.correlated, event.soc,
                     [](float soc) { ev.set_soc(soc); }, &retry)) {
                 ev.session_updated(EVDataSource::Tesla);
+#if TESLA_BLE_USE_NIMBLE
+                const auto remote_origin=current_ev_identity();
+#ifdef TESLA_BLE_MODULE_HOST_TEST
+                const uint64_t remote_received=(uint64_t)event.received_uptime/1000; // host Uptime stores microseconds, as does production micros_t
+#else
+                const uint64_t remote_received=event.received_uptime.to<millis_t>().as<uint64_t>();
+#endif
+                remote_soc.observe(remote_received,remote_origin.generation,remote_origin.index,remote_origin.mac,event.authenticated,event.correlated,event.soc);
+#endif
                 if (tesla_ble_publication_newer(event.order, r->pairing_order)) {
                     r->pairing_order = event.order;
                     if (!tesla->pairing_policy.key_present()) { tesla->pairing_policy.on_key_loaded(true); }

@@ -120,6 +120,19 @@ export interface discovery {
 }
 
 //APIPath:bluetooth/
+export interface remote_config___bluetooth { enable: boolean; }
+export interface remote_state___bluetooth {
+    phase: 'idle'|'scanning'|'choosing'|'confirm_on_tag'|'consent_untrusted'|'paired_tofu'|'session_complete'|'failed'|'cancelled'|'draining'|'expired';
+    busy: boolean; generation: number; remaining_ms: number; persistence_error: boolean;
+    trusted: boolean; normal: boolean; binding_capacity: number; enrollment_ready: boolean;
+}
+export interface remote_candidates___bluetooth { entries: {index: number; address: string; address_type: number}[]; }
+export interface remote_bindings___bluetooth { entries: {id: string; name: string; phase: 'active'|'prepared'|'commit_pending'}[]; }
+export interface remote_select___bluetooth { generation: number; index: number; }
+export interface remote_forget___bluetooth {id: string; confirmed: boolean;}
+export interface remote_recover___bluetooth {id: string; confirmed: boolean;}
+export interface remote_start___bluetooth {}
+export interface remote_cancel___bluetooth {}
 export interface config___bluetooth { enable: boolean; }
 export interface state___bluetooth {
     supported: boolean;

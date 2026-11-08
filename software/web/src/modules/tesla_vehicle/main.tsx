@@ -11,6 +11,7 @@ import { SubPage } from "../../ts/components/sub_page";
 import { Switch } from "../../ts/components/switch";
 import { registerVehicleExtension } from "../ev/main";
 import { TeslaVehicle } from "./guided_vehicle";
+import { RemoteSettings } from "./remote_settings";
 export { TeslaVehicle };
 
 export function BluetoothPageNavbar() {
@@ -143,6 +144,7 @@ export class BluetoothSettings extends Component<{}, BluetoothViewState> {
                 <Switch checked={state.enable} desc={__("tesla_vehicle.bluetooth.desired")}
                         disabled={!this.available() || state.busy} onClick={this.toggleBluetooth} />
             </FormRow>
+            <RemoteSettings />
             {!s?.supported ? <Alert variant="danger">{__("tesla_vehicle.bluetooth.unsupported")} ({s?.unsupported_reason})</Alert> : undefined}
             {s?.persistence_error ? <Alert variant="danger">{__("tesla_vehicle.bluetooth.save_failed")}</Alert> : undefined}
             {s?.supported && s.phase === 'error' ? <Alert variant="danger">{__("tesla_vehicle.bluetooth.error")}</Alert> : undefined}

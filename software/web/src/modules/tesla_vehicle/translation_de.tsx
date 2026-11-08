@@ -3,6 +3,22 @@ import { h } from "preact";
 let x = {
     "tesla_vehicle": {
         "navbar": {"tesla_vehicle": "Bluetooth"},
+        "remote": {
+            "enable": "WARP Fernbedienung aktivieren",
+            "help": "Zusätzliche Fernbedienung; Ausschalten löscht keine Kopplungen und ändert keinen Lademodus.",
+            "recover": "Kopplung wiederaufnehmen",
+            "recover_confirm": "Nur die gespeicherte Gegenstelle wird authentifiziert. Tag dreimal kurz drücken, auswählen und nach schnellem blauem Blinken erneut kurz bestätigen. Keine Ladeänderung, kein Schlüsselaustausch mit einer neuen Gegenstelle.",
+            "pending": "Kopplung unvollständig – keine Ladeberechtigung. Wiederaufnehmen oder nur den lokalen WARP-Eintrag ausdrücklich entfernen. Das Entfernen setzt den Tag nicht zurück.",
+            "forget": "Fernbedienung entfernen", "forget_confirm": "Nur diese gespeicherte Fernbedienung wirklich entfernen?",
+            "pair": "Fernbedienung koppeln", "window": "Kopplungsfenster", "triple": "Taste am Tag dreimal kurz drücken.",
+            "candidate": "Gefundener Tag", "identify": "Auswählen und blau blinken lassen",
+            "confirm": "Nur am ausgewählten, schnell blau blinkenden Tag einmal kurz bestätigen.",
+            "untrusted": "Tastendruck empfangen. Noch nicht sicher gekoppelt; keine Ladeberechtigung gespeichert.",
+            "paired": "Fernbedienung dauerhaft gekoppelt. Lade- und Statusübertragung sind in diesem Entwicklungsstand noch gesperrt.",
+            "tofu": "Erstkopplung per Blink-/Klick-Bestätigung (TOFU): Ohne Display oder Vergleichscode besteht kein starker Schutz gegen einen aktiven Mittelsmann beim ersten Schlüsselaustausch.",
+            "crypto_pending": "Kopplung derzeit nicht verfügbar. Es werden keine Ladebefehle ausgeführt.",
+            "failed": "Fernbedienungsaktion nicht bestätigt oder abgelaufen. Zustand prüfen und erneut versuchen."
+        },
         "bluetooth": {
             "title": "Bluetooth",
             "activate_title": "Bluetooth aktivieren?",
